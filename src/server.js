@@ -69,6 +69,17 @@ app.get('/api/_debug/admin-info', async (req, res) => {
   }
 });
 
+app.get('/api/_debug/config', async (req, res) => {
+  res.json({
+    hasDb: !!process.env.DATABASE_URL,
+    hasEmail: !!process.env.EMAIL_FROM,
+    hasEmailPwd: !!process.env.EMAIL_APP_PASSWORD,
+    hasJwt: !!process.env.JWT_SECRET,
+    smtpDebug: process.env.SMTP_DEBUG || '0',
+    nodeEnv: process.env.NODE_ENV || 'sem'
+  });
+});
+
 // Teste dashboard SEM auth (público)
 app.get('/api/_debug/dashboard', async (req, res) => {
   try {
@@ -88,7 +99,7 @@ app.get('/api/_debug/dashboard', async (req, res) => {
 app.get('/api/_debug/ultimo-codigo/:email', async (req, res) => {
   try {
     const { rows } = await pool.query(
-      `SELECT codigo, criado_em, expira_em, usado FROM codigos_verificacao
+      `SELECT codigo, expira_em, usado FROM codigos_verificacao
        WHERE email = $1 ORDER BY id DESC LIMIT 1`,
       [req.params.email.toLowerCase()]
     );
