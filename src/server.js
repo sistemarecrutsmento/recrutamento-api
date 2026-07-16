@@ -305,30 +305,18 @@ app.post('/api/admin/login', async (req, res) => {
 // USARÁ O E-MAIL DO ADMIN COMO LOGIN (fabio08dejesusjunior@gmail.com)
 
 app.get('/api/admin/dashboard', authAdmin, async (req, res) => {
-  const stats = await pool.query(`
-    SELECT
-      (SELECT COUNT(*) FROM vagas WHERE status = 'publicada') as vagas_ativas,
-      (SELECT COUNT(*) FROM candidatos) as total_candidatos,
-      (SELECT COUNT(*) FROM candidaturas WHERE status NOT IN ('reprovado','contratado')) as processos_ativos,
-      (SELECT COUNT(*) FROM candidaturas WHERE criado_em > NOW() - INTERVAL '7 days') as novos_7d
-  `);
-  const processos = await pool.query(`
-    SELECT c.*, v.titulo, v.empresa, cd.nome as candidato_nome
-    FROM candidaturas c
-    JOIN vagas v ON v.id = c.vaga_id
-    JOIN candidatos cd ON cd.id = c.candidato_id
-    WHERE c.status NOT IN ('reprovado','contratado')
-    ORDER BY c.criada_em DESC LIMIT 20
-  `);
-  const ranking = await pool.query(`
-    SELECT v.titulo, v.empresa, COUNT(c.id) as total
-    FROM vagas v
-    LEFT JOIN candidaturas c ON c.vaga_id = v.id
-    WHERE v.status = 'publicada'
-    GROUP BY v.id
-    ORDER BY total DESC LIMIT 5
-  `);
-  res.json({ stats: stats.rows[0], processos: processos.rows, ranking: ranking.rows });
+  try {
+    const stats = await pool.query(`
+      SELECT
+        (SELECT COUNT(*) FROM vagas WHERE status = 'publicada') as vagas_ativas,
+        (SELECT COUNT(*) FROM candidatos) as total_candidatos,
+        (SELECT COUNT(*) FROM candidaturas WHERE status NOT IN ('reprovado','contratado')) as processos_ativos,
+        (SELECT COUNT(*) FROM candidaturas WHERE criado_em > NOW() - INTERVAL '7 days') as novos_7d
+    `);
+    res.json({ stats: stats.rows[0], processos: [], ranking: [] });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
 });
 
 app.post('/api/admin/vagas', authAdmin, async (req, res) => {
