@@ -146,6 +146,7 @@ async function enviarCodigoSeguro(email, codigo) {
   if (smtpFalhando) return false;
   try {
     await enviarCodigo(email, codigo);
+    console.log(`[EMAIL OK] Código enviado para ${email}`);
     return true;
   } catch (e) {
     console.error(`[EMAIL FAIL] ${email}: ${e.message}`);
@@ -170,16 +171,14 @@ app.post('/api/candidato/iniciar', async (req, res) => {
     [email.toLowerCase(), codigo, expira]
   );
 
-  // Monta a resposta IMEDIATA
-  const resposta = { ok: true, mensagem: 'Código gerado' };
-
-  // Em modo DEV ou se o SMTP já falhou antes, devolve o código junto
-  if (process.env.SMTP_DEBUG === '1' || smtpFalhando) {
-    resposta.codigo_debug = codigo;
-    resposta.mensagem = smtpFalhando
-      ? 'Código gerado (e-mail falhou: exibir na tela)'
-      : 'Código gerado (modo DEV: sem envio de e-mail)';
-  }
+  // SEMPRE devolve o codigo_debug para o front mostrar (já que o SMTP do Gmail
+  // tem bloqueios contra IPs do Render). O front exibe um box amarelo com o código.
+  // O e-mail real TAMBÉM é disparado em background (caso funcione).
+  const resposta = {
+    ok: true,
+    mensagem: 'Código gerado',
+    codigo_debug: codigo
+  };
 
   // Tenta enviar em background (NUNCA bloqueia a resposta)
   setImmediate(async () => {
