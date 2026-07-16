@@ -88,9 +88,11 @@ app.get('/api/_debug/dashboard', async (req, res) => {
 // Migração manual via API (cria coluna criado_em em todas as tabelas)
 app.post('/api/_debug/migrar', async (req, res) => {
   try {
-    // Listar todas as colunas de candidaturas pra diagnóstico
-    const cols = await pool.query(`SELECT column_name, data_type FROM information_schema.columns WHERE table_name='candidaturas' ORDER BY ordinal_position`);
-    res.json({ ok: true, colunas_candidaturas: cols.rows });
+    // Query direta pra testar
+    const t1 = await pool.query(`SELECT count(*) FROM candidaturas`);
+    const t2 = await pool.query(`SELECT count(*) FROM candidaturas WHERE criado_em > NOW() - INTERVAL '7 days'`);
+    const t3 = await pool.query(`SELECT criado_em FROM candidaturas LIMIT 1`);
+    res.json({ ok: true, total: t1.rows, ult7d: t2.rows, amostra: t3.rows });
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
