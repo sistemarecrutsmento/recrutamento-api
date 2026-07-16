@@ -28,6 +28,18 @@ app.use((err, req, res, next) => {
 // ============= SAÚDE =============
 app.get('/api/saude', (req, res) => res.json({ ok: true, sistema: process.env.SISTEMA_NOME, hora: new Date().toISOString() }));
 
+// Debug: testa bcrypt isolado
+app.get('/api/_debug/bcrypt', async (req, res) => {
+  try {
+    const hash = await bcrypt.hash('089339', 10);
+    const ok = await bcrypt.compare('089339', hash);
+    const ok2 = await bcrypt.compare('errado', hash);
+    res.json({ ok, ok2, hashInicio: hash.substring(0, 7), node: process.version });
+  } catch (e) {
+    res.status(500).json({ erro: e.message, stack: e.stack?.substring(0, 500) });
+  }
+});
+
 // ============= CEP (ViaCEP) =============
 app.get('/api/cep/:cep', async (req, res) => {
   const cep = req.params.cep.replace(/\D/g, '');
