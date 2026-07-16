@@ -69,6 +69,22 @@ app.get('/api/_debug/admin-info', async (req, res) => {
   }
 });
 
+// Teste dashboard SEM auth (público)
+app.get('/api/_debug/dashboard', async (req, res) => {
+  try {
+    const stats = await pool.query(`
+      SELECT
+        (SELECT COUNT(*) FROM vagas WHERE status = 'publicada') as vagas_ativas,
+        (SELECT COUNT(*) FROM candidatos) as total_candidatos,
+        (SELECT COUNT(*) FROM candidaturas WHERE status = 'em_analise') as candidaturas_pendentes,
+        (SELECT COUNT(*) FROM vagas) as total_vagas
+    `);
+    res.json({ stats: stats.rows[0] });
+  } catch (e) {
+    res.status(500).json({ erro: e.message, stack: e.stack?.substring(0, 300) });
+  }
+});
+
 // ============= CEP (ViaCEP) =============
 app.get('/api/cep/:cep', async (req, res) => {
   const cep = req.params.cep.replace(/\D/g, '');
@@ -422,6 +438,13 @@ app.get('/api/admin/recrutadores', authAdmin, async (req, res) => {
 });
 
 // ============= INIT =============
+process.on('uncaughtException', (e) => {
+  console.error('[UNCAUGHT EXCEPTION]', e);
+});
+process.on('unhandledRejection', (e) => {
+  console.error('[UNHANDLED REJECTION]', e);
+});
+
 (async () => {
   try {
     await init();
