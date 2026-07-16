@@ -88,11 +88,11 @@ app.get('/api/_debug/dashboard', async (req, res) => {
 // Migração manual via API (cria coluna criado_em em todas as tabelas)
 app.post('/api/_debug/migrar', async (req, res) => {
   try {
-    const r1 = await pool.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS criada_em TIMESTAMP DEFAULT NOW()`);
-    const c1 = await pool.query(`SELECT column_name FROM information_schema.columns WHERE table_name='candidaturas' AND column_name='criado_em'`);
-    res.json({ ok: true, r1_rowCount: r1.rowCount, candidaturas_col: c1.rowCount });
+    // Listar todas as colunas de candidaturas pra diagnóstico
+    const cols = await pool.query(`SELECT column_name, data_type FROM information_schema.columns WHERE table_name='candidaturas' ORDER BY ordinal_position`);
+    res.json({ ok: true, colunas_candidaturas: cols.rows });
   } catch (e) {
-    res.status(500).json({ erro: e.message, detail: e.detail, hint: e.hint });
+    res.status(500).json({ erro: e.message });
   }
 });
 
