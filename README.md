@@ -42,3 +42,4 @@ API em Node.js + Express + PostgreSQL.
 ### Util
 - `GET /api/saude` — health check
 - `GET /api/cep/:cep` — busca CEP (ViaCEP)
+ 
