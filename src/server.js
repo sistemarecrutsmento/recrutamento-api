@@ -205,20 +205,33 @@ app.get('/api/vagas/:id', async (req, res) => {
 
 // ============= ADMIN/RECRUTADOR =============
 app.post('/api/admin/login', async (req, res) => {
-  const { email, senha } = req.body;
-  const { rows } = await pool.query(
-    'SELECT * FROM admins WHERE email = $1 UNION SELECT * FROM recrutadores WHERE email = $1 AND ativo = true',
-    [email.toLowerCase()]
-  );
-  if (rows.length === 0) return res.status(401).json({ erro: 'Credenciais inválidas' });
-  const ok = await bcrypt.compare(senha, rows[0].senha_hash);
-  if (!ok) return res.status(401).json({ erro: 'Credenciais inválidas' });
+  try {
+    console.log('[LOGIN] body recebido:', JSON.stringify(req.body));
+    const { email, senha } = req.body;
+    if (!email || !senha) {
+      console.log('[LOGIN] campos faltando');
+      return res.status(400).json({ erro: 'Email e senha são obrigatórios' });
+    }
+    const { rows } = await pool.query(
+      'SELECT id, nome, email, senha_hash, role FROM admins WHERE email = $1 UNION SELECT id, nome, email, senha_hash, role FROM recrutadores WHERE email = $1 AND ativo = true',
+      [email.toLowerCase()]
+    );
+    console.log('[LOGIN] rows encontrados:', rows.length);
+    if (rows.length === 0) return res.status(401).json({ erro: 'Credenciais inválidas' });
+    console.log('[LOGIN] hash começa com:', rows[0].senha_hash?.substring(0, 7));
+    const ok = await bcrypt.compare(senha, rows[0].senha_hash);
+    console.log('[LOGIN] compare result:', ok);
+    if (!ok) return res.status(401).json({ erro: 'Credenciais inválidas' });
 
-  const token = jwt.sign(
-    { id: rows[0].id, email: rows[0].email, nome: rows[0].nome, tipo: 'admin' },
-    process.env.JWT_SECRET, { expiresIn: '7d' }
-  );
-  res.json({ ok: true, token, usuario: { id: rows[0].id, nome: rows[0].nome, email: rows[0].email, role: rows[0].role || 'recrutador' } });
+    const token = jwt.sign(
+      { id: rows[0].id, email: rows[0].email, nome: rows[0].nome, tipo: 'admin' },
+      process.env.JWT_SECRET, { expiresIn: '7d' }
+    );
+    res.json({ ok: true, token, usuario: { id: rows[0].id, nome: rows[0].nome, email: rows[0].email, role: rows[0].role || 'recrutador' } });
+  } catch (e) {
+    console.error('[LOGIN ERRO]', e);
+    res.status(500).json({ erro: e.message });
+  }
 });
 
 // USARÁ O E-MAIL DO ADMIN COMO LOGIN (fabio08dejesusjunior@gmail.com)
