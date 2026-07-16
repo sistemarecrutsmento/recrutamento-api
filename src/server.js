@@ -253,10 +253,21 @@ app.post('/api/admin/login', async (req, res) => {
       console.log('[LOGIN] campos faltando');
       return res.status(400).json({ erro: 'Email e senha são obrigatórios' });
     }
-    const { rows } = await pool.query(
-      'SELECT id, nome, email, senha_hash, role FROM admins WHERE email = $1 UNION SELECT id, nome, email, senha_hash, role FROM recrutadores WHERE email = $1 AND ativo = true',
-      [email.toLowerCase()]
-    );
+    // tolerar tabela sem coluna 'role' (caso o init() tenha rodado antes dela existir)
+    let rows;
+    try {
+      const r = await pool.query(
+        'SELECT id, nome, email, senha_hash, role FROM admins WHERE email = $1',
+        [email.toLowerCase()]
+      );
+      rows = r.rows;
+    } catch (e1) {
+      const r = await pool.query(
+        'SELECT id, nome, email, senha_hash FROM admins WHERE email = $1',
+        [email.toLowerCase()]
+      );
+      rows = r.rows.map(x => ({ ...x, role: 'admin' }));
+    }
     console.log('[LOGIN] rows encontrados:', rows.length);
     if (rows.length === 0) return res.status(401).json({ erro: 'Credenciais inválidas' });
     console.log('[LOGIN] hash começa com:', rows[0].senha_hash?.substring(0, 7));
@@ -268,7 +279,7 @@ app.post('/api/admin/login', async (req, res) => {
       { id: rows[0].id, email: rows[0].email, nome: rows[0].nome, tipo: 'admin' },
       process.env.JWT_SECRET, { expiresIn: '7d' }
     );
-    res.json({ ok: true, token, usuario: { id: rows[0].id, nome: rows[0].nome, email: rows[0].email, role: rows[0].role || 'recrutador' } });
+    res.json({ ok: true, token, usuario: { id: rows[0].id, nome: rows[0].nome, email: rows[0].email, role: rows[0].role || 'admin' } });
   } catch (e) {
     console.error('[LOGIN ERRO]', e);
     res.status(500).json({ erro: e.message });
