@@ -1,17 +1,29 @@
 const nodemailer = require('nodemailer');
 
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.EMAIL_FROM,
-    pass: process.env.EMAIL_APP_PASSWORD
-  }
-});
+let transporter = null;
+function getTransporter() {
+  if (transporter) return transporter;
+  if (!process.env.EMAIL_FROM || !process.env.EMAIL_APP_PASSWORD) return null;
+  transporter = nodemailer.createTransport({
+    service: 'gmail',
+    auth: {
+      user: process.env.EMAIL_FROM,
+      pass: process.env.EMAIL_APP_PASSWORD
+    },
+    // Timeout agressivo: não deixa o SMTP pendurar
+    connectionTimeout: 8000,
+    socketTimeout: 8000,
+    greetingTimeout: 5000
+  });
+  return transporter;
+}
 
 const SISTEMA = process.env.SISTEMA_NOME || 'Recrutamento e Seleção';
 
 async function enviarCodigo(email, codigo) {
-  return transporter.sendMail({
+  const t = getTransporter();
+  if (!t) throw new Error('SMTP não configurado');
+  return t.sendMail({
     from: `"${SISTEMA}" <${process.env.EMAIL_FROM}>`,
     to: email,
     subject: `Seu código de verificação - ${SISTEMA}`,
@@ -34,6 +46,8 @@ async function enviarCodigo(email, codigo) {
 }
 
 async function enviarNotificacaoStatus(email, nome, vaga, novoStatus) {
+  const t = getTransporter();
+  if (!t) throw new Error('SMTP não configurado');
   const statusTexto = {
     'em_analise': 'em análise',
     'entrevista': 'avançou para etapa de entrevista',
@@ -42,7 +56,7 @@ async function enviarNotificacaoStatus(email, nome, vaga, novoStatus) {
     'contratado': 'foi contratado(a) 🎉'
   }[novoStatus] || novoStatus;
 
-  return transporter.sendMail({
+  return t.sendMail({
     from: `"${SISTEMA}" <${process.env.EMAIL_FROM}>`,
     to: email,
     subject: `Atualização do seu processo - ${vaga}`,
