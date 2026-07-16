@@ -37,6 +37,7 @@ async function init() {
         celular TEXT,
         email TEXT UNIQUE NOT NULL,
         email_verificado BOOLEAN DEFAULT false,
+        senha_hash TEXT,
         acessibilidade TEXT,
         cep TEXT,
         estado TEXT,
@@ -120,6 +121,8 @@ async function init() {
     await client.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS criada_em TIMESTAMP DEFAULT NOW();`);
     await client.query(`ALTER TABLE candidatos ADD COLUMN IF NOT EXISTS criado_em TIMESTAMP DEFAULT NOW();`);
     await client.query(`ALTER TABLE admins ADD COLUMN IF NOT EXISTS criado_em TIMESTAMP DEFAULT NOW();`);
+    await client.query(`ALTER TABLE candidatos ADD COLUMN IF NOT EXISTS senha_hash TEXT;`);
+    await client.query(`ALTER TABLE candidatos ADD COLUMN IF NOT EXISTS email_verificado BOOLEAN DEFAULT false;`);
 
     console.log('Tabelas criadas/verificadas + colunas garantidas');
   } finally {
