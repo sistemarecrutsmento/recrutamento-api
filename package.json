@@ -4,7 +4,6 @@
   "description": "API do Recrutamento e Seleção",
   "main": "src/server.js",
   "scripts": {
-    "preinstall": "rm -rf node_modules && rm -f package-lock.json yarn.lock",
     "start": "node src/server.js",
     "dev": "nodemon src/server.js"
   },
