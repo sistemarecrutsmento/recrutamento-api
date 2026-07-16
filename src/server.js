@@ -40,6 +40,35 @@ app.get('/api/_debug/bcrypt', async (req, res) => {
   }
 });
 
+// Resetar senha do admin (não usa bcrypt no compare, só cria novo hash)
+app.post('/api/_debug/reset-admin', async (req, res) => {
+  try {
+    const email = (req.body.email || process.env.EMAIL_FROM || '').toLowerCase();
+    const senha = req.body.senha || process.env.ADMIN_SENHA || '089339';
+    if (!email) return res.status(400).json({ erro: 'email obrigatório' });
+    const hash = await bcrypt.hash(senha, 10);
+    const { rows } = await pool.query(
+      `UPDATE admins SET senha_hash = $1 WHERE email = $2 RETURNING id, email`,
+      [hash, email]
+    );
+    res.json({ ok: true, atualizado: rows.length, hashInicio: hash.substring(0, 7) });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+// Ver estado do admin
+app.get('/api/_debug/admin-info', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, nome, email, substring(senha_hash, 1, 10) as hash_inicio, length(senha_hash) as hash_len FROM admins`
+    );
+    res.json({ admins: rows });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
 // ============= CEP (ViaCEP) =============
 app.get('/api/cep/:cep', async (req, res) => {
   const cep = req.params.cep.replace(/\D/g, '');
@@ -385,24 +414,7 @@ app.get('/api/admin/recrutadores', authAdmin, async (req, res) => {
 (async () => {
   try {
     await init();
-
-    // cria admin padrão se não existir
-    const emailAdmin = process.env.EMAIL_FROM || process.env.ADMIN_EMAIL;
-    if (emailAdmin) {
-      const { rows } = await pool.query('SELECT id FROM admins WHERE email = $1', [emailAdmin]);
-      if (rows.length === 0) {
-        const hash = await bcrypt.hash(process.env.ADMIN_SENHA || '089339', 10);
-        await pool.query(
-          'INSERT INTO admins (nome, email, senha_hash, role) VALUES ($1,$2,$3,$4)',
-          ['Fabio Junior', emailAdmin, hash, 'superadmin']
-        );
-        console.log('Admin criado:', emailAdmin);
-      } else {
-        console.log('Admin já existe:', emailAdmin);
-      }
-    } else {
-      console.warn('AVISO: EMAIL_FROM não definido. Crie o admin manualmente pelo endpoint /api/admin/criar-inicial.');
-    }
+    console.log('Banco inicializado com sucesso');
 
     const port = process.env.PORT || 10000;
     app.listen(port, () => console.log(`API rodando na porta ${port}`));
