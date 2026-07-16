@@ -123,18 +123,34 @@ app.post('/api/candidato/iniciar', async (req, res) => {
   const codigo = String(Math.floor(100000 + Math.random() * 900000));
   const expira = new Date(Date.now() + 10 * 60 * 1000);
 
+  // Apaga códigos antigos não usados para esse e-mail
+  await pool.query('DELETE FROM codigos_verificacao WHERE email = $1 AND usado = false', [email.toLowerCase()]);
+
   await pool.query(
     'INSERT INTO codigos_verificacao (email, codigo, expira_em) VALUES ($1, $2, $3)',
     [email.toLowerCase(), codigo, expira]
   );
 
-  try {
-    await enviarCodigo(email, codigo);
-    res.json({ ok: true, mensagem: 'Código enviado para o e-mail' });
-  } catch (e) {
-    console.error('Erro ao enviar e-mail:', e.message);
-    res.status(500).json({ erro: 'Falha ao enviar e-mail. Verifique as credenciais.' });
+  // Monta a resposta IMEDIATA para o usuário não ficar esperando o SMTP
+  const resposta = { ok: true, mensagem: 'Código gerado' };
+
+  // Em modo DEV (sem SMTP configurado ou SMTP_DEBUG=1), devolve o código junto
+  if (process.env.SMTP_DEBUG === '1' || !process.env.EMAIL_FROM || !process.env.EMAIL_APP_PASSWORD) {
+    resposta.codigo_debug = codigo;
+    resposta.mensagem = 'Código gerado (modo DEV: sem envio de e-mail)';
   }
+
+  // Envia o e-mail em background (não bloqueia a resposta)
+  setImmediate(async () => {
+    try {
+      await enviarCodigo(email, codigo);
+      console.log(`[EMAIL OK] Código enviado para ${email}`);
+    } catch (e) {
+      console.error(`[EMAIL FAIL] ${email}: ${e.message}`);
+    }
+  });
+
+  res.json(resposta);
 });
 
 app.post('/api/candidato/verificar', async (req, res) => {
