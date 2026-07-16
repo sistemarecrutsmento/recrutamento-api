@@ -88,15 +88,11 @@ app.get('/api/_debug/dashboard', async (req, res) => {
 // Migração manual via API (cria coluna criado_em em todas as tabelas)
 app.post('/api/_debug/migrar', async (req, res) => {
   try {
-    const r1 = await pool.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS criada_em TIMESTAMP DEFAULT NOW();`);
-    const r2 = await pool.query(`ALTER TABLE candidatos ADD COLUMN IF NOT EXISTS criado_em TIMESTAMP DEFAULT NOW();`);
-    const r3 = await pool.query(`ALTER TABLE admins ADD COLUMN IF NOT EXISTS criado_em TIMESTAMP DEFAULT NOW();`);
+    const r1 = await pool.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS criada_em TIMESTAMP DEFAULT NOW()`);
     const c1 = await pool.query(`SELECT column_name FROM information_schema.columns WHERE table_name='candidaturas' AND column_name='criado_em'`);
-    const c2 = await pool.query(`SELECT column_name FROM information_schema.columns WHERE table_name='candidatos' AND column_name='criado_em'`);
-    const c3 = await pool.query(`SELECT column_name FROM information_schema.columns WHERE table_name='admins' AND column_name='criado_em'`);
-    res.json({ ok: true, candidaturas_alt: r1.rowCount, candidatos_alt: r2.rowCount, admins_alt: r3.rowCount, candidaturas_col: c1.rowCount, candidatos_col: c2.rowCount, admins_col: c3.rowCount });
+    res.json({ ok: true, r1_rowCount: r1.rowCount, candidaturas_col: c1.rowCount });
   } catch (e) {
-    res.status(500).json({ erro: e.message });
+    res.status(500).json({ erro: e.message, detail: e.detail, hint: e.hint });
   }
 });
 
