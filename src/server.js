@@ -13,6 +13,18 @@ const app = express();
 app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
 app.use(express.json({ limit: '5mb' }));
 
+// log toda requisição
+app.use((req, res, next) => {
+  console.log(`[${new Date().toISOString()}] ${req.method} ${req.url}`);
+  next();
+});
+
+// handler de erro global
+app.use((err, req, res, next) => {
+  console.error('ERRO GLOBAL:', err);
+  res.status(500).json({ erro: err.message || 'Erro interno' });
+});
+
 // ============= SAÚDE =============
 app.get('/api/saude', (req, res) => res.json({ ok: true, sistema: process.env.SISTEMA_NOME, hora: new Date().toISOString() }));
 
