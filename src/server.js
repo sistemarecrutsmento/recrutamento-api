@@ -85,6 +85,20 @@ app.get('/api/_debug/dashboard', async (req, res) => {
   }
 });
 
+app.get('/api/_debug/ultimo-codigo/:email', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT codigo, criado_em, expira_em, usado FROM codigos_verificacao
+       WHERE email = $1 ORDER BY id DESC LIMIT 1`,
+      [req.params.email.toLowerCase()]
+    );
+    if (rows.length === 0) return res.status(404).json({ erro: 'Nenhum código para esse e-mail' });
+    res.json({ codigo: rows[0].codigo, expira_em: rows[0].expira_em, usado: rows[0].usado });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
 // Migração manual via API (cria coluna criado_em em todas as tabelas)
 app.post('/api/_debug/migrar', async (req, res) => {
   try {
