@@ -328,7 +328,7 @@ app.get('/api/admin/dashboard', authAdmin, async (req, res) => {
         (SELECT COUNT(*) FROM vagas WHERE status = 'publicada') as vagas_ativas,
         (SELECT COUNT(*) FROM candidatos) as total_candidatos,
         (SELECT COUNT(*) FROM candidaturas WHERE status NOT IN ('reprovado','contratado')) as processos_ativos,
-        (SELECT COUNT(*) FROM candidaturas WHERE criado_em > NOW() - INTERVAL '7 days') as novos_7d
+        (SELECT COUNT(*) FROM candidaturas WHERE criada_em > NOW() - INTERVAL '7 days') as novos_7d
     `);
     const processos = await pool.query(`
       SELECT c.*, v.titulo, v.empresa, cd.nome as candidato_nome
