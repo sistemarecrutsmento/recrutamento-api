@@ -376,6 +376,42 @@ app.get('/api/admin/vagas', authAdmin, async (req, res) => {
   res.json({ vagas: rows });
 });
 
+app.put('/api/admin/vagas/:id', authAdmin, async (req, res) => {
+  const v = req.body;
+  const { rows } = await pool.query(
+    `UPDATE vagas SET
+      titulo = COALESCE($1, titulo),
+      empresa = COALESCE($2, empresa),
+      cidade = COALESCE($3, cidade),
+      estado = COALESCE($4, estado),
+      tipo_contrato = COALESCE($5, tipo_contrato),
+      nivel = COALESCE($6, nivel),
+      area = COALESCE($7, area),
+      salario_min = COALESCE($8, salario_min),
+      salario_max = COALESCE($9, salario_max),
+      descricao = COALESCE($10, descricao),
+      requisitos = COALESCE($11, requisitos),
+      beneficios = COALESCE($12, beneficios),
+      status = COALESCE($13, status)
+     WHERE id = $14 RETURNING *`,
+    [v.titulo, v.empresa, v.cidade, v.estado, v.tipo_contrato, v.nivel, v.area,
+     v.salario_min, v.salario_max, v.descricao, v.requisitos, v.beneficios, v.status, req.params.id]
+  );
+  if (rows.length === 0) return res.status(404).json({ erro: 'Vaga não encontrada' });
+  res.json({ ok: true, vaga: rows[0] });
+});
+
+app.delete('/api/admin/vagas/:id', authAdmin, async (req, res) => {
+  await pool.query('DELETE FROM vagas WHERE id = $1', [req.params.id]);
+  res.json({ ok: true });
+});
+
+app.get('/api/admin/vagas/:id', authAdmin, async (req, res) => {
+  const { rows } = await pool.query('SELECT * FROM vagas WHERE id = $1', [req.params.id]);
+  if (rows.length === 0) return res.status(404).json({ erro: 'Vaga não encontrada' });
+  res.json({ vaga: rows[0] });
+});
+
 app.get('/api/admin/candidatos', authAdmin, async (req, res) => {
   const { rows } = await pool.query('SELECT id, nome, email, cpf, cidade, estado, criado_em FROM candidatos ORDER BY criado_em DESC');
   res.json({ candidatos: rows });
@@ -479,3 +515,4 @@ process.on('unhandledRejection', (e) => {
     process.exit(1);
   }
 })();
+
