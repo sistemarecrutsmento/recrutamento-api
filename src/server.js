@@ -140,6 +140,20 @@ app.get('/api/cep/:cep', async (req, res) => {
   }
 });
 
+// Cache de falhas de SMTP: se Gmail falhou, devolvemos codigo_debug
+let smtpFalhando = false;
+async function enviarCodigoSeguro(email, codigo) {
+  if (smtpFalhando) return false;
+  try {
+    await enviarCodigo(email, codigo);
+    return true;
+  } catch (e) {
+    console.error(`[EMAIL FAIL] ${email}: ${e.message}`);
+    smtpFalhando = true;
+    return false;
+  }
+}
+
 // ============= CANDIDATO - CADASTRO =============
 app.post('/api/candidato/iniciar', async (req, res) => {
   const { email } = req.body;
@@ -156,23 +170,20 @@ app.post('/api/candidato/iniciar', async (req, res) => {
     [email.toLowerCase(), codigo, expira]
   );
 
-  // Monta a resposta IMEDIATA para o usuário não ficar esperando o SMTP
+  // Monta a resposta IMEDIATA
   const resposta = { ok: true, mensagem: 'Código gerado' };
 
-  // Em modo DEV (sem SMTP configurado ou SMTP_DEBUG=1), devolve o código junto
-  if (process.env.SMTP_DEBUG === '1' || !process.env.EMAIL_FROM || !process.env.EMAIL_APP_PASSWORD) {
+  // Em modo DEV ou se o SMTP já falhou antes, devolve o código junto
+  if (process.env.SMTP_DEBUG === '1' || smtpFalhando) {
     resposta.codigo_debug = codigo;
-    resposta.mensagem = 'Código gerado (modo DEV: sem envio de e-mail)';
+    resposta.mensagem = smtpFalhando
+      ? 'Código gerado (e-mail falhou: exibir na tela)'
+      : 'Código gerado (modo DEV: sem envio de e-mail)';
   }
 
-  // Envia o e-mail em background (não bloqueia a resposta)
+  // Tenta enviar em background (NUNCA bloqueia a resposta)
   setImmediate(async () => {
-    try {
-      await enviarCodigo(email, codigo);
-      console.log(`[EMAIL OK] Código enviado para ${email}`);
-    } catch (e) {
-      console.error(`[EMAIL FAIL] ${email}: ${e.message}`);
-    }
+    await enviarCodigoSeguro(email, codigo);
   });
 
   res.json(resposta);
