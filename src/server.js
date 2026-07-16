@@ -342,6 +342,68 @@ app.get('/api/candidato/perfil', authCandidato, async (req, res) => {
   res.json({ candidato: c[0], experiencias: ex });
 });
 
+app.put('/api/candidato/perfil', authCandidato, async (req, res) => {
+  const d = req.body;
+  try {
+    const { rows } = await pool.query(
+      `UPDATE candidatos SET
+        nome = COALESCE($1, nome),
+        cpf = COALESCE($2, cpf),
+        data_nascimento = COALESCE($3, data_nascimento),
+        sexo = COALESCE($4, sexo),
+        celular = COALESCE($5, celular),
+        cep = COALESCE($6, cep),
+        estado = COALESCE($7, estado),
+        cidade = COALESCE($8, cidade),
+        bairro = COALESCE($9, bairro),
+        logradouro = COALESCE($10, logradouro),
+        numero = COALESCE($11, numero),
+        complemento = COALESCE($12, complemento),
+        formacao = COALESCE($13, formacao),
+        instituicao = COALESCE($14, instituicao),
+        curso = COALESCE($15, curso),
+        situacao = COALESCE($16, situacao),
+        data_conclusao = COALESCE($17, data_conclusao),
+        acessibilidade = COALESCE($18, acessibilidade)
+       WHERE email = $19 RETURNING *`,
+      [
+        d.nome, d.cpf, d.data_nascimento, d.sexo, d.celular,
+        d.cep, d.estado, d.cidade, d.bairro, d.logradouro, d.numero, d.complemento,
+        d.formacao, d.instituicao, d.curso, d.situacao, d.data_conclusao,
+        d.acessibilidade,
+        req.user.email
+      ]
+    );
+    res.json({ ok: true, candidato: rows[0] });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao atualizar perfil' });
+  }
+});
+
+app.post('/api/candidato/trocar-senha', authCandidato, async (req, res) => {
+  const { senha_atual, senha_nova } = req.body;
+  if (!senha_atual || !senha_nova) {
+    return res.status(400).json({ erro: 'Informe a senha atual e a nova senha' });
+  }
+  if (senha_nova.length < 6) {
+    return res.status(400).json({ erro: 'A nova senha deve ter no mínimo 6 caracteres' });
+  }
+  try {
+    const { rows } = await pool.query('SELECT id, senha_hash FROM candidatos WHERE email = $1', [req.user.email]);
+    if (rows.length === 0) return res.status(404).json({ erro: 'Conta não encontrada' });
+    if (!rows[0].senha_hash) return res.status(400).json({ erro: 'Conta sem senha definida (legado)' });
+    const ok = await bcrypt.compare(senha_atual, rows[0].senha_hash);
+    if (!ok) return res.status(401).json({ erro: 'Senha atual incorreta' });
+    const novoHash = await bcrypt.hash(senha_nova, 10);
+    await pool.query('UPDATE candidatos SET senha_hash = $1 WHERE id = $2', [novoHash, rows[0].id]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao trocar senha' });
+  }
+});
+
 app.get('/api/candidato/candidaturas', authCandidato, async (req, res) => {
   const { rows: c } = await pool.query('SELECT id FROM candidatos WHERE email = $1', [req.user.email]);
   if (c.length === 0) return res.json({ candidaturas: [] });
