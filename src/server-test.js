@@ -40,12 +40,7 @@ app.post('/api/admin/login', async (req, res) => {
 });
 
 (async () => {
-  try {
-    await init();
-    console.log('DB OK');
-    app.listen(process.env.PORT || 10000, () => console.log('UP'));
-  } catch (e) {
-    console.error('BOOT ERRO:', e);
-    process.exit(1);
-  }
+  // SEM init() - só subir o servidor
+  console.log('Subindo sem init()');
+  app.listen(process.env.PORT || 10000, () => console.log('UP'));
 })();
