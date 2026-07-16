@@ -115,7 +115,13 @@ async function init() {
         criado_em TIMESTAMP DEFAULT NOW()
       );
     `);
-    console.log('Tabelas criadas/verificadas');
+
+    // Garantir colunas em tabelas já criadas (idempotente)
+    await client.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS criada_em TIMESTAMP DEFAULT NOW();`);
+    await client.query(`ALTER TABLE candidatos ADD COLUMN IF NOT EXISTS criado_em TIMESTAMP DEFAULT NOW();`);
+    await client.query(`ALTER TABLE admins ADD COLUMN IF NOT EXISTS criado_em TIMESTAMP DEFAULT NOW();`);
+
+    console.log('Tabelas criadas/verificadas + colunas garantidas');
   } finally {
     client.release();
   }
