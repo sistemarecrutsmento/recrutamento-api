@@ -279,58 +279,99 @@ app.post('/api/candidato/login', async (req, res) => {
 
 app.post('/api/candidato/cadastrar', authCandidato, async (req, res) => {
   const d = req.body;
-  if (!d.nome || !d.cpf) return res.status(400).json({ erro: 'Nome e CPF obrigatórios' });
+  if (!d.nome) return res.status(400).json({ erro: 'Nome obrigatório' });
+
+  const email = (d.email || req.user.email).toLowerCase();
 
   try {
-    const result = await pool.query(
-      `INSERT INTO candidatos (
-        cpf, nome, data_nascimento, sexo, celular, email, email_verificado,
-        acessibilidade, cep, estado, cidade, bairro, logradouro, numero, complemento,
-        formacao, instituicao, curso, situacao, data_conclusao,
-        primeiro_emprego, banco_talentos, recebe_comunicacoes
-      ) VALUES ($1,$2,$3,$4,$5,$6,true,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
-      ON CONFLICT (cpf) DO UPDATE SET
-        nome = EXCLUDED.nome,
-        data_nascimento = EXCLUDED.data_nascimento,
-        sexo = EXCLUDED.sexo,
-        celular = EXCLUDED.celular,
-        email = EXCLUDED.email,
-        acessibilidade = EXCLUDED.acessibilidade,
-        cep = EXCLUDED.cep, estado = EXCLUDED.estado, cidade = EXCLUDED.cidade,
-        bairro = EXCLUDED.bairro, logradouro = EXCLUDED.logradouro, numero = EXCLUDED.numero, complemento = EXCLUDED.complemento,
-        formacao = EXCLUDED.formacao, instituicao = EXCLUDED.instituicao, curso = EXCLUDED.curso,
-        situacao = EXCLUDED.situacao, data_conclusao = EXCLUDED.data_conclusao,
-        primeiro_emprego = EXCLUDED.primeiro_emprego, banco_talentos = EXCLUDED.banco_talentos, recebe_comunicacoes = EXCLUDED.recebe_comunicacoes
-      RETURNING id, nome, email`,
+    // Primeiro: UPDATE o candidato existente (por email) — o "cadastrar" agora é completar perfil
+    const upd = await pool.query(
+      `UPDATE candidatos SET
+        cpf = COALESCE($1, cpf),
+        nome = $2,
+        data_nascimento = $3,
+        sexo = $4,
+        celular = $5,
+        acessibilidade = $6,
+        cep = $7,
+        estado = $8,
+        cidade = $9,
+        bairro = $10,
+        logradouro = $11,
+        numero = $12,
+        complemento = $13,
+        formacao = $14,
+        instituicao = $15,
+        curso = $16,
+        situacao = $17,
+        data_conclusao = $18,
+        primeiro_emprego = $19,
+        banco_talentos = $20,
+        recebe_comunicacoes = $21,
+        email_verificado = true
+      WHERE email = $22
+      RETURNING id, nome, email, cpf`,
       [
-        d.cpf, d.nome, d.data_nascimento || null, d.sexo || null, d.celular || null, d.email.toLowerCase(),
-        d.acessibilidade || null,
+        d.cpf || null, d.nome, d.data_nascimento || null, d.sexo || null, d.celular || null, d.acessibilidade || null,
         d.cep || null, d.estado || null, d.cidade || null, d.bairro || null,
         d.logradouro || null, d.numero || null, d.complemento || null,
         d.formacao || null, d.instituicao || null, d.curso || null,
         d.situacao || null, d.data_conclusao || null,
-        !!d.primeiro_emprego, !!d.banco_talentos, !!d.recebe_comunicacoes
+        !!d.primeiro_emprego, !!d.banco_talentos, !!d.recebe_comunicacoes,
+        email
       ]
     );
 
-    const candidatoId = result.rows[0].id;
+    let candidatoId;
+    let result = upd;
+    if (upd.rowCount === 0) {
+      // Não existe — INSERT
+      try {
+        const ins = await pool.query(
+          `INSERT INTO candidatos (
+            cpf, nome, data_nascimento, sexo, celular, email, email_verificado,
+            acessibilidade, cep, estado, cidade, bairro, logradouro, numero, complemento,
+            formacao, instituicao, curso, situacao, data_conclusao,
+            primeiro_emprego, banco_talentos, recebe_comunicacoes
+          ) VALUES ($1,$2,$3,$4,$5,$6,true,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+          RETURNING id, nome, email, cpf`,
+          [
+            d.cpf || null, d.nome, d.data_nascimento || null, d.sexo || null, d.celular || null, email,
+            d.acessibilidade || null,
+            d.cep || null, d.estado || null, d.cidade || null, d.bairro || null,
+            d.logradouro || null, d.numero || null, d.complemento || null,
+            d.formacao || null, d.instituicao || null, d.curso || null,
+            d.situacao || null, d.data_conclusao || null,
+            !!d.primeiro_emprego, !!d.banco_talentos, !!d.recebe_comunicacoes
+          ]
+        );
+        candidatoId = ins.rows[0].id;
+        result = ins;
+      } catch (e2) {
+        if (e2.code === '23505') return res.status(400).json({ erro: 'CPF já cadastrado em outra conta' });
+        throw e2;
+      }
+    } else {
+      candidatoId = upd.rows[0].id;
+    }
 
     // experiencias - apaga e recria
-    await pool.query('DELETE FROM experiencias WHERE candidato_id = $1', [candidatoId]);
-    if (Array.isArray(d.experiencias)) {
-      for (const exp of d.experiencias) {
-        await pool.query(
-          `INSERT INTO experiencias (candidato_id, cargo, empresa, inicio, fim, emprego_atual, descricao)
-           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-          [candidatoId, exp.cargo, exp.empresa, exp.inicio || null, exp.fim || null, !!exp.emprego_atual, exp.descricao || null]
-        );
+    if (candidatoId) {
+      await pool.query('DELETE FROM experiencias WHERE candidato_id = $1', [candidatoId]);
+      if (Array.isArray(d.experiencias)) {
+        for (const exp of d.experiencias) {
+          await pool.query(
+            `INSERT INTO experiencias (candidato_id, cargo, empresa, inicio, fim, emprego_atual, descricao)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+            [candidatoId, exp.cargo, exp.empresa, exp.inicio || null, exp.fim || null, !!exp.emprego_atual, exp.descricao || null]
+          );
+        }
       }
     }
 
     res.json({ ok: true, candidato: result.rows[0] });
   } catch (e) {
     console.error(e);
-    if (e.code === '23505') return res.status(400).json({ erro: 'CPF já cadastrado' });
     res.status(500).json({ erro: 'Erro ao salvar cadastro' });
   }
 });
