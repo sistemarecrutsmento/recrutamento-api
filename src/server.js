@@ -209,6 +209,74 @@ app.post('/api/candidato/verificar', async (req, res) => {
   res.json({ ok: true, token, email: email.toLowerCase() });
 });
 
+// ============= CANDIDATO - CADASTRO COM SENHA (NOVO) =============
+// Cria conta nova com email+senha (sem código de verificação).
+// Recebe dados básicos; o resto do perfil (endereço, formação, etc.) pode ser completado depois em /api/candidato/cadastrar.
+app.post('/api/candidato/cadastro', async (req, res) => {
+  const { email, senha, nome, cpf, celular, data_nascimento, sexo, cidade, estado, formacao } = req.body;
+  if (!email || !senha || !nome) {
+    return res.status(400).json({ erro: 'E-mail, senha e nome são obrigatórios' });
+  }
+  if (senha.length < 6) {
+    return res.status(400).json({ erro: 'A senha deve ter no mínimo 6 caracteres' });
+  }
+
+  const emailLower = email.toLowerCase();
+
+  // Verifica se já existe candidato com esse e-mail
+  const { rows: existe } = await pool.query('SELECT id, senha_hash FROM candidatos WHERE email = $1', [emailLower]);
+  if (existe.length > 0) {
+    return res.status(400).json({ erro: 'Já existe uma conta com esse e-mail. Faça login.' });
+  }
+
+  try {
+    const senhaHash = await bcrypt.hash(senha, 10);
+    const { rows } = await pool.query(
+      `INSERT INTO candidatos (email, senha_hash, nome, cpf, celular, data_nascimento, sexo, cidade, estado, formacao, email_verificado)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true)
+       RETURNING id, email, nome`,
+      [emailLower, senhaHash, nome, cpf || null, celular || null, data_nascimento || null, sexo || null, cidade || null, estado || null, formacao || null]
+    );
+
+    const token = jwt.sign({ email: emailLower, tipo: 'candidato' }, process.env.JWT_SECRET, { expiresIn: '30d' });
+    res.json({ ok: true, token, candidato: rows[0] });
+  } catch (e) {
+    console.error('[CADASTRO ERRO]', e);
+    if (e.code === '23505') return res.status(400).json({ erro: 'CPF ou e-mail já cadastrado' });
+    res.status(500).json({ erro: 'Erro ao criar conta' });
+  }
+});
+
+// ============= CANDIDATO - LOGIN COM SENHA (NOVO) =============
+app.post('/api/candidato/login', async (req, res) => {
+  const { email, senha } = req.body;
+  if (!email || !senha) return res.status(400).json({ erro: 'E-mail e senha obrigatórios' });
+
+  const emailLower = email.toLowerCase();
+  const { rows } = await pool.query('SELECT * FROM candidatos WHERE email = $1', [emailLower]);
+  if (rows.length === 0) {
+    return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
+  }
+  const cand = rows[0];
+
+  // Se o candidato foi criado pelo fluxo antigo (sem senha), o hash é null
+  if (!cand.senha_hash) {
+    return res.status(401).json({ erro: 'Sua conta foi criada antes do login com senha. Cadastre-se novamente ou use o código de acesso.' });
+  }
+
+  const ok = await bcrypt.compare(senha, cand.senha_hash);
+  if (!ok) {
+    return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
+  }
+
+  const token = jwt.sign({ email: emailLower, tipo: 'candidato' }, process.env.JWT_SECRET, { expiresIn: '30d' });
+  res.json({
+    ok: true,
+    token,
+    candidato: { id: cand.id, email: cand.email, nome: cand.nome }
+  });
+});
+
 app.post('/api/candidato/cadastrar', authCandidato, async (req, res) => {
   const d = req.body;
   if (!d.nome || !d.cpf) return res.status(400).json({ erro: 'Nome e CPF obrigatórios' });
