@@ -350,14 +350,21 @@ app.get('/api/admin/recrutadores', authAdmin, async (req, res) => {
     await init();
 
     // cria admin padrão se não existir
-    const { rows } = await pool.query('SELECT id FROM admins WHERE email = $1', [process.env.EMAIL_FROM]);
-    if (rows.length === 0) {
-      const hash = await bcrypt.hash(process.env.ADMIN_SENHA || '089339', 10);
-      await pool.query(
-        'INSERT INTO admins (nome, email, senha_hash, role) VALUES ($1,$2,$3,$4)',
-        ['Fabio Junior', process.env.EMAIL_FROM, hash, 'superadmin']
-      );
-      console.log('Admin criado:', process.env.EMAIL_FROM);
+    const emailAdmin = process.env.EMAIL_FROM || process.env.ADMIN_EMAIL;
+    if (emailAdmin) {
+      const { rows } = await pool.query('SELECT id FROM admins WHERE email = $1', [emailAdmin]);
+      if (rows.length === 0) {
+        const hash = await bcrypt.hash(process.env.ADMIN_SENHA || '089339', 10);
+        await pool.query(
+          'INSERT INTO admins (nome, email, senha_hash, role) VALUES ($1,$2,$3,$4)',
+          ['Fabio Junior', emailAdmin, hash, 'superadmin']
+        );
+        console.log('Admin criado:', emailAdmin);
+      } else {
+        console.log('Admin já existe:', emailAdmin);
+      }
+    } else {
+      console.warn('AVISO: EMAIL_FROM não definido. Crie o admin manualmente pelo endpoint /api/admin/criar-inicial.');
     }
 
     const port = process.env.PORT || 10000;
