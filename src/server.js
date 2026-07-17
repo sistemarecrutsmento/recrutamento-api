@@ -308,8 +308,10 @@ app.post('/api/candidato/cadastrar', authCandidato, async (req, res) => {
         primeiro_emprego = $19,
         banco_talentos = $20,
         recebe_comunicacoes = $21,
+        sobre_voce = $22,
+        experiencia = $23,
         email_verificado = true
-      WHERE email = $22
+      WHERE email = $24
       RETURNING id, nome, email, cpf`,
       [
         d.cpf || null, d.nome, d.data_nascimento || null, d.sexo || null, d.celular || null, d.acessibilidade || null,
@@ -318,6 +320,7 @@ app.post('/api/candidato/cadastrar', authCandidato, async (req, res) => {
         d.formacao || null, d.instituicao || null, d.curso || null,
         d.situacao || null, d.data_conclusao || null,
         !!d.primeiro_emprego, !!d.banco_talentos, !!d.recebe_comunicacoes,
+        d.sobre_voce || null, d.experiencia || null,
         email
       ]
     );
@@ -332,8 +335,9 @@ app.post('/api/candidato/cadastrar', authCandidato, async (req, res) => {
             cpf, nome, data_nascimento, sexo, celular, email, email_verificado,
             acessibilidade, cep, estado, cidade, bairro, logradouro, numero, complemento,
             formacao, instituicao, curso, situacao, data_conclusao,
-            primeiro_emprego, banco_talentos, recebe_comunicacoes
-          ) VALUES ($1,$2,$3,$4,$5,$6,true,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+            primeiro_emprego, banco_talentos, recebe_comunicacoes,
+            sobre_voce, experiencia
+          ) VALUES ($1,$2,$3,$4,$5,$6,true,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
           RETURNING id, nome, email, cpf`,
           [
             d.cpf || null, d.nome, d.data_nascimento || null, d.sexo || null, d.celular || null, email,
@@ -342,7 +346,8 @@ app.post('/api/candidato/cadastrar', authCandidato, async (req, res) => {
             d.logradouro || null, d.numero || null, d.complemento || null,
             d.formacao || null, d.instituicao || null, d.curso || null,
             d.situacao || null, d.data_conclusao || null,
-            !!d.primeiro_emprego, !!d.banco_talentos, !!d.recebe_comunicacoes
+            !!d.primeiro_emprego, !!d.banco_talentos, !!d.recebe_comunicacoes,
+            d.sobre_voce || null, d.experiencia || null
           ]
         );
         candidatoId = ins.rows[0].id;
