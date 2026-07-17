@@ -11,7 +11,7 @@ const { authMiddleware, authCandidato, authAdmin } = require('./auth');
 
 const app = express();
 app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
-app.use(express.json({ limit: '5mb' }));
+app.use(express.json({ limit: '10mb' }));
 
 // log toda requisição
 app.use((req, res, next) => {
@@ -475,6 +475,40 @@ app.post('/api/candidato/candidatar/:vagaId', authCandidato, async (req, res) =>
     if (e.code === '23505') return res.status(400).json({ erro: 'Você já se candidatou a esta vaga' });
     console.error(e);
     res.status(500).json({ erro: 'Erro ao se candidatar' });
+  }
+});
+
+// Upload / atualização da foto de perfil (base64 inline — sem storage externo)
+app.put('/api/candidato/foto', authCandidato, async (req, res) => {
+  const { foto_url } = req.body;
+  if (!foto_url) return res.status(400).json({ erro: 'foto_url é obrigatório' });
+  if (typeof foto_url !== 'string' || !foto_url.startsWith('data:image/')) {
+    return res.status(400).json({ erro: 'Formato inválido (esperado data:image/...)' });
+  }
+  // Limite ~6.7MB encoded (5MB original)
+  if (foto_url.length > 7 * 1024 * 1024) {
+    return res.status(413).json({ erro: 'Imagem muito grande (máx ~5MB)' });
+  }
+  try {
+    const { rows } = await pool.query(
+      'UPDATE candidatos SET foto_url = $1 WHERE email = $2 RETURNING foto_url',
+      [foto_url, req.user.email]
+    );
+    if (rows.length === 0) return res.status(404).json({ erro: 'Candidato não encontrado' });
+    res.json({ ok: true, foto_url: rows[0].foto_url });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao salvar foto' });
+  }
+});
+
+app.delete('/api/candidato/foto', authCandidato, async (req, res) => {
+  try {
+    await pool.query('UPDATE candidatos SET foto_url = NULL WHERE email = $1', [req.user.email]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao remover foto' });
   }
 });
 
