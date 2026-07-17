@@ -29,4 +29,3 @@ function authAdmin(req, res, next) {
 }
 
 module.exports = { authMiddleware, authCandidato, authAdmin };
-
