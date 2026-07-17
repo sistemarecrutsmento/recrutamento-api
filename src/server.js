@@ -707,8 +707,9 @@ app.get('/api/admin/candidatos', authAdmin, async (req, res) => {
   let sql = `SELECT id, nome, email, cpf, celular, cidade, estado, areas_interesse, banco_talentos, criado_em FROM candidatos`;
   const params = [];
   if (area) {
-    // Filtra candidatos que tenham a área no array areas_interesse (JSONB)
-    params.push(area);
+    // Filtra candidatos que tenham a área no array areas_interesse (JSONB array)
+    // Wraps a string em ["..."] pra fazer match exato via @>
+    params.push(JSON.stringify([area]));
     sql += ` WHERE areas_interesse @> $${params.length}::jsonb`;
   }
   sql += ' ORDER BY criado_em DESC';
