@@ -716,6 +716,19 @@ app.get('/api/admin/candidatos', authAdmin, async (req, res) => {
   res.json({ candidatos: rows });
 });
 
+// Retorna os dados completos de um candidato (currículo) para o admin
+app.get('/api/admin/candidato/:id', authAdmin, async (req, res) => {
+  const { rows } = await pool.query(
+    `SELECT id, nome, email, cpf, celular, data_nascimento, sexo,
+            acessibilidade, cep, estado, cidade, bairro, logradouro, numero, complemento,
+            formacao, instituicao, curso, situacao, data_conclusao,
+            primeiro_emprego, banco_talentos, areas_interesse, sobre_voce, experiencia,
+            criado_em
+     FROM candidatos WHERE id = $1`, [req.params.id]);
+  if (rows.length === 0) return res.status(404).json({ erro: 'Candidato não encontrado' });
+  res.json({ candidato: rows[0] });
+});
+
 app.get('/api/admin/candidaturas', authAdmin, async (req, res) => {
   const { rows } = await pool.query(`
     SELECT c.*, v.titulo, v.empresa, cd.nome as candidato_nome, cd.email as candidato_email
