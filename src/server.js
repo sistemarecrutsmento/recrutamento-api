@@ -282,6 +282,7 @@ app.post('/api/candidato/cadastrar', authCandidato, async (req, res) => {
   if (!d.nome) return res.status(400).json({ erro: 'Nome obrigatório' });
 
   const email = (d.email || req.user.email).toLowerCase();
+  const areasInteresse = Array.isArray(d.areas_interesse) ? d.areas_interesse.slice(0, 5) : [];
 
   try {
     // Primeiro: UPDATE o candidato existente (por email) — o "cadastrar" agora é completar perfil
@@ -310,8 +311,9 @@ app.post('/api/candidato/cadastrar', authCandidato, async (req, res) => {
         recebe_comunicacoes = $21,
         sobre_voce = $22,
         experiencia = $23,
+        areas_interesse = $24,
         email_verificado = true
-      WHERE email = $24
+      WHERE email = $25
       RETURNING id, nome, email, cpf`,
       [
         d.cpf || null, d.nome, d.data_nascimento || null, d.sexo || null, d.celular || null, d.acessibilidade || null,
@@ -321,6 +323,7 @@ app.post('/api/candidato/cadastrar', authCandidato, async (req, res) => {
         d.situacao || null, d.data_conclusao || null,
         !!d.primeiro_emprego, !!d.banco_talentos, !!d.recebe_comunicacoes,
         d.sobre_voce || null, d.experiencia || null,
+        JSON.stringify(areasInteresse),
         email
       ]
     );
@@ -336,8 +339,8 @@ app.post('/api/candidato/cadastrar', authCandidato, async (req, res) => {
             acessibilidade, cep, estado, cidade, bairro, logradouro, numero, complemento,
             formacao, instituicao, curso, situacao, data_conclusao,
             primeiro_emprego, banco_talentos, recebe_comunicacoes,
-            sobre_voce, experiencia
-          ) VALUES ($1,$2,$3,$4,$5,$6,true,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24)
+            sobre_voce, experiencia, areas_interesse
+          ) VALUES ($1,$2,$3,$4,$5,$6,true,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
           RETURNING id, nome, email, cpf`,
           [
             d.cpf || null, d.nome, d.data_nascimento || null, d.sexo || null, d.celular || null, email,
@@ -347,7 +350,8 @@ app.post('/api/candidato/cadastrar', authCandidato, async (req, res) => {
             d.formacao || null, d.instituicao || null, d.curso || null,
             d.situacao || null, d.data_conclusao || null,
             !!d.primeiro_emprego, !!d.banco_talentos, !!d.recebe_comunicacoes,
-            d.sobre_voce || null, d.experiencia || null
+            d.sobre_voce || null, d.experiencia || null,
+            JSON.stringify(areasInteresse)
           ]
         );
         candidatoId = ins.rows[0].id;
@@ -390,6 +394,7 @@ app.get('/api/candidato/perfil', authCandidato, async (req, res) => {
 
 app.put('/api/candidato/perfil', authCandidato, async (req, res) => {
   const d = req.body;
+  const areasInteresse = Array.isArray(d.areas_interesse) ? d.areas_interesse.slice(0, 5) : null;
   try {
     const { rows } = await pool.query(
       `UPDATE candidatos SET
@@ -413,14 +418,16 @@ app.put('/api/candidato/perfil', authCandidato, async (req, res) => {
         acessibilidade = COALESCE($18, acessibilidade),
         sobre_voce = COALESCE($19, sobre_voce),
         experiencia = COALESCE($20, experiencia),
-        primeiro_emprego = COALESCE($21, primeiro_emprego)
-       WHERE email = $22 RETURNING *`,
+        primeiro_emprego = COALESCE($21, primeiro_emprego),
+        areas_interesse = COALESCE($22, areas_interesse)
+       WHERE email = $23 RETURNING *`,
       [
         d.nome, d.cpf, d.data_nascimento, d.sexo, d.celular,
         d.cep, d.estado, d.cidade, d.bairro, d.logradouro, d.numero, d.complemento,
         d.formacao, d.instituicao, d.curso, d.situacao, d.data_conclusao,
         d.acessibilidade, d.sobre_voce, d.experiencia,
         d.primeiro_emprego === undefined ? null : !!d.primeiro_emprego,
+        areasInteresse ? JSON.stringify(areasInteresse) : null,
         req.user.email
       ]
     );
@@ -696,7 +703,16 @@ app.get('/api/admin/vagas/:id', authAdmin, async (req, res) => {
 });
 
 app.get('/api/admin/candidatos', authAdmin, async (req, res) => {
-  const { rows } = await pool.query('SELECT id, nome, email, cpf, cidade, estado, criado_em FROM candidatos ORDER BY criado_em DESC');
+  const { area } = req.query;
+  let sql = `SELECT id, nome, email, cpf, celular, cidade, estado, areas_interesse, banco_talentos, criado_em FROM candidatos`;
+  const params = [];
+  if (area) {
+    // Filtra candidatos que tenham a área no array areas_interesse (JSONB)
+    params.push(area);
+    sql += ` WHERE areas_interesse @> $${params.length}::jsonb`;
+  }
+  sql += ' ORDER BY criado_em DESC';
+  const { rows } = await pool.query(sql, params);
   res.json({ candidatos: rows });
 });
 
@@ -753,6 +769,7 @@ app.get('/api/admin/candidatura/:id', authAdmin, async (req, res) => {
            cd.logradouro, cd.numero, cd.complemento,
            cd.formacao, cd.instituicao, cd.curso, cd.situacao, cd.data_conclusao,
            cd.primeiro_emprego, cd.sobre_voce, cd.experiencia, cd.foto_url,
+           cd.areas_interesse, cd.banco_talentos,
            cd.criado_em as candidato_criado_em
     FROM candidaturas c
     JOIN vagas v ON v.id = c.vaga_id
