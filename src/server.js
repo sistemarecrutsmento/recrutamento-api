@@ -410,16 +410,34 @@ app.put('/api/candidato/perfil', authCandidato, async (req, res) => {
         curso = COALESCE($15, curso),
         situacao = COALESCE($16, situacao),
         data_conclusao = COALESCE($17, data_conclusao),
-        acessibilidade = COALESCE($18, acessibilidade)
-       WHERE email = $19 RETURNING *`,
+        acessibilidade = COALESCE($18, acessibilidade),
+        sobre_voce = COALESCE($19, sobre_voce),
+        experiencia = COALESCE($20, experiencia),
+        primeiro_emprego = COALESCE($21, primeiro_emprego)
+       WHERE email = $22 RETURNING *`,
       [
         d.nome, d.cpf, d.data_nascimento, d.sexo, d.celular,
         d.cep, d.estado, d.cidade, d.bairro, d.logradouro, d.numero, d.complemento,
         d.formacao, d.instituicao, d.curso, d.situacao, d.data_conclusao,
-        d.acessibilidade,
+        d.acessibilidade, d.sobre_voce, d.experiencia,
+        d.primeiro_emprego === undefined ? null : !!d.primeiro_emprego,
         req.user.email
       ]
     );
+
+    // Sincronizar experiencias (se enviadas)
+    if (rows.length > 0 && Array.isArray(d.experiencias)) {
+      const candidatoId = rows[0].id;
+      await pool.query('DELETE FROM experiencias WHERE candidato_id = $1', [candidatoId]);
+      for (const exp of d.experiencias) {
+        await pool.query(
+          `INSERT INTO experiencias (candidato_id, cargo, empresa, inicio, fim, emprego_atual, descricao)
+           VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+          [candidatoId, exp.cargo, exp.empresa, exp.inicio || null, exp.fim || null, !!exp.emprego_atual, exp.descricao || null]
+        );
+      }
+    }
+
     res.json({ ok: true, candidato: rows[0] });
   } catch (e) {
     console.error(e);
@@ -471,9 +489,13 @@ app.post('/api/candidato/candidatar/:vagaId', authCandidato, async (req, res) =>
   try {
     const { rows } = await pool.query(
       `INSERT INTO candidaturas (vaga_id, candidato_id, status, etapa_atual, historico)
-       VALUES ($1, $2, 'em_analise', 0, $3)
+       VALUES ($1, $2, 'em_andamento', 2, $3)
        RETURNING *`,
-      [req.params.vagaId, c[0].id, JSON.stringify([{ etapa: 0, status: 'em_analise', data: new Date().toISOString() }])]
+      [req.params.vagaId, c[0].id, JSON.stringify([
+        { etapa: 0, status: 'em_analise', acao: 'inscricao', data: new Date().toISOString() },
+        { etapa: 1, status: 'em_andamento', acao: 'avancar', data: new Date().toISOString(), mensagem: 'Inscrição realizada — aguardando triagem curricular' },
+        { etapa: 2, status: 'em_andamento', acao: 'avancar', data: new Date().toISOString(), mensagem: 'Encaminhado para triagem curricular' }
+      ])]
     );
     res.json({ ok: true, candidatura: rows[0] });
   } catch (e) {
