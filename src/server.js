@@ -747,7 +747,7 @@ app.get('/api/admin/vagas/:id/candidaturas', authAdmin, async (req, res) => {
 
 app.get('/api/admin/candidatura/:id', authAdmin, async (req, res) => {
   const { rows: cand } = await pool.query(`
-    SELECT c.*, v.titulo, v.empresa, v.etapas, v.cidade, v.estado, v.descricao, v.requisitos,
+    SELECT c.*, v.titulo, v.empresa, v.etapas, v.cidade as v_cidade, v.estado as v_estado, v.descricao, v.requisitos,
            cd.id as candidato_id_full, cd.nome, cd.email, cd.celular, cd.cpf, cd.data_nascimento,
            cd.acessibilidade, cd.cep, cd.estado as cd_estado, cd.cidade as cd_cidade, cd.bairro,
            cd.logradouro, cd.numero, cd.complemento,
