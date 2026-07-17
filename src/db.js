@@ -37,7 +37,6 @@ async function init() {
         celular TEXT,
         email TEXT UNIQUE NOT NULL,
         email_verificado BOOLEAN DEFAULT false,
-        senha_hash TEXT,
         acessibilidade TEXT,
         cep TEXT,
         estado TEXT,
@@ -121,12 +120,6 @@ async function init() {
     await client.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS criada_em TIMESTAMP DEFAULT NOW();`);
     await client.query(`ALTER TABLE candidatos ADD COLUMN IF NOT EXISTS criado_em TIMESTAMP DEFAULT NOW();`);
     await client.query(`ALTER TABLE admins ADD COLUMN IF NOT EXISTS criado_em TIMESTAMP DEFAULT NOW();`);
-    await client.query(`ALTER TABLE candidatos ADD COLUMN IF NOT EXISTS senha_hash TEXT;`);
-    await client.query(`ALTER TABLE candidatos ADD COLUMN IF NOT EXISTS email_verificado BOOLEAN DEFAULT false;`);
-    await client.query(`ALTER TABLE candidatos ADD COLUMN IF NOT EXISTS foto_url TEXT;`);
-    // Campos adicionados em jul/2026
-    await client.query(`ALTER TABLE candidatos ADD COLUMN IF NOT EXISTS sobre_voce TEXT;`);
-    await client.query(`ALTER TABLE candidatos ADD COLUMN IF NOT EXISTS experiencia TEXT;`);
 
     console.log('Tabelas criadas/verificadas + colunas garantidas');
   } finally {
@@ -135,3 +128,4 @@ async function init() {
 }
 
 module.exports = { pool, init };
+
