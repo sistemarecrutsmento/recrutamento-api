@@ -16,4 +16,3 @@ app.get('/api/env', (req, res) => res.json({
 }));
 
 app.listen(process.env.PORT || 10000, () => console.log('UP na porta', process.env.PORT || 10000));
-
