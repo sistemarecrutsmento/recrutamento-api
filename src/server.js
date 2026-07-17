@@ -11,7 +11,7 @@ const { authMiddleware, authCandidato, authAdmin } = require('./auth');
 
 const app = express();
 app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '5mb' }));
 
 // log toda requisição
 app.use((req, res, next) => {
@@ -69,17 +69,6 @@ app.get('/api/_debug/admin-info', async (req, res) => {
   }
 });
 
-app.get('/api/_debug/config', async (req, res) => {
-  res.json({
-    hasDb: !!process.env.DATABASE_URL,
-    hasEmail: !!process.env.EMAIL_FROM,
-    hasEmailPwd: !!process.env.EMAIL_APP_PASSWORD,
-    hasJwt: !!process.env.JWT_SECRET,
-    smtpDebug: process.env.SMTP_DEBUG || '0',
-    nodeEnv: process.env.NODE_ENV || 'sem'
-  });
-});
-
 // Teste dashboard SEM auth (público)
 app.get('/api/_debug/dashboard', async (req, res) => {
   try {
@@ -93,20 +82,6 @@ app.get('/api/_debug/dashboard', async (req, res) => {
     res.json({ stats: stats.rows[0] });
   } catch (e) {
     res.status(500).json({ erro: e.message, stack: e.stack?.substring(0, 300) });
-  }
-});
-
-app.get('/api/_debug/ultimo-codigo/:email', async (req, res) => {
-  try {
-    const { rows } = await pool.query(
-      `SELECT codigo, expira_em, usado FROM codigos_verificacao
-       WHERE email = $1 ORDER BY id DESC LIMIT 1`,
-      [req.params.email.toLowerCase()]
-    );
-    if (rows.length === 0) return res.status(404).json({ erro: 'Nenhum código para esse e-mail' });
-    res.json({ codigo: rows[0].codigo, expira_em: rows[0].expira_em, usado: rows[0].usado });
-  } catch (e) {
-    res.status(500).json({ erro: e.message });
   }
 });
 
@@ -140,21 +115,6 @@ app.get('/api/cep/:cep', async (req, res) => {
   }
 });
 
-// Cache de falhas de SMTP: se Gmail falhou, devolvemos codigo_debug
-let smtpFalhando = false;
-async function enviarCodigoSeguro(email, codigo) {
-  if (smtpFalhando) return false;
-  try {
-    await enviarCodigo(email, codigo);
-    console.log(`[EMAIL OK] Código enviado para ${email}`);
-    return true;
-  } catch (e) {
-    console.error(`[EMAIL FAIL] ${email}: ${e.message}`);
-    smtpFalhando = true;
-    return false;
-  }
-}
-
 // ============= CANDIDATO - CADASTRO =============
 app.post('/api/candidato/iniciar', async (req, res) => {
   const { email } = req.body;
@@ -163,29 +123,18 @@ app.post('/api/candidato/iniciar', async (req, res) => {
   const codigo = String(Math.floor(100000 + Math.random() * 900000));
   const expira = new Date(Date.now() + 10 * 60 * 1000);
 
-  // Apaga códigos antigos não usados para esse e-mail
-  await pool.query('DELETE FROM codigos_verificacao WHERE email = $1 AND usado = false', [email.toLowerCase()]);
-
   await pool.query(
     'INSERT INTO codigos_verificacao (email, codigo, expira_em) VALUES ($1, $2, $3)',
     [email.toLowerCase(), codigo, expira]
   );
 
-  // SEMPRE devolve o codigo_debug para o front mostrar (já que o SMTP do Gmail
-  // tem bloqueios contra IPs do Render). O front exibe um box amarelo com o código.
-  // O e-mail real TAMBÉM é disparado em background (caso funcione).
-  const resposta = {
-    ok: true,
-    mensagem: 'Código gerado',
-    codigo_debug: codigo
-  };
-
-  // Tenta enviar em background (NUNCA bloqueia a resposta)
-  setImmediate(async () => {
-    await enviarCodigoSeguro(email, codigo);
-  });
-
-  res.json(resposta);
+  try {
+    await enviarCodigo(email, codigo);
+    res.json({ ok: true, mensagem: 'Código enviado para o e-mail' });
+  } catch (e) {
+    console.error('Erro ao enviar e-mail:', e.message);
+    res.status(500).json({ erro: 'Falha ao enviar e-mail. Verifique as credenciais.' });
+  }
 });
 
 app.post('/api/candidato/verificar', async (req, res) => {
@@ -209,233 +158,47 @@ app.post('/api/candidato/verificar', async (req, res) => {
   res.json({ ok: true, token, email: email.toLowerCase() });
 });
 
-// ============= CANDIDATO - CADASTRO COM SENHA (NOVO) =============
-// Cria conta nova com email+senha (sem código de verificação).
-// Recebe dados básicos; o resto do perfil (endereço, formação, etc.) pode ser completado depois em /api/candidato/cadastrar.
-app.post('/api/candidato/cadastro', async (req, res) => {
-  const { email, senha, nome, cpf, celular, data_nascimento, sexo, cidade, estado, formacao } = req.body;
-  if (!email || !senha || !nome) {
-    return res.status(400).json({ erro: 'E-mail, senha e nome são obrigatórios' });
-  }
-  if (senha.length < 6) {
-    return res.status(400).json({ erro: 'A senha deve ter no mínimo 6 caracteres' });
-  }
-
-  const emailLower = email.toLowerCase();
-
-  // Verifica se já existe candidato com esse e-mail
-  const { rows: existe } = await pool.query('SELECT id, senha_hash FROM candidatos WHERE email = $1', [emailLower]);
-  if (existe.length > 0) {
-    return res.status(400).json({ erro: 'Já existe uma conta com esse e-mail. Faça login.' });
-  }
-
-  try {
-    const senhaHash = await bcrypt.hash(senha, 10);
-    const { rows } = await pool.query(
-      `INSERT INTO candidatos (email, senha_hash, nome, cpf, celular, data_nascimento, sexo, cidade, estado, formacao, email_verificado)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true)
-       RETURNING id, email, nome`,
-      [emailLower, senhaHash, nome, cpf || null, celular || null, data_nascimento || null, sexo || null, cidade || null, estado || null, formacao || null]
-    );
-
-    const token = jwt.sign({ email: emailLower, tipo: 'candidato' }, process.env.JWT_SECRET, { expiresIn: '30d' });
-    res.json({ ok: true, token, candidato: rows[0] });
-  } catch (e) {
-    console.error('[CADASTRO ERRO]', e);
-    if (e.code === '23505') return res.status(400).json({ erro: 'CPF ou e-mail já cadastrado' });
-    res.status(500).json({ erro: 'Erro ao criar conta' });
-  }
-});
-
-// ============= CANDIDATO - LOGIN COM SENHA (NOVO) =============
-app.post('/api/candidato/login', async (req, res) => {
-  const { email, senha } = req.body;
-  if (!email || !senha) return res.status(400).json({ erro: 'E-mail e senha obrigatórios' });
-
-  const emailLower = email.toLowerCase();
-  const { rows } = await pool.query('SELECT * FROM candidatos WHERE email = $1', [emailLower]);
-  if (rows.length === 0) {
-    return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
-  }
-  const cand = rows[0];
-
-  // Se o candidato foi criado pelo fluxo antigo (sem senha), o hash é null
-  if (!cand.senha_hash) {
-    return res.status(401).json({ erro: 'Sua conta foi criada antes do login com senha. Cadastre-se novamente ou use o código de acesso.' });
-  }
-
-  const ok = await bcrypt.compare(senha, cand.senha_hash);
-  if (!ok) {
-    return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
-  }
-
-  const token = jwt.sign({ email: emailLower, tipo: 'candidato' }, process.env.JWT_SECRET, { expiresIn: '30d' });
-  res.json({
-    ok: true,
-    token,
-    candidato: { id: cand.id, email: cand.email, nome: cand.nome }
-  });
-});
-
 app.post('/api/candidato/cadastrar', authCandidato, async (req, res) => {
   const d = req.body;
-  if (!d.nome) return res.status(400).json({ erro: 'Nome obrigatório' });
-
-  const email = (d.email || req.user.email).toLowerCase();
-  const areasInteresse = Array.isArray(d.areas_interesse) ? d.areas_interesse.slice(0, 5) : [];
+  if (!d.nome || !d.cpf) return res.status(400).json({ erro: 'Nome e CPF obrigatórios' });
 
   try {
-    // Primeiro: UPDATE o candidato existente (por email) — o "cadastrar" agora é completar perfil
-    const upd = await pool.query(
-      `UPDATE candidatos SET
-        cpf = COALESCE($1, cpf),
-        nome = $2,
-        data_nascimento = $3,
-        sexo = $4,
-        celular = $5,
-        acessibilidade = $6,
-        cep = $7,
-        estado = $8,
-        cidade = $9,
-        bairro = $10,
-        logradouro = $11,
-        numero = $12,
-        complemento = $13,
-        formacao = $14,
-        instituicao = $15,
-        curso = $16,
-        situacao = $17,
-        data_conclusao = $18,
-        primeiro_emprego = $19,
-        banco_talentos = $20,
-        recebe_comunicacoes = $21,
-        sobre_voce = $22,
-        experiencia = $23,
-        areas_interesse = $24,
-        email_verificado = true
-      WHERE email = $25
-      RETURNING id, nome, email, cpf`,
+    const result = await pool.query(
+      `INSERT INTO candidatos (
+        cpf, nome, data_nascimento, sexo, celular, email, email_verificado,
+        acessibilidade, cep, estado, cidade, bairro, logradouro, numero, complemento,
+        formacao, instituicao, curso, situacao, data_conclusao,
+        primeiro_emprego, banco_talentos, recebe_comunicacoes
+      ) VALUES ($1,$2,$3,$4,$5,$6,true,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22)
+      ON CONFLICT (cpf) DO UPDATE SET
+        nome = EXCLUDED.nome,
+        data_nascimento = EXCLUDED.data_nascimento,
+        sexo = EXCLUDED.sexo,
+        celular = EXCLUDED.celular,
+        email = EXCLUDED.email,
+        acessibilidade = EXCLUDED.acessibilidade,
+        cep = EXCLUDED.cep, estado = EXCLUDED.estado, cidade = EXCLUDED.cidade,
+        bairro = EXCLUDED.bairro, logradouro = EXCLUDED.logradouro, numero = EXCLUDED.numero, complemento = EXCLUDED.complemento,
+        formacao = EXCLUDED.formacao, instituicao = EXCLUDED.instituicao, curso = EXCLUDED.curso,
+        situacao = EXCLUDED.situacao, data_conclusao = EXCLUDED.data_conclusao,
+        primeiro_emprego = EXCLUDED.primeiro_emprego, banco_talentos = EXCLUDED.banco_talentos, recebe_comunicacoes = EXCLUDED.recebe_comunicacoes
+      RETURNING id, nome, email`,
       [
-        d.cpf || null, d.nome, d.data_nascimento || null, d.sexo || null, d.celular || null, d.acessibilidade || null,
+        d.cpf, d.nome, d.data_nascimento || null, d.sexo || null, d.celular || null, d.email.toLowerCase(),
+        d.acessibilidade || null,
         d.cep || null, d.estado || null, d.cidade || null, d.bairro || null,
         d.logradouro || null, d.numero || null, d.complemento || null,
         d.formacao || null, d.instituicao || null, d.curso || null,
         d.situacao || null, d.data_conclusao || null,
-        !!d.primeiro_emprego, !!d.banco_talentos, !!d.recebe_comunicacoes,
-        d.sobre_voce || null, d.experiencia || null,
-        JSON.stringify(areasInteresse),
-        email
+        !!d.primeiro_emprego, !!d.banco_talentos, !!d.recebe_comunicacoes
       ]
     );
 
-    let candidatoId;
-    let result = upd;
-    if (upd.rowCount === 0) {
-      // Não existe — INSERT
-      try {
-        const ins = await pool.query(
-          `INSERT INTO candidatos (
-            cpf, nome, data_nascimento, sexo, celular, email, email_verificado,
-            acessibilidade, cep, estado, cidade, bairro, logradouro, numero, complemento,
-            formacao, instituicao, curso, situacao, data_conclusao,
-            primeiro_emprego, banco_talentos, recebe_comunicacoes,
-            sobre_voce, experiencia, areas_interesse
-          ) VALUES ($1,$2,$3,$4,$5,$6,true,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25)
-          RETURNING id, nome, email, cpf`,
-          [
-            d.cpf || null, d.nome, d.data_nascimento || null, d.sexo || null, d.celular || null, email,
-            d.acessibilidade || null,
-            d.cep || null, d.estado || null, d.cidade || null, d.bairro || null,
-            d.logradouro || null, d.numero || null, d.complemento || null,
-            d.formacao || null, d.instituicao || null, d.curso || null,
-            d.situacao || null, d.data_conclusao || null,
-            !!d.primeiro_emprego, !!d.banco_talentos, !!d.recebe_comunicacoes,
-            d.sobre_voce || null, d.experiencia || null,
-            JSON.stringify(areasInteresse)
-          ]
-        );
-        candidatoId = ins.rows[0].id;
-        result = ins;
-      } catch (e2) {
-        if (e2.code === '23505') return res.status(400).json({ erro: 'CPF já cadastrado em outra conta' });
-        throw e2;
-      }
-    } else {
-      candidatoId = upd.rows[0].id;
-    }
+    const candidatoId = result.rows[0].id;
 
     // experiencias - apaga e recria
-    if (candidatoId) {
-      await pool.query('DELETE FROM experiencias WHERE candidato_id = $1', [candidatoId]);
-      if (Array.isArray(d.experiencias)) {
-        for (const exp of d.experiencias) {
-          await pool.query(
-            `INSERT INTO experiencias (candidato_id, cargo, empresa, inicio, fim, emprego_atual, descricao)
-             VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-            [candidatoId, exp.cargo, exp.empresa, exp.inicio || null, exp.fim || null, !!exp.emprego_atual, exp.descricao || null]
-          );
-        }
-      }
-    }
-
-    res.json({ ok: true, candidato: result.rows[0] });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ erro: 'Erro ao salvar cadastro' });
-  }
-});
-
-app.get('/api/candidato/perfil', authCandidato, async (req, res) => {
-  const { rows: c } = await pool.query('SELECT * FROM candidatos WHERE email = $1', [req.user.email]);
-  if (c.length === 0) return res.json({ candidato: null });
-  const { rows: ex } = await pool.query('SELECT * FROM experiencias WHERE candidato_id = $1 ORDER BY id DESC', [c[0].id]);
-  res.json({ candidato: c[0], experiencias: ex });
-});
-
-app.put('/api/candidato/perfil', authCandidato, async (req, res) => {
-  const d = req.body;
-  const areasInteresse = Array.isArray(d.areas_interesse) ? d.areas_interesse.slice(0, 5) : null;
-  try {
-    const { rows } = await pool.query(
-      `UPDATE candidatos SET
-        nome = COALESCE($1, nome),
-        cpf = COALESCE($2, cpf),
-        data_nascimento = COALESCE($3, data_nascimento),
-        sexo = COALESCE($4, sexo),
-        celular = COALESCE($5, celular),
-        cep = COALESCE($6, cep),
-        estado = COALESCE($7, estado),
-        cidade = COALESCE($8, cidade),
-        bairro = COALESCE($9, bairro),
-        logradouro = COALESCE($10, logradouro),
-        numero = COALESCE($11, numero),
-        complemento = COALESCE($12, complemento),
-        formacao = COALESCE($13, formacao),
-        instituicao = COALESCE($14, instituicao),
-        curso = COALESCE($15, curso),
-        situacao = COALESCE($16, situacao),
-        data_conclusao = COALESCE($17, data_conclusao),
-        acessibilidade = COALESCE($18, acessibilidade),
-        sobre_voce = COALESCE($19, sobre_voce),
-        experiencia = COALESCE($20, experiencia),
-        primeiro_emprego = COALESCE($21, primeiro_emprego),
-        areas_interesse = COALESCE($22, areas_interesse)
-       WHERE email = $23 RETURNING *`,
-      [
-        d.nome, d.cpf, d.data_nascimento, d.sexo, d.celular,
-        d.cep, d.estado, d.cidade, d.bairro, d.logradouro, d.numero, d.complemento,
-        d.formacao, d.instituicao, d.curso, d.situacao, d.data_conclusao,
-        d.acessibilidade, d.sobre_voce, d.experiencia,
-        d.primeiro_emprego === undefined ? null : !!d.primeiro_emprego,
-        areasInteresse ? JSON.stringify(areasInteresse) : null,
-        req.user.email
-      ]
-    );
-
-    // Sincronizar experiencias (se enviadas)
-    if (rows.length > 0 && Array.isArray(d.experiencias)) {
-      const candidatoId = rows[0].id;
-      await pool.query('DELETE FROM experiencias WHERE candidato_id = $1', [candidatoId]);
+    await pool.query('DELETE FROM experiencias WHERE candidato_id = $1', [candidatoId]);
+    if (Array.isArray(d.experiencias)) {
       for (const exp of d.experiencias) {
         await pool.query(
           `INSERT INTO experiencias (candidato_id, cargo, empresa, inicio, fim, emprego_atual, descricao)
@@ -445,34 +208,19 @@ app.put('/api/candidato/perfil', authCandidato, async (req, res) => {
       }
     }
 
-    res.json({ ok: true, candidato: rows[0] });
+    res.json({ ok: true, candidato: result.rows[0] });
   } catch (e) {
     console.error(e);
-    res.status(500).json({ erro: 'Erro ao atualizar perfil' });
+    if (e.code === '23505') return res.status(400).json({ erro: 'CPF já cadastrado' });
+    res.status(500).json({ erro: 'Erro ao salvar cadastro' });
   }
 });
 
-app.post('/api/candidato/trocar-senha', authCandidato, async (req, res) => {
-  const { senha_atual, senha_nova } = req.body;
-  if (!senha_atual || !senha_nova) {
-    return res.status(400).json({ erro: 'Informe a senha atual e a nova senha' });
-  }
-  if (senha_nova.length < 6) {
-    return res.status(400).json({ erro: 'A nova senha deve ter no mínimo 6 caracteres' });
-  }
-  try {
-    const { rows } = await pool.query('SELECT id, senha_hash FROM candidatos WHERE email = $1', [req.user.email]);
-    if (rows.length === 0) return res.status(404).json({ erro: 'Conta não encontrada' });
-    if (!rows[0].senha_hash) return res.status(400).json({ erro: 'Conta sem senha definida (legado)' });
-    const ok = await bcrypt.compare(senha_atual, rows[0].senha_hash);
-    if (!ok) return res.status(401).json({ erro: 'Senha atual incorreta' });
-    const novoHash = await bcrypt.hash(senha_nova, 10);
-    await pool.query('UPDATE candidatos SET senha_hash = $1 WHERE id = $2', [novoHash, rows[0].id]);
-    res.json({ ok: true });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ erro: 'Erro ao trocar senha' });
-  }
+app.get('/api/candidato/perfil', authCandidato, async (req, res) => {
+  const { rows: c } = await pool.query('SELECT * FROM candidatos WHERE email = $1', [req.user.email]);
+  if (c.length === 0) return res.json({ candidato: null });
+  const { rows: ex } = await pool.query('SELECT * FROM experiencias WHERE candidato_id = $1 ORDER BY id DESC', [c[0].id]);
+  res.json({ candidato: c[0], experiencias: ex });
 });
 
 app.get('/api/candidato/candidaturas', authCandidato, async (req, res) => {
@@ -496,53 +244,15 @@ app.post('/api/candidato/candidatar/:vagaId', authCandidato, async (req, res) =>
   try {
     const { rows } = await pool.query(
       `INSERT INTO candidaturas (vaga_id, candidato_id, status, etapa_atual, historico)
-       VALUES ($1, $2, 'em_andamento', 2, $3)
+       VALUES ($1, $2, 'em_analise', 0, $3)
        RETURNING *`,
-      [req.params.vagaId, c[0].id, JSON.stringify([
-        { etapa: 0, status: 'em_analise', acao: 'inscricao', data: new Date().toISOString() },
-        { etapa: 1, status: 'em_andamento', acao: 'avancar', data: new Date().toISOString(), mensagem: 'Inscrição realizada — aguardando triagem curricular' },
-        { etapa: 2, status: 'em_andamento', acao: 'avancar', data: new Date().toISOString(), mensagem: 'Encaminhado para triagem curricular' }
-      ])]
+      [req.params.vagaId, c[0].id, JSON.stringify([{ etapa: 0, status: 'em_analise', data: new Date().toISOString() }])]
     );
     res.json({ ok: true, candidatura: rows[0] });
   } catch (e) {
     if (e.code === '23505') return res.status(400).json({ erro: 'Você já se candidatou a esta vaga' });
     console.error(e);
     res.status(500).json({ erro: 'Erro ao se candidatar' });
-  }
-});
-
-// Upload / atualização da foto de perfil (base64 inline — sem storage externo)
-app.put('/api/candidato/foto', authCandidato, async (req, res) => {
-  const { foto_url } = req.body;
-  if (!foto_url) return res.status(400).json({ erro: 'foto_url é obrigatório' });
-  if (typeof foto_url !== 'string' || !foto_url.startsWith('data:image/')) {
-    return res.status(400).json({ erro: 'Formato inválido (esperado data:image/...)' });
-  }
-  // Limite ~6.7MB encoded (5MB original)
-  if (foto_url.length > 7 * 1024 * 1024) {
-    return res.status(413).json({ erro: 'Imagem muito grande (máx ~5MB)' });
-  }
-  try {
-    const { rows } = await pool.query(
-      'UPDATE candidatos SET foto_url = $1 WHERE email = $2 RETURNING foto_url',
-      [foto_url, req.user.email]
-    );
-    if (rows.length === 0) return res.status(404).json({ erro: 'Candidato não encontrado' });
-    res.json({ ok: true, foto_url: rows[0].foto_url });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ erro: 'Erro ao salvar foto' });
-  }
-});
-
-app.delete('/api/candidato/foto', authCandidato, async (req, res) => {
-  try {
-    await pool.query('UPDATE candidatos SET foto_url = NULL WHERE email = $1', [req.user.email]);
-    res.json({ ok: true });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ erro: 'Erro ao remover foto' });
   }
 });
 
@@ -668,6 +378,7 @@ app.get('/api/admin/vagas', authAdmin, async (req, res) => {
 
 app.put('/api/admin/vagas/:id', authAdmin, async (req, res) => {
   const v = req.body;
+  const etapasJson = v.etapas ? JSON.stringify(v.etapas) : null;
   const { rows } = await pool.query(
     `UPDATE vagas SET
       titulo = COALESCE($1, titulo),
@@ -682,10 +393,12 @@ app.put('/api/admin/vagas/:id', authAdmin, async (req, res) => {
       descricao = COALESCE($10, descricao),
       requisitos = COALESCE($11, requisitos),
       beneficios = COALESCE($12, beneficios),
-      status = COALESCE($13, status)
-     WHERE id = $14 RETURNING *`,
+      status = COALESCE($13, status),
+      etapas = COALESCE($14::jsonb, etapas)
+     WHERE id = $15 RETURNING *`,
     [v.titulo, v.empresa, v.cidade, v.estado, v.tipo_contrato, v.nivel, v.area,
-     v.salario_min, v.salario_max, v.descricao, v.requisitos, v.beneficios, v.status, req.params.id]
+     v.salario_min, v.salario_max, v.descricao, v.requisitos, v.beneficios, v.status,
+     etapasJson, req.params.id]
   );
   if (rows.length === 0) return res.status(404).json({ erro: 'Vaga não encontrada' });
   res.json({ ok: true, vaga: rows[0] });
@@ -703,31 +416,8 @@ app.get('/api/admin/vagas/:id', authAdmin, async (req, res) => {
 });
 
 app.get('/api/admin/candidatos', authAdmin, async (req, res) => {
-  const { area } = req.query;
-  let sql = `SELECT id, nome, email, cpf, celular, cidade, estado, areas_interesse, banco_talentos, criado_em FROM candidatos`;
-  const params = [];
-  if (area) {
-    // Filtra candidatos que tenham a área no array areas_interesse (JSONB array)
-    // Wraps a string em ["..."] pra fazer match exato via @>
-    params.push(JSON.stringify([area]));
-    sql += ` WHERE areas_interesse @> $${params.length}::jsonb`;
-  }
-  sql += ' ORDER BY criado_em DESC';
-  const { rows } = await pool.query(sql, params);
+  const { rows } = await pool.query('SELECT id, nome, email, cpf, cidade, estado, criado_em FROM candidatos ORDER BY criado_em DESC');
   res.json({ candidatos: rows });
-});
-
-// Retorna os dados completos de um candidato (currículo) para o admin
-app.get('/api/admin/candidato/:id', authAdmin, async (req, res) => {
-  const { rows } = await pool.query(
-    `SELECT id, nome, email, cpf, celular, data_nascimento, sexo,
-            acessibilidade, cep, estado, cidade, bairro, logradouro, numero, complemento,
-            formacao, instituicao, curso, situacao, data_conclusao,
-            primeiro_emprego, banco_talentos, areas_interesse, sobre_voce, experiencia,
-            criado_em
-     FROM candidatos WHERE id = $1`, [req.params.id]);
-  if (rows.length === 0) return res.status(404).json({ erro: 'Candidato não encontrado' });
-  res.json({ candidato: rows[0] });
 });
 
 app.get('/api/admin/candidaturas', authAdmin, async (req, res) => {
@@ -741,70 +431,19 @@ app.get('/api/admin/candidaturas', authAdmin, async (req, res) => {
   res.json({ candidaturas: rows });
 });
 
-// Lista de vagas com contagem de candidaturas (p/ painel admin)
-app.get('/api/admin/vagas-com-candidaturas', authAdmin, async (req, res) => {
-  const { rows } = await pool.query(`
-    SELECT v.id, v.titulo, v.empresa, v.cidade, v.estado, v.status, v.criada_em,
-           COUNT(c.id) FILTER (WHERE c.status NOT IN ('rejeitado','reprovado')) AS total_ativas,
-           COUNT(c.id) AS total_geral,
-           COUNT(c.id) FILTER (WHERE c.status = 'em_analise') AS em_analise,
-           COUNT(c.id) FILTER (WHERE c.status = 'em_andamento') AS em_andamento,
-           COUNT(c.id) FILTER (WHERE c.status = 'contratado') AS contratados
-    FROM vagas v
-    LEFT JOIN candidaturas c ON c.vaga_id = v.id
-    GROUP BY v.id
-    HAVING COUNT(c.id) > 0
-    ORDER BY v.criada_em DESC
-  `);
-  res.json({ vagas: rows });
-});
-
-// Candidatos de uma vaga específica
-app.get('/api/admin/vagas/:id/candidaturas', authAdmin, async (req, res) => {
-  const vagaId = req.params.id;
-  const { rows: vagaRows } = await pool.query('SELECT * FROM vagas WHERE id = $1', [vagaId]);
-  if (vagaRows.length === 0) return res.status(404).json({ erro: 'Vaga não encontrada' });
-  const vaga = vagaRows[0];
-  const { rows } = await pool.query(`
-    SELECT c.*, cd.nome, cd.email, cd.celular, cd.cidade, cd.estado
-    FROM candidaturas c
-    JOIN candidatos cd ON cd.id = c.candidato_id
-    WHERE c.vaga_id = $1
-    ORDER BY c.criada_em DESC
-  `, [vagaId]);
-  res.json({ vaga, candidaturas: rows });
-});
-
 app.get('/api/admin/candidatura/:id', authAdmin, async (req, res) => {
   const { rows: cand } = await pool.query(`
-    SELECT c.*, v.titulo, v.empresa, v.etapas, v.cidade as v_cidade, v.estado as v_estado, v.descricao, v.requisitos,
-           cd.id as candidato_id_full, cd.nome, cd.email, cd.celular, cd.cpf, cd.data_nascimento,
-           cd.acessibilidade, cd.cep, cd.estado as cd_estado, cd.cidade as cd_cidade, cd.bairro,
-           cd.logradouro, cd.numero, cd.complemento,
-           cd.formacao, cd.instituicao, cd.curso, cd.situacao, cd.data_conclusao,
-           cd.primeiro_emprego, cd.sobre_voce, cd.experiencia, cd.foto_url,
-           cd.areas_interesse, cd.banco_talentos,
-           cd.criado_em as candidato_criado_em
+    SELECT c.*, v.titulo, v.empresa, v.etapas, cd.nome, cd.email, cd.celular, cd.cpf
     FROM candidaturas c
     JOIN vagas v ON v.id = c.vaga_id
     JOIN candidatos cd ON cd.id = c.candidato_id
     WHERE c.id = $1`, [req.params.id]);
   if (cand.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
-  const candidatura = cand[0];
-
-  // Buscar experiencias do candidato
-  const { rows: exps } = await pool.query(
-    'SELECT * FROM experiencias WHERE candidato_id = $1 ORDER BY inicio DESC NULLS LAST, id DESC',
-    [candidatura.candidato_id]
-  );
-  candidatura.experiencias = exps;
-
-  res.json({ candidatura });
+  res.json({ candidatura: cand[0] });
 });
 
 app.post('/api/admin/candidatura/:id/status', authAdmin, async (req, res) => {
-  const { status, etapa, mensagem, acao } = req.body;
-  // acao: 'avancar' = incrementa etapa_atual, 'reprovar' = marca rejeitado, 'aprovar' = aprova atual
+  const { status, etapa, mensagem } = req.body;
   const { rows: c } = await pool.query(`
     SELECT c.*, v.titulo, v.etapas, cd.nome, cd.email
     FROM candidaturas c
@@ -815,32 +454,11 @@ app.post('/api/admin/candidatura/:id/status', authAdmin, async (req, res) => {
 
   const cand = c[0];
   const historico = Array.isArray(cand.historico) ? cand.historico : [];
-  let novoStatus = status;
-  let novaEtapa = etapa ?? cand.etapa_atual;
-
-  if (acao === 'avancar') {
-    novaEtapa = (cand.etapa_atual || 0) + 1;
-    novoStatus = 'em_andamento';
-    // Calcular total de etapas (do JSON etapas da vaga, ou usar padrão 7)
-    let totalEtapas = 7;
-    try {
-      const etapasArr = typeof cand.etapas === 'string' ? JSON.parse(cand.etapas) : cand.etapas;
-      if (Array.isArray(etapasArr) && etapasArr.length) totalEtapas = etapasArr.length;
-    } catch (e) {}
-    if (novaEtapa >= totalEtapas) {
-      novoStatus = 'contratado';
-    }
-  } else if (acao === 'reprovar') {
-    novoStatus = 'rejeitado';
-  } else if (acao === 'reabrir') {
-    novoStatus = 'em_analise';
-  }
-
-  historico.push({ etapa: novaEtapa, status: novoStatus, mensagem, acao, data: new Date().toISOString(), por: req.user.nome });
+  historico.push({ etapa: etapa ?? cand.etapa_atual, status, mensagem, data: new Date().toISOString(), por: req.user.nome });
 
   await pool.query(
     'UPDATE candidaturas SET status = $1, etapa_atual = $2, historico = $3 WHERE id = $4',
-    [novoStatus, novaEtapa, JSON.stringify(historico), req.params.id]
+    [status, etapa ?? cand.etapa_atual, JSON.stringify(historico), req.params.id]
   );
 
   if (mensagem) {
