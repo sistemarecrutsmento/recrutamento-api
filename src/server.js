@@ -689,19 +689,69 @@ app.get('/api/admin/candidaturas', authAdmin, async (req, res) => {
   res.json({ candidaturas: rows });
 });
 
+// Lista de vagas com contagem de candidaturas (p/ painel admin)
+app.get('/api/admin/vagas-com-candidaturas', authAdmin, async (req, res) => {
+  const { rows } = await pool.query(`
+    SELECT v.id, v.titulo, v.empresa, v.cidade, v.estado, v.status, v.criada_em,
+           COUNT(c.id) FILTER (WHERE c.status NOT IN ('rejeitado','reprovado')) AS total_ativas,
+           COUNT(c.id) AS total_geral,
+           COUNT(c.id) FILTER (WHERE c.status = 'em_analise') AS em_analise,
+           COUNT(c.id) FILTER (WHERE c.status = 'em_andamento') AS em_andamento,
+           COUNT(c.id) FILTER (WHERE c.status = 'contratado') AS contratados
+    FROM vagas v
+    LEFT JOIN candidaturas c ON c.vaga_id = v.id
+    GROUP BY v.id
+    HAVING COUNT(c.id) > 0
+    ORDER BY v.criada_em DESC
+  `);
+  res.json({ vagas: rows });
+});
+
+// Candidatos de uma vaga específica
+app.get('/api/admin/vagas/:id/candidaturas', authAdmin, async (req, res) => {
+  const vagaId = req.params.id;
+  const { rows: vagaRows } = await pool.query('SELECT * FROM vagas WHERE id = $1', [vagaId]);
+  if (vagaRows.length === 0) return res.status(404).json({ erro: 'Vaga não encontrada' });
+  const vaga = vagaRows[0];
+  const { rows } = await pool.query(`
+    SELECT c.*, cd.nome, cd.email, cd.celular, cd.cidade, cd.estado
+    FROM candidaturas c
+    JOIN candidatos cd ON cd.id = c.candidato_id
+    WHERE c.vaga_id = $1
+    ORDER BY c.criada_em DESC
+  `, [vagaId]);
+  res.json({ vaga, candidaturas: rows });
+});
+
 app.get('/api/admin/candidatura/:id', authAdmin, async (req, res) => {
   const { rows: cand } = await pool.query(`
-    SELECT c.*, v.titulo, v.empresa, v.etapas, cd.nome, cd.email, cd.celular, cd.cpf
+    SELECT c.*, v.titulo, v.empresa, v.etapas, v.cidade, v.estado, v.descricao, v.requisitos,
+           cd.id as candidato_id_full, cd.nome, cd.email, cd.celular, cd.cpf, cd.data_nascimento,
+           cd.acessibilidade, cd.cep, cd.estado as cd_estado, cd.cidade as cd_cidade, cd.bairro,
+           cd.logradouro, cd.numero, cd.complemento,
+           cd.formacao, cd.instituicao, cd.curso, cd.situacao, cd.data_conclusao,
+           cd.primeiro_emprego, cd.sobre_voce, cd.experiencia, cd.foto_url,
+           cd.criado_em as candidato_criado_em
     FROM candidaturas c
     JOIN vagas v ON v.id = c.vaga_id
     JOIN candidatos cd ON cd.id = c.candidato_id
     WHERE c.id = $1`, [req.params.id]);
   if (cand.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
-  res.json({ candidatura: cand[0] });
+  const candidatura = cand[0];
+
+  // Buscar experiencias do candidato
+  const { rows: exps } = await pool.query(
+    'SELECT * FROM experiencias WHERE candidato_id = $1 ORDER BY inicio DESC NULLS LAST, id DESC',
+    [candidatura.candidato_id]
+  );
+  candidatura.experiencias = exps;
+
+  res.json({ candidatura });
 });
 
 app.post('/api/admin/candidatura/:id/status', authAdmin, async (req, res) => {
-  const { status, etapa, mensagem } = req.body;
+  const { status, etapa, mensagem, acao } = req.body;
+  // acao: 'avancar' = incrementa etapa_atual, 'reprovar' = marca rejeitado, 'aprovar' = aprova atual
   const { rows: c } = await pool.query(`
     SELECT c.*, v.titulo, v.etapas, cd.nome, cd.email
     FROM candidaturas c
@@ -712,11 +762,32 @@ app.post('/api/admin/candidatura/:id/status', authAdmin, async (req, res) => {
 
   const cand = c[0];
   const historico = Array.isArray(cand.historico) ? cand.historico : [];
-  historico.push({ etapa: etapa ?? cand.etapa_atual, status, mensagem, data: new Date().toISOString(), por: req.user.nome });
+  let novoStatus = status;
+  let novaEtapa = etapa ?? cand.etapa_atual;
+
+  if (acao === 'avancar') {
+    novaEtapa = (cand.etapa_atual || 0) + 1;
+    novoStatus = 'em_andamento';
+    // Calcular total de etapas (do JSON etapas da vaga, ou usar padrão 7)
+    let totalEtapas = 7;
+    try {
+      const etapasArr = typeof cand.etapas === 'string' ? JSON.parse(cand.etapas) : cand.etapas;
+      if (Array.isArray(etapasArr) && etapasArr.length) totalEtapas = etapasArr.length;
+    } catch (e) {}
+    if (novaEtapa >= totalEtapas) {
+      novoStatus = 'contratado';
+    }
+  } else if (acao === 'reprovar') {
+    novoStatus = 'rejeitado';
+  } else if (acao === 'reabrir') {
+    novoStatus = 'em_analise';
+  }
+
+  historico.push({ etapa: novaEtapa, status: novoStatus, mensagem, acao, data: new Date().toISOString(), por: req.user.nome });
 
   await pool.query(
     'UPDATE candidaturas SET status = $1, etapa_atual = $2, historico = $3 WHERE id = $4',
-    [status, etapa ?? cand.etapa_atual, JSON.stringify(historico), req.params.id]
+    [novoStatus, novaEtapa, JSON.stringify(historico), req.params.id]
   );
 
   if (mensagem) {
