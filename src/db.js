@@ -127,6 +127,8 @@ async function init() {
     // Campos adicionados em jul/2026
     await client.query(`ALTER TABLE candidatos ADD COLUMN IF NOT EXISTS sobre_voce TEXT;`);
     await client.query(`ALTER TABLE candidatos ADD COLUMN IF NOT EXISTS experiencia TEXT;`);
+    // Áreas de interesse (Banco de Talentos) — array JSON
+    await client.query(`ALTER TABLE candidatos ADD COLUMN IF NOT EXISTS areas_interesse JSONB DEFAULT '[]'::jsonb;`);
 
     console.log('Tabelas criadas/verificadas + colunas garantidas');
   } finally {
