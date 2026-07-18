@@ -3,11 +3,15 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const axios = require('axios');
+const multer = require('multer');
 require('dotenv').config();
 
 const { pool, init } = require('./db');
 const { enviarCodigo, enviarNotificacaoStatus } = require('./email');
 const { authMiddleware, authCandidato, authAdmin } = require('./auth');
+const { uploadBuffer, deleteFile } = require('./cloudinary');
+
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }); // 10MB por arquivo
 
 const app = express();
 app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
@@ -509,6 +513,175 @@ app.post('/api/candidato/candidatar/:vagaId', authCandidato, async (req, res) =>
     if (e.code === '23505') return res.status(400).json({ erro: 'Você já se candidatou a esta vaga' });
     console.error(e);
     res.status(500).json({ erro: 'Erro ao se candidatar' });
+  }
+});
+
+// ============= DOCUMENTOS (Etapa "Coleta de Documentos") =============
+
+// Lista os tipos de documentos esperados (texto + arquivo)
+// Mantém sincronizado com o frontend (inscricao.html / painel.html)
+const TIPOS_DOCUMENTO = {
+  // === Campos de texto (digitados pelo candidato) ===
+  cpf:                { categoria: 'texto',   label: 'CPF',                                 obrigatorio: true,  mascara: '000.000.000-00' },
+  rg:                 { categoria: 'texto',   label: 'RG',                                  obrigatorio: true },
+  pis_pasep:          { categoria: 'texto',   label: 'PIS/PASEP',                           obrigatorio: true },
+  titulo_eleitor:     { categoria: 'texto',   label: 'Título de Eleitor',                   obrigatorio: true },
+  reservista:         { categoria: 'texto',   label: 'Certificado de Reservista',           obrigatorio: false }, // só p/ homens
+  conta_bancaria:     { categoria: 'texto',   label: 'Conta bancária (agência e conta)',    obrigatorio: true },
+
+  // === Arquivos (upload via Cloudinary) ===
+  rg_foto:            { categoria: 'arquivo', label: 'RG (frente/verso) ou CNH',           obrigatorio: true,  aceita: 'image/*,application/pdf' },
+  cpf_foto:           { categoria: 'arquivo', label: 'CPF (ou CNH substituindo RG/CPF)',   obrigatorio: true,  aceita: 'image/*,application/pdf' },
+  ctps_digital:       { categoria: 'arquivo', label: 'Carteira de Trabalho Digital (CTPS)', obrigatorio: true,  aceita: 'image/*,application/pdf' },
+  comprovante_residencia: { categoria: 'arquivo', label: 'Comprovante de residência atualizado', obrigatorio: true, aceita: 'image/*,application/pdf' },
+  titulo_eleitor_foto:{ categoria: 'arquivo', label: 'Título de Eleitor (foto)',            obrigatorio: true,  aceita: 'image/*,application/pdf' },
+  certidao_nascimento:{ categoria: 'arquivo', label: 'Certidão de nascimento ou casamento',  obrigatorio: true,  aceita: 'image/*,application/pdf' },
+  reservista_foto:    { categoria: 'arquivo', label: 'Certificado de Reservista (foto)',    obrigatorio: false, aceita: 'image/*,application/pdf' },
+  comprovante_escolaridade: { categoria: 'arquivo', label: 'Comprovante de escolaridade',    obrigatorio: true,  aceita: 'image/*,application/pdf' },
+  foto_3x4:           { categoria: 'arquivo', label: 'Foto 3x4',                            obrigatorio: false, aceita: 'image/*' },
+  aso:                { categoria: 'arquivo', label: 'Atestado de Saúde Ocupacional (ASO)', obrigatorio: false, aceita: 'image/*,application/pdf' },
+  // === Dependentes (opcional, só se houver) ===
+  dependentes_cpf:    { categoria: 'arquivo', label: 'CPF dos dependentes',                 obrigatorio: false, aceita: 'image/*,application/pdf' },
+  dependentes_nascimento: { categoria: 'arquivo', label: 'Certidão de nascimento dos filhos', obrigatorio: false, aceita: 'image/*,application/pdf' },
+  dependentes_vacinacao: { categoria: 'arquivo', label: 'Carteira de vacinação (filhos)',    obrigatorio: false, aceita: 'image/*,application/pdf' },
+  dependentes_matricula: { categoria: 'arquivo', label: 'Comprovante de matrícula escolar',  obrigatorio: false, aceita: 'image/*,application/pdf' }
+};
+
+app.get('/api/documentos/lista', (req, res) => {
+  // Retorna a lista de tipos de documento (público, pra montar a UI)
+  res.json({ ok: true, tipos: TIPOS_DOCUMENTO });
+});
+
+// Candidato envia um documento (texto ou arquivo)
+app.post('/api/candidatura/:id/documento', authCandidato, upload.single('arquivo'), async (req, res) => {
+  const { tipo, valor_texto, justificativa_candidato } = req.body;
+  const candidaturaId = parseInt(req.params.id);
+  if (!tipo) return res.status(400).json({ erro: 'tipo é obrigatório' });
+  if (!TIPOS_DOCUMENTO[tipo]) return res.status(400).json({ erro: 'Tipo de documento inválido' });
+
+  const meta = TIPOS_DOCUMENTO[tipo];
+  try {
+    // Confere que a candidatura é do candidato logado
+    const cand = await pool.query(
+      'SELECT id FROM candidaturas WHERE id = $1 AND candidato_id = $2',
+      [candidaturaId, req.user.id]
+    );
+    if (cand.rows.length === 0) return res.status(403).json({ erro: 'Candidatura não encontrada' });
+
+    let valorTexto = valor_texto || null;
+    let urlArquivo = null;
+    let publicId = null;
+    let nomeArquivo = null;
+
+    if (meta.categoria === 'arquivo') {
+      if (!req.file) return res.status(400).json({ erro: 'Arquivo é obrigatório para este tipo' });
+      const up = await uploadBuffer(req.file.buffer, req.file.originalname, `documentos/${candidaturaId}`);
+      urlArquivo = up.url;
+      publicId = up.public_id;
+      nomeArquivo = req.file.originalname;
+    } else {
+      if (!valorTexto || !valorTexto.trim()) return res.status(400).json({ erro: 'Valor texto é obrigatório' });
+    }
+
+    // Upsert (se já existe um doc desse tipo, substitui)
+    const existing = await pool.query(
+      'SELECT id, public_id FROM documentos_candidatura WHERE candidatura_id = $1 AND tipo = $2',
+      [candidaturaId, tipo]
+    );
+    if (existing.rows.length > 0) {
+      // Deletar arquivo antigo do Cloudinary se houver
+      if (existing.rows[0].public_id) await deleteFile(existing.rows[0].public_id);
+    }
+
+    const result = await pool.query(`
+      INSERT INTO documentos_candidatura
+        (candidatura_id, tipo, categoria, valor_texto, url_arquivo, public_id, nome_arquivo, status, justificativa_candidato, criado_em)
+      VALUES ($1,$2,$3,$4,$5,$6,$7,'pendente',$8, NOW())
+      ON CONFLICT (candidatura_id, tipo) DO UPDATE SET
+        categoria = EXCLUDED.categoria,
+        valor_texto = EXCLUDED.valor_texto,
+        url_arquivo = EXCLUDED.url_arquivo,
+        public_id = EXCLUDED.public_id,
+        nome_arquivo = EXCLUDED.nome_arquivo,
+        status = 'pendente',
+        justificativa_candidato = EXCLUDED.justificativa_candidato,
+        criado_em = NOW(),
+        justificativa_admin = NULL,
+        revisado_em = NULL,
+        revisado_por = NULL
+      RETURNING id, tipo, status, url_arquivo, valor_texto, criado_em
+    `, [candidaturaId, tipo, meta.categoria, valorTexto, urlArquivo, publicId, nomeArquivo, justificativa_candidato || null]);
+
+    res.json({ ok: true, documento: result.rows[0] });
+  } catch (e) {
+    console.error('Erro ao enviar documento:', e);
+    res.status(500).json({ erro: 'Erro ao enviar documento: ' + e.message });
+  }
+});
+
+// Candidato lista seus documentos de uma candidatura
+app.get('/api/candidatura/:id/documentos', authCandidato, async (req, res) => {
+  const candidaturaId = parseInt(req.params.id);
+  try {
+    const cand = await pool.query(
+      'SELECT id FROM candidaturas WHERE id = $1 AND candidato_id = $2',
+      [candidaturaId, req.user.id]
+    );
+    if (cand.rows.length === 0) return res.status(403).json({ erro: 'Candidatura não encontrada' });
+    const { rows } = await pool.query(
+      'SELECT id, tipo, categoria, valor_texto, url_arquivo, nome_arquivo, status, justificativa_admin, justificativa_candidato, criado_em, revisado_em FROM documentos_candidatura WHERE candidatura_id = $1 ORDER BY tipo',
+      [candidaturaId]
+    );
+    res.json({ ok: true, documentos: rows, tipos: TIPOS_DOCUMENTO });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao listar documentos' });
+  }
+});
+
+// Admin lista documentos de uma candidatura
+app.get('/api/admin/candidatura/:id/documentos', authAdmin, async (req, res) => {
+  const candidaturaId = parseInt(req.params.id);
+  try {
+    const { rows } = await pool.query(
+      `SELECT d.*, c.nome AS candidato_nome, v.titulo AS vaga_titulo
+       FROM documentos_candidatura d
+       JOIN candidaturas ca ON ca.id = d.candidatura_id
+       JOIN candidatos c ON c.id = ca.candidato_id
+       JOIN vagas v ON v.id = ca.vaga_id
+       WHERE d.candidatura_id = $1 ORDER BY d.tipo`,
+      [candidaturaId]
+    );
+    res.json({ ok: true, documentos: rows, tipos: TIPOS_DOCUMENTO });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao listar documentos' });
+  }
+});
+
+// Admin aprova ou reprova um documento
+app.post('/api/admin/documento/:id/revisar', authAdmin, async (req, res) => {
+  const docId = parseInt(req.params.id);
+  const { acao, justificativa } = req.body; // acao: 'aprovar' | 'reprovar'
+  if (!['aprovar', 'reprovar'].includes(acao)) {
+    return res.status(400).json({ erro: 'acao deve ser "aprovar" ou "reprovar"' });
+  }
+  if (acao === 'reprovar' && (!justificativa || !justificativa.trim())) {
+    return res.status(400).json({ erro: 'Justificativa é obrigatória ao reprovar' });
+  }
+  try {
+    const novoStatus = acao === 'aprovar' ? 'aprovado' : 'reprovado';
+    const { rows } = await pool.query(`
+      UPDATE documentos_candidatura
+      SET status = $1, justificativa_admin = $2, revisado_em = NOW(), revisado_por = $3
+      WHERE id = $4
+      RETURNING id, candidatura_id, tipo, status
+    `, [novoStatus, justificativa || null, req.user.nome, docId]);
+    if (rows.length === 0) return res.status(404).json({ erro: 'Documento não encontrado' });
+    res.json({ ok: true, documento: rows[0] });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ erro: 'Erro ao revisar documento' });
   }
 });
 
