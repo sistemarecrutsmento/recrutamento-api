@@ -3,11 +3,23 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const axios = require('axios');
+const cloudinary = require('cloudinary').v2;
 require('dotenv').config();
 
 const { pool, init } = require('./db');
 const { enviarCodigo, enviarNotificacaoStatus } = require('./email');
 const { authMiddleware, authCandidato, authAdmin } = require('./auth');
+
+// Cloudinary: aceita CLOUDINARY_URL no formato cloudinary://key:secret@cloud_name
+if (process.env.CLOUDINARY_URL) cloudinary.config({ url: process.env.CLOUDINARY_URL, secure: true });
+else if (process.env.CLOUDINARY_CLOUD_NAME) {
+  cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET,
+    secure: true
+  });
+}
 
 const app = express();
 app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
@@ -830,37 +842,66 @@ const DOCUMENTOS_OBRIGATORIOS = [
 app.post('/api/candidatura/:id/documentos', async (req, res) => {
   try {
     const candidaturaId = Number(req.params.id);
-    const { documentos } = req.body; // [{tipo, valor_texto, arquivo_base64, arquivo_nome, arquivo_tipo, arquivo_tamanho}]
+    const { documentos } = req.body; // [{tipo, valor_texto, arquivo_base64, arquivo_nome, arquivo_tipo}]
     if (!Array.isArray(documentos) || documentos.length === 0) {
       return res.status(400).json({ erro: 'Nenhum documento enviado' });
     }
-    // Limite: 2MB por arquivo em base64 (~1.5MB binário)
-    const MAX = 2 * 1024 * 1024;
+    // Limite: 5MB em base64 (~3.7MB binário)
+    const MAX = 5 * 1024 * 1024;
     for (const d of documentos) {
       if (d.arquivo_base64 && d.arquivo_base64.length > MAX) {
-        return res.status(413).json({ erro: `Arquivo "${d.arquivo_nome || d.tipo}" passa de 2MB.` });
+        return res.status(413).json({ erro: `Arquivo "${d.arquivo_nome || d.tipo}" passa de 5MB.` });
       }
     }
-    // Apaga envios anteriores do mesmo tipo (mantém histórico de revisões)
+    // Apaga envios anteriores do mesmo tipo (candidato pode reenviar)
     const tipos = documentos.map(d => d.tipo).filter(Boolean);
     if (tipos.length) {
+      // Antes de apagar, tenta remover do Cloudinary também (best effort)
+      const { rows: antigos } = await pool.query(
+        `SELECT id, arquivo_public_id FROM documentos_candidatura WHERE candidatura_id = $1 AND tipo = ANY($2)`,
+        [candidaturaId, tipos]
+      );
+      for (const a of antigos) {
+        if (a.arquivo_public_id) {
+          cloudinary.uploader.destroy(a.arquivo_public_id).catch(() => {});
+        }
+      }
       await pool.query('DELETE FROM documentos_candidatura WHERE candidatura_id = $1 AND tipo = ANY($2)', [candidaturaId, tipos]);
     }
     // Insere os novos
+    let salvos = 0;
     for (const d of documentos) {
+      let arquivoUrl = null, arquivoPublicId = null;
+      if (d.arquivo_base64) {
+        // Sobe pro Cloudinary via data URI
+        const dataUri = d.arquivo_base64.startsWith('data:') ? d.arquivo_base64 : `data:${d.arquivo_tipo || 'application/octet-stream'};base64,${d.arquivo_base64}`;
+        try {
+          const r = await cloudinary.uploader.upload(dataUri, {
+            folder: `vagas-io/candidatura-${candidaturaId}`,
+            public_id: `${candidaturaId}_${d.tipo}_${Date.now()}`,
+            resource_type: 'auto'
+          });
+          arquivoUrl = r.secure_url;
+          arquivoPublicId = r.public_id;
+        } catch (upErr) {
+          console.error('[DOCS] cloudinary upload erro:', upErr.message);
+          return res.status(500).json({ erro: `Falha no upload do arquivo "${d.arquivo_nome || d.tipo}": ${upErr.message}` });
+        }
+      }
       await pool.query(
         `INSERT INTO documentos_candidatura
-         (candidatura_id, tipo, categoria, valor_texto, arquivo_base64, arquivo_nome, arquivo_tipo, arquivo_tamanho, status, enviado_em)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'pendente', NOW())`,
-        [candidaturaId, d.tipo, d.categoria || 'arquivo', d.valor_texto || null, d.arquivo_base64 || null, d.arquivo_nome || null, d.arquivo_tipo || null, d.arquivo_tamanho || null]
+         (candidatura_id, tipo, categoria, valor_texto, arquivo_url, arquivo_public_id, arquivo_nome, arquivo_tipo, arquivo_tamanho, status, enviado_em)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pendente', NOW())`,
+        [candidaturaId, d.tipo, d.categoria || 'arquivo', d.valor_texto || null, arquivoUrl, arquivoPublicId, d.arquivo_nome || null, d.arquivo_tipo || null, d.arquivo_tamanho || null]
       );
+      salvos++;
     }
     // Marca a etapa como "em_andamento" (candidato enviou) — admin ainda precisa revisar
     await pool.query(
       `UPDATE candidaturas SET etapa_atual = GREATEST(etapa_atual, $1) WHERE id = $2`,
-      [5, candidaturaId] // etapa 5 = coleta de documentos (índice 4 nas 6 etapas)
+      [5, candidaturaId] // etapa 5 = coleta de documentos
     );
-    res.json({ ok: true, salvos: documentos.length });
+    res.json({ ok: true, salvos });
   } catch (e) {
     console.error('[DOCS] erro ao enviar:', e);
     res.status(500).json({ erro: e.message });
@@ -872,7 +913,23 @@ app.get('/api/candidatura/:id/documentos', async (req, res) => {
   try {
     const candidaturaId = Number(req.params.id);
     const { rows } = await pool.query(
-      `SELECT id, tipo, categoria, valor_texto, arquivo_nome, arquivo_tipo, arquivo_tamanho, status, justificativa_admin, enviado_em, revisado_em
+      `SELECT id, tipo, categoria, valor_texto, arquivo_url, arquivo_nome, arquivo_tipo, arquivo_tamanho, status, justificativa_admin, enviado_em, revisado_em
+       FROM documentos_candidatura WHERE candidatura_id = $1
+       ORDER BY categoria, id`,
+      [candidaturaId]
+    );
+    res.json({ documentos: rows, obrigatorios: DOCUMENTOS_OBRIGATORIOS });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+// Admin lista documentos de uma candidatura
+app.get('/api/admin/candidatura/:id/documentos', authAdmin, async (req, res) => {
+  try {
+    const candidaturaId = Number(req.params.id);
+    const { rows } = await pool.query(
+      `SELECT id, tipo, categoria, valor_texto, arquivo_url, arquivo_nome, arquivo_tipo, arquivo_tamanho, status, justificativa_admin, enviado_em, revisado_em
        FROM documentos_candidatura WHERE candidatura_id = $1
        ORDER BY categoria, id`,
       [candidaturaId]
