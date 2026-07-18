@@ -139,6 +139,45 @@ app.post('/api/_debug/migrar', async (req, res) => {
   }
 });
 
+// ===== Debug: ajustar etapas de uma vaga (substitui nome da etapa) =====
+app.post('/api/_debug/vaga-etapas', async (req, res) => {
+  try {
+    const { vaga_id, substituir } = req.body;
+    // substituir: [{ de: 'Teste prático', para: 'Coleta de documentos' }]
+    if (!vaga_id || !Array.isArray(substituir)) {
+      return res.status(400).json({ erro: 'vaga_id e substituir[] são obrigatórios' });
+    }
+    const { rows: v } = await pool.query('SELECT id, etapas FROM vagas WHERE id = $1', [vaga_id]);
+    if (v.length === 0) return res.status(404).json({ erro: 'Vaga não encontrada' });
+    let etapas = v[0].etapas;
+    if (typeof etapas === 'string') { try { etapas = JSON.parse(etapas); } catch (e) { etapas = []; } }
+    let alterado = false;
+    for (const e of (etapas || [])) {
+      for (const s of substituir) {
+        const nome = (typeof e === 'string' ? e : e.nome);
+        if (nome === s.de) {
+          if (typeof e === 'string') {
+            const idx = etapas.indexOf(e);
+            etapas[idx] = s.para;
+          } else {
+            e.nome = s.para;
+          }
+          alterado = true;
+        }
+      }
+    }
+    if (!alterado) return res.json({ ok: false, msg: 'Nenhuma etapa correspondia', etapas });
+    const upd = await pool.query(
+      'UPDATE vagas SET etapas = $1 WHERE id = $2 RETURNING etapas',
+      [JSON.stringify(etapas), vaga_id]
+    );
+    res.json({ ok: true, etapas: upd.rows[0].etapas });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ erro: e.message });
+  }
+});
+
 // ============= CEP (ViaCEP) =============
 app.get('/api/cep/:cep', async (req, res) => {
   const cep = req.params.cep.replace(/\D/g, '');
@@ -678,24 +717,29 @@ app.get('/api/admin/vagas', authAdmin, async (req, res) => {
 
 app.put('/api/admin/vagas/:id', authAdmin, async (req, res) => {
   const v = req.body;
+  // Monta query dinâmica para permitir atualizar etapas opcionalmente
+  const updates = [];
+  const values = [];
+  const push = (col, val) => { values.push(val); updates.push(`${col} = $${values.length}`); };
+  if (v.titulo !== undefined) push('titulo', v.titulo);
+  if (v.empresa !== undefined) push('empresa', v.empresa);
+  if (v.cidade !== undefined) push('cidade', v.cidade);
+  if (v.estado !== undefined) push('estado', v.estado);
+  if (v.tipo_contrato !== undefined) push('tipo_contrato', v.tipo_contrato);
+  if (v.nivel !== undefined) push('nivel', v.nivel);
+  if (v.area !== undefined) push('area', v.area);
+  if (v.salario_min !== undefined) push('salario_min', v.salario_min);
+  if (v.salario_max !== undefined) push('salario_max', v.salario_max);
+  if (v.descricao !== undefined) push('descricao', v.descricao);
+  if (v.requisitos !== undefined) push('requisitos', v.requisitos);
+  if (v.beneficios !== undefined) push('beneficios', v.beneficios);
+  if (v.status !== undefined) push('status', v.status);
+  if (v.etapas !== undefined && Array.isArray(v.etapas)) push('etapas', JSON.stringify(v.etapas));
+  if (updates.length === 0) return res.status(400).json({ erro: 'Nenhum campo para atualizar' });
+  values.push(req.params.id);
   const { rows } = await pool.query(
-    `UPDATE vagas SET
-      titulo = COALESCE($1, titulo),
-      empresa = COALESCE($2, empresa),
-      cidade = COALESCE($3, cidade),
-      estado = COALESCE($4, estado),
-      tipo_contrato = COALESCE($5, tipo_contrato),
-      nivel = COALESCE($6, nivel),
-      area = COALESCE($7, area),
-      salario_min = COALESCE($8, salario_min),
-      salario_max = COALESCE($9, salario_max),
-      descricao = COALESCE($10, descricao),
-      requisitos = COALESCE($11, requisitos),
-      beneficios = COALESCE($12, beneficios),
-      status = COALESCE($13, status)
-     WHERE id = $14 RETURNING *`,
-    [v.titulo, v.empresa, v.cidade, v.estado, v.tipo_contrato, v.nivel, v.area,
-     v.salario_min, v.salario_max, v.descricao, v.requisitos, v.beneficios, v.status, req.params.id]
+    `UPDATE vagas SET ${updates.join(', ')} WHERE id = $${values.length} RETURNING *`,
+    values
   );
   if (rows.length === 0) return res.status(404).json({ erro: 'Vaga não encontrada' });
   res.json({ ok: true, vaga: rows[0] });
