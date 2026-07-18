@@ -7,7 +7,7 @@ const cloudinary = require('cloudinary').v2;
 require('dotenv').config();
 
 const { pool, init } = require('./db');
-const { enviarCodigo, enviarNotificacaoStatus } = require('./email');
+const { enviarCodigo, enviarNotificacaoStatus, enviarEmailProposta } = require('./email');
 const { authMiddleware, authCandidato, authAdmin } = require('./auth');
 
 // Cloudinary: aceita CLOUDINARY_URL no formato cloudinary://key:secret@cloud_name
@@ -1268,6 +1268,14 @@ app.post('/api/admin/candidatura/:id/status', authAdmin, async (req, res) => {
       const etapasArr = typeof cand.etapas === 'string' ? JSON.parse(cand.etapas) : cand.etapas;
       if (Array.isArray(etapasArr) && etapasArr.length) totalEtapas = etapasArr.length;
     } catch (e) {}
+
+    // Trava: ao ENTRAR na etapa 5 (Proposta, índice 4), exige que a proposta já tenha sido enviada
+    if (novaEtapa === 4 && !cand.proposta_enviada_em) {
+      return res.status(400).json({
+        erro: 'Antes de avançar para a etapa "Proposta", você precisa enviar a proposta ao candidato (botão 📨 Enviar Proposta).'
+      });
+    }
+
     if (novaEtapa >= totalEtapas) {
       novoStatus = 'contratado';
     }
@@ -1304,6 +1312,200 @@ app.post('/api/admin/candidatura/:id/status', authAdmin, async (req, res) => {
   }
 
   res.json({ ok: true });
+});
+
+// ===== Admin: enviar proposta ao candidato (etapa 5 - Proposta) =====
+// Recebe texto da proposta + opcional PDF (data URL base64) ou já com URL pública
+app.post('/api/admin/candidatura/:id/enviar-proposta', authAdmin, async (req, res) => {
+  const { texto, pdf_url, pdf_public_id } = req.body;
+  if (!texto && !pdf_url) return res.status(400).json({ erro: 'Envie um texto ou um PDF da proposta' });
+
+  const { rows: c } = await pool.query(`
+    SELECT c.*, v.titulo, cd.nome, cd.email
+    FROM candidaturas c
+    JOIN vagas v ON v.id = c.vaga_id
+    JOIN candidatos cd ON cd.id = c.candidato_id
+    WHERE c.id = $1`, [req.params.id]);
+  if (c.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
+  const cand = c[0];
+
+  // Se veio PDF em base64 (data URL), faz upload pro Cloudinary
+  let pdfFinalUrl = pdf_url || null;
+  let pdfFinalId = pdf_public_id || null;
+  if (pdf_url && String(pdf_url).startsWith('data:application/pdf')) {
+    if (!process.env.CLOUDINARY_URL && !process.env.CLOUDINARY_CLOUD_NAME) {
+      return res.status(500).json({ erro: 'Cloudinary não configurado para receber PDF' });
+    }
+    try {
+      const up = await cloudinary.uploader.upload(pdf_url, {
+        folder: 'propostas',
+        resource_type: 'raw',
+        public_id: `proposta_${cand.id}_${Date.now()}`
+      });
+      pdfFinalUrl = up.secure_url;
+      pdfFinalId = up.public_id;
+    } catch (e) {
+      console.error('Erro upload PDF proposta:', e);
+      return res.status(500).json({ erro: 'Falha ao enviar PDF: ' + e.message });
+    }
+  }
+
+  // Monta entrada no histórico
+  const historico = Array.isArray(cand.historico) ? [...cand.historico] : [];
+  historico.push({
+    etapa: cand.etapa_atual,
+    status: 'proposta_enviada',
+    acao: 'enviar_proposta',
+    mensagem: 'Proposta enviada ao candidato',
+    data: new Date().toISOString(),
+    por: req.user.nome
+  });
+
+  await pool.query(
+    `UPDATE candidaturas
+     SET proposta_texto = $1,
+         proposta_pdf_url = $2,
+         proposta_pdf_public_id = $3,
+         proposta_enviada_em = NOW(),
+         historico = $4
+     WHERE id = $5`,
+    [texto || null, pdfFinalUrl, pdfFinalId, JSON.stringify(historico), req.params.id]
+  );
+
+  // Notifica o candidato por e-mail
+  try {
+    await enviarEmailProposta(cand.email, cand.nome, cand.titulo, pdfFinalUrl);
+  } catch (e) {
+    console.error('Falha ao notificar proposta:', e.message);
+  }
+
+  res.json({ ok: true, proposta: { texto, pdf_url: pdfFinalUrl } });
+});
+
+// ===== Admin: visualizar proposta enviada (pra imprimir/baixar de novo) =====
+app.get('/api/admin/candidatura/:id/proposta', authAdmin, async (req, res) => {
+  const { rows } = await pool.query(
+    'SELECT proposta_texto, proposta_pdf_url, proposta_enviada_em, proposta_aceita_em, proposta_recusada_em, proposta_motivo_recusa FROM candidaturas WHERE id = $1',
+    [req.params.id]
+  );
+  if (rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
+  res.json({ ok: true, proposta: rows[0] });
+});
+
+// ===== Candidato: aceitar proposta =====
+app.post('/api/candidato/aceitar-proposta/:candidaturaId', authCandidato, async (req, res) => {
+  const { rows: c } = await pool.query(`
+    SELECT c.*, v.titulo, v.etapas, cd.email as cand_email
+    FROM candidaturas c
+    JOIN vagas v ON v.id = c.vaga_id
+    JOIN candidatos cd ON cd.id = c.candidato_id
+    WHERE c.id = $1`, [req.params.candidaturaId]);
+  if (c.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
+  const cand = c[0];
+
+  // Garante que o candidato é o dono da candidatura
+  if (cand.cand_email !== req.user.email) return res.status(403).json({ erro: 'Acesso negado' });
+
+  // Só pode aceitar se estiver na etapa 5 (índice 4) — Proposta
+  if ((cand.etapa_atual || 0) !== 4) {
+    return res.status(400).json({ erro: 'Você só pode aceitar a proposta quando estiver na etapa "Proposta"' });
+  }
+  if (!cand.proposta_enviada_em) {
+    return res.status(400).json({ erro: 'Nenhuma proposta foi enviada ainda' });
+  }
+  if (cand.proposta_aceita_em) {
+    return res.status(400).json({ erro: 'Proposta já foi aceita' });
+  }
+
+  const historico = Array.isArray(cand.historico) ? [...cand.historico] : [];
+  historico.push({
+    etapa: 5, // próxima etapa = Coleta de documentos (índice 5)
+    status: 'em_andamento',
+    acao: 'aceitar_proposta',
+    mensagem: 'Candidato aceitou a proposta',
+    data: new Date().toISOString(),
+    por: cand.cand_email
+  });
+
+  await pool.query(
+    `UPDATE candidaturas
+     SET proposta_aceita_em = NOW(),
+         etapa_atual = 5,
+         status = 'em_andamento',
+         historico = $1
+     WHERE id = $2`,
+    [JSON.stringify(historico), req.params.candidaturaId]
+  );
+
+  res.json({ ok: true, msg: 'Proposta aceita! Próxima etapa: Coleta de documentos.' });
+});
+
+// ===== Candidato: recusar proposta =====
+app.post('/api/candidato/recusar-proposta/:candidaturaId', authCandidato, async (req, res) => {
+  const { motivo } = req.body;
+  const { rows: c } = await pool.query(`
+    SELECT c.*, v.titulo, cd.email as cand_email
+    FROM candidaturas c
+    JOIN vagas v ON v.id = c.vaga_id
+    JOIN candidatos cd ON cd.id = c.candidato_id
+    WHERE c.id = $1`, [req.params.candidaturaId]);
+  if (c.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
+  const cand = c[0];
+
+  if (cand.cand_email !== req.user.email) return res.status(403).json({ erro: 'Acesso negado' });
+  if ((cand.etapa_atual || 0) !== 4) {
+    return res.status(400).json({ erro: 'Você só pode recusar a proposta quando estiver na etapa "Proposta"' });
+  }
+
+  const historico = Array.isArray(cand.historico) ? [...cand.historico] : [];
+  historico.push({
+    etapa: 4,
+    status: 'rejeitado',
+    acao: 'recusar_proposta',
+    mensagem: 'Candidato recusou a proposta' + (motivo ? `: ${motivo}` : ''),
+    data: new Date().toISOString(),
+    por: cand.cand_email
+  });
+
+  await pool.query(
+    `UPDATE candidaturas
+     SET proposta_recusada_em = NOW(),
+         proposta_motivo_recusa = $1,
+         status = 'rejeitado',
+         historico = $2
+     WHERE id = $3`,
+    [motivo || null, JSON.stringify(historico), req.params.candidaturaId]
+  );
+
+  res.json({ ok: true, msg: 'Proposta recusada.' });
+});
+
+// ===== Candidato: ver proposta pendente (pra aceitar/recusar) =====
+app.get('/api/candidato/candidatura/:id/proposta', authCandidato, async (req, res) => {
+  const { rows: c } = await pool.query(`
+    SELECT c.id, c.etapa_atual, c.status, c.proposta_texto, c.proposta_pdf_url,
+           c.proposta_enviada_em, c.proposta_aceita_em, c.proposta_recusada_em,
+           v.titulo, cd.email as cand_email
+    FROM candidaturas c
+    JOIN vagas v ON v.id = c.vaga_id
+    JOIN candidatos cd ON cd.id = c.candidato_id
+    WHERE c.id = $1`, [req.params.id]);
+  if (c.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
+  const cand = c[0];
+  if (cand.cand_email !== req.user.email) return res.status(403).json({ erro: 'Acesso negado' });
+
+  res.json({
+    ok: true,
+    proposta: {
+      texto: cand.proposta_texto,
+      pdf_url: cand.proposta_pdf_url,
+      enviada_em: cand.proposta_enviada_em,
+      aceita_em: cand.proposta_aceita_em,
+      recusada_em: cand.proposta_recusada_em,
+      etapa_atual: cand.etapa_atual,
+      status: cand.status
+    }
+  });
 });
 
 app.post('/api/admin/recrutadores', authAdmin, async (req, res) => {
