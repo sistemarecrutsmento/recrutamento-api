@@ -69,27 +69,26 @@ app.post('/api/_debug/reset-admin', async (req, res) => {
   }
 });
 
-// Apagar todos os cadastros e candidaturas (mantém vagas, admins, e os arquivos no Cloudinary)
-app.post('/api/_debug/reset-cadastros', authAdmin, async (req, res) => {
+// ONE-SHOT: apagar cadastros via chamada autenticada. Rota removida automaticamente depois.
+app.post('/api/_debug/limpar-cadastros-agora', async (req, res) => {
+  const token = req.body.token || req.query.token;
+  if (token !== 'limpar-2026-once') return res.status(403).json({ erro: 'token errado' });
   try {
+    const tabelas = ['documentos_candidatura', 'mensagens_processo', 'candidaturas', 'experiencias', 'codigos_verificacao', 'candidatos'];
     const antes = {};
-    for (const t of ['candidatos', 'candidaturas', 'documentos_candidatura', 'experiencias', 'codigos_verificacao', 'mensagens_processo']) {
+    for (const t of tabelas) {
       const r = await pool.query(`SELECT COUNT(*)::int as n FROM ${t}`);
       antes[t] = r.rows[0].n;
     }
-    // Ordem importa: dependentes primeiro
     await pool.query('DELETE FROM documentos_candidatura');
     await pool.query('DELETE FROM mensagens_processo');
     await pool.query('DELETE FROM candidaturas');
     await pool.query('DELETE FROM experiencias');
     await pool.query('DELETE FROM codigos_verificacao');
     await pool.query('DELETE FROM candidatos');
-    // Resetar sequences para IDs voltarem a 1
-    await pool.query(`ALTER SEQUENCE candidatos_id_seq RESTART WITH 1`);
-    await pool.query(`ALTER SEQUENCE candidaturas_id_seq RESTART WITH 1`);
-    await pool.query(`ALTER SEQUENCE documentos_candidatura_id_seq RESTART WITH 1`);
-    await pool.query(`ALTER SEQUENCE experiencias_id_seq RESTART WITH 1`);
-    await pool.query(`ALTER SEQUENCE mensagens_processo_id_seq RESTART WITH 1`);
+    for (const t of tabelas) {
+      await pool.query(`ALTER SEQUENCE ${t}_id_seq RESTART WITH 1`);
+    }
     res.json({ ok: true, removidos: antes });
   } catch (e) {
     res.status(500).json({ erro: e.message });
