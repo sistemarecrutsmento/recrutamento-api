@@ -113,6 +113,7 @@ async function init() {
         autor_tipo TEXT,
         autor_nome TEXT,
         texto TEXT,
+        contexto TEXT,
         criado_em TIMESTAMP DEFAULT NOW()
       );
 
@@ -149,6 +150,8 @@ async function init() {
     await client.query(`ALTER TABLE candidatos ADD COLUMN IF NOT EXISTS experiencia TEXT;`);
     // Áreas de interesse (Banco de Talentos) — array JSON
     await client.query(`ALTER TABLE candidatos ADD COLUMN IF NOT EXISTS areas_interesse JSONB DEFAULT '[]'::jsonb;`);
+  // Mensagens de processo podem ter contexto (ex: 'documento_retornado') para filtrar no painel do candidato
+  await client.query(`ALTER TABLE mensagens_processo ADD COLUMN IF NOT EXISTS contexto TEXT;`);
 
     console.log('Tabelas criadas/verificadas + colunas garantidas');
   } finally {
