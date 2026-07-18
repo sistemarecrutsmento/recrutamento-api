@@ -7,7 +7,7 @@ const cloudinary = require('cloudinary').v2;
 require('dotenv').config();
 
 const { pool, init } = require('./db');
-const { enviarCodigo, enviarNotificacaoStatus, enviarEmailProposta } = require('./email');
+const { enviarCodigo, enviarNotificacaoStatus, enviarEmailProposta, enviarEmailBg } = require('./email');
 const { authMiddleware, authCandidato, authAdmin } = require('./auth');
 
 // Cloudinary: aceita CLOUDINARY_URL no formato cloudinary://key:secret@cloud_name
@@ -1166,11 +1166,11 @@ app.post('/api/admin/candidatura/:id/aprovar-documentos', authAdmin, async (req,
       [novoStatus, novaEtapa, JSON.stringify(historico), candId]
     );
 
-    // 6) Notificar candidato
+    // 6) Notificar candidato (em background — não trava a resposta)
     try {
-      await enviarNotificacaoStatus(cand.email, cand.nome, cand.titulo, 'aprovado');
+      enviarEmailBg(enviarNotificacaoStatus, cand.email, cand.nome, cand.titulo, 'aprovado');
     } catch (e) {
-      console.error('Falha ao notificar candidato:', e.message);
+      console.error('Falha ao agendar notificação:', e.message);
     }
 
     res.json({
@@ -1303,9 +1303,9 @@ app.post('/api/admin/candidatura/:id/status', authAdmin, async (req, res) => {
   }
 
   try {
-    await enviarNotificacaoStatus(cand.email, cand.nome, cand.titulo, status);
+    enviarEmailBg(enviarNotificacaoStatus, cand.email, cand.nome, cand.titulo, status);
   } catch (e) {
-    console.error('Falha ao notificar candidato:', e.message);
+    console.error('Falha ao agendar notificação:', e.message);
   }
 
   res.json({ ok: true });
@@ -1369,11 +1369,11 @@ app.post('/api/admin/candidatura/:id/enviar-proposta', authAdmin, async (req, re
     [texto || null, pdfFinalUrl, pdfFinalId, JSON.stringify(historico), req.params.id]
   );
 
-  // Notifica o candidato por e-mail
+  // Notifica o candidato por e-mail (em background — não trava a resposta)
   try {
-    await enviarEmailProposta(cand.email, cand.nome, cand.titulo, pdfFinalUrl);
+    enviarEmailBg(enviarEmailProposta, cand.email, cand.nome, cand.titulo, pdfFinalUrl);
   } catch (e) {
-    console.error('Falha ao notificar proposta:', e.message);
+    console.error('Falha ao agendar e-mail de proposta:', e.message);
   }
 
   res.json({ ok: true, proposta: { texto, pdf_url: pdfFinalUrl } });
