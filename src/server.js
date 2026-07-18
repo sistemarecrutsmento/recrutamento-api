@@ -41,142 +41,151 @@ app.use((err, req, res, next) => {
 app.get('/api/saude', (req, res) => res.json({ ok: true, sistema: process.env.SISTEMA_NOME, hora: new Date().toISOString() }));
 
 // Debug: testa bcrypt isolado
-app.get('/api/_debug/bcrypt', async (req, res) => {
-  try {
-    const hash = await bcrypt.hash('089339', 10);
-    const ok = await bcrypt.compare('089339', hash);
-    const ok2 = await bcrypt.compare('errado', hash);
-    res.json({ ok, ok2, hashInicio: hash.substring(0, 7), node: process.version });
-  } catch (e) {
-    res.status(500).json({ erro: e.message, stack: e.stack?.substring(0, 500) });
-  }
-});
+// =========================================================================
+// ROTAS DE DEBUG (APENAS DESENVOLVIMENTO)
+// =========================================================================
+// Em produção, só funciona se DEBUG_API=1 estiver setado no env
+const DEBUG = process.env.DEBUG_API === '1';
 
-// Resetar senha do admin (não usa bcrypt no compare, só cria novo hash)
-app.post('/api/_debug/reset-admin', async (req, res) => {
-  try {
-    const email = (req.body.email || process.env.EMAIL_FROM || '').toLowerCase();
-    const senha = req.body.senha || process.env.ADMIN_SENHA || '089339';
-    if (!email) return res.status(400).json({ erro: 'email obrigatório' });
-    const hash = await bcrypt.hash(senha, 10);
-    const { rows } = await pool.query(
-      `UPDATE admins SET senha_hash = $1 WHERE email = $2 RETURNING id, email`,
-      [hash, email]
-    );
-    res.json({ ok: true, atualizado: rows.length, hashInicio: hash.substring(0, 7) });
-  } catch (e) {
-    res.status(500).json({ erro: e.message });
-  }
-});
-
-// Ver estado do admin
-app.get('/api/_debug/admin-info', async (req, res) => {
-  try {
-    const { rows } = await pool.query(
-      `SELECT id, nome, email, substring(senha_hash, 1, 10) as hash_inicio, length(senha_hash) as hash_len FROM admins`
-    );
-    res.json({ admins: rows });
-  } catch (e) {
-    res.status(500).json({ erro: e.message });
-  }
-});
-
-app.get('/api/_debug/config', async (req, res) => {
-  res.json({
-    hasDb: !!process.env.DATABASE_URL,
-    hasEmail: !!process.env.EMAIL_FROM,
-    hasEmailPwd: !!process.env.EMAIL_APP_PASSWORD,
-    hasJwt: !!process.env.JWT_SECRET,
-    smtpDebug: process.env.SMTP_DEBUG || '0',
-    nodeEnv: process.env.NODE_ENV || 'sem'
-  });
-});
-
-// Teste dashboard SEM auth (público)
-app.get('/api/_debug/dashboard', async (req, res) => {
-  try {
-    const stats = await pool.query(`
-      SELECT
-        (SELECT COUNT(*) FROM vagas WHERE status = 'publicada') as vagas_ativas,
-        (SELECT COUNT(*) FROM candidatos) as total_candidatos,
-        (SELECT COUNT(*) FROM candidaturas WHERE status = 'em_analise') as candidaturas_pendentes,
-        (SELECT COUNT(*) FROM vagas) as total_vagas
-    `);
-    res.json({ stats: stats.rows[0] });
-  } catch (e) {
-    res.status(500).json({ erro: e.message, stack: e.stack?.substring(0, 300) });
-  }
-});
-
-app.get('/api/_debug/ultimo-codigo/:email', async (req, res) => {
-  try {
-    const { rows } = await pool.query(
-      `SELECT codigo, expira_em, usado FROM codigos_verificacao
-       WHERE email = $1 ORDER BY id DESC LIMIT 1`,
-      [req.params.email.toLowerCase()]
-    );
-    if (rows.length === 0) return res.status(404).json({ erro: 'Nenhum código para esse e-mail' });
-    res.json({ codigo: rows[0].codigo, expira_em: rows[0].expira_em, usado: rows[0].usado });
-  } catch (e) {
-    res.status(500).json({ erro: e.message });
-  }
-});
-
-// Migração manual via API (cria coluna criado_em em todas as tabelas)
-app.post('/api/_debug/migrar', async (req, res) => {
-  try {
-    // Procurar a coluna em todos os schemas
-    const cols = await pool.query(`
-      SELECT table_schema, table_name, column_name 
-      FROM information_schema.columns 
-      WHERE column_name ILIKE '%criad%'
-    `);
-    // Ver o search_path
-    const sp = await pool.query(`SHOW search_path`);
-    res.json({ ok: true, schemas: sp.rows, colunas_criadas: cols.rows });
-  } catch (e) {
-    res.status(500).json({ erro: e.message });
-  }
-});
-
-// ===== Debug: ajustar etapas de uma vaga (substitui nome da etapa) =====
-app.post('/api/_debug/vaga-etapas', async (req, res) => {
-  try {
-    const { vaga_id, substituir } = req.body;
-    // substituir: [{ de: 'Teste prático', para: 'Coleta de documentos' }]
-    if (!vaga_id || !Array.isArray(substituir)) {
-      return res.status(400).json({ erro: 'vaga_id e substituir[] são obrigatórios' });
+if (DEBUG) {
+  // Teste de bcrypt
+  app.get('/api/_debug/bcrypt', async (req, res) => {
+    try {
+      const hash = await bcrypt.hash('089339', 10);
+      const ok = await bcrypt.compare('089339', hash);
+      const ok2 = await bcrypt.compare('errado', hash);
+      res.json({ ok, ok2, hashInicio: hash.substring(0, 7), node: process.version });
+    } catch (e) {
+      res.status(500).json({ erro: e.message, stack: e.stack?.substring(0, 500) });
     }
-    const { rows: v } = await pool.query('SELECT id, etapas FROM vagas WHERE id = $1', [vaga_id]);
-    if (v.length === 0) return res.status(404).json({ erro: 'Vaga não encontrada' });
-    let etapas = v[0].etapas;
-    if (typeof etapas === 'string') { try { etapas = JSON.parse(etapas); } catch (e) { etapas = []; } }
-    let alterado = false;
-    for (const e of (etapas || [])) {
-      for (const s of substituir) {
-        const nome = (typeof e === 'string' ? e : e.nome);
-        if (nome === s.de) {
-          if (typeof e === 'string') {
-            const idx = etapas.indexOf(e);
-            etapas[idx] = s.para;
-          } else {
-            e.nome = s.para;
+  });
+
+  // Resetar senha do admin
+  app.post('/api/_debug/reset-admin', async (req, res) => {
+    try {
+      const email = (req.body.email || process.env.EMAIL_FROM || '').toLowerCase();
+      const senha = req.body.senha || process.env.ADMIN_SENHA || '089339';
+      if (!email) return res.status(400).json({ erro: 'email obrigatório' });
+      const hash = await bcrypt.hash(senha, 10);
+      const { rows } = await pool.query(
+        `UPDATE admins SET senha_hash = $1 WHERE email = $2 RETURNING id, email`,
+        [hash, email]
+      );
+      res.json({ ok: true, atualizado: rows.length, hashInicio: hash.substring(0, 7) });
+    } catch (e) {
+      res.status(500).json({ erro: e.message });
+    }
+  });
+
+  // Estado do admin (SEM hash da senha — só id/nome/email)
+  app.get('/api/_debug/admin-info', async (req, res) => {
+    try {
+      const { rows } = await pool.query(
+        `SELECT id, nome, email, criado_em FROM admins`
+      );
+      res.json({ admins: rows });
+    } catch (e) {
+      res.status(500).json({ erro: e.message });
+    }
+  });
+
+  app.get('/api/_debug/config', async (req, res) => {
+    res.json({
+      hasDb: !!process.env.DATABASE_URL,
+      hasEmail: !!process.env.EMAIL_FROM,
+      hasEmailPwd: !!process.env.EMAIL_APP_PASSWORD,
+      hasJwt: !!process.env.JWT_SECRET,
+      smtpDebug: process.env.SMTP_DEBUG || '0',
+      nodeEnv: process.env.NODE_ENV || 'sem'
+    });
+  });
+
+  // Teste dashboard SEM auth (público)
+  app.get('/api/_debug/dashboard', async (req, res) => {
+    try {
+      const stats = await pool.query(`
+        SELECT
+          (SELECT COUNT(*) FROM vagas WHERE status = 'publicada') as vagas_ativas,
+          (SELECT COUNT(*) FROM candidatos) as total_candidatos,
+          (SELECT COUNT(*) FROM candidaturas WHERE status = 'em_analise') as candidaturas_pendentes,
+          (SELECT COUNT(*) FROM vagas) as total_vagas
+      `);
+      res.json({ stats: stats.rows[0] });
+    } catch (e) {
+      res.status(500).json({ erro: e.message, stack: e.stack?.substring(0, 300) });
+    }
+  });
+
+  app.get('/api/_debug/ultimo-codigo/:email', async (req, res) => {
+    try {
+      const { rows } = await pool.query(
+        `SELECT codigo, expira_em, usado FROM codigos_verificacao
+         WHERE email = $1 ORDER BY id DESC LIMIT 1`,
+        [req.params.email.toLowerCase()]
+      );
+      if (rows.length === 0) return res.status(404).json({ erro: 'Nenhum código para esse e-mail' });
+      res.json({ codigo: rows[0].codigo, expira_em: rows[0].expira_em, usado: rows[0].usado });
+    } catch (e) {
+      res.status(500).json({ erro: e.message });
+    }
+  });
+
+  // Migração manual via API
+  app.post('/api/_debug/migrar', async (req, res) => {
+    try {
+      const cols = await pool.query(`
+        SELECT table_schema, table_name, column_name
+        FROM information_schema.columns
+        WHERE column_name ILIKE '%criad%'
+      `);
+      const sp = await pool.query(`SHOW search_path`);
+      res.json({ ok: true, schemas: sp.rows, colunas_criadas: cols.rows });
+    } catch (e) {
+      res.status(500).json({ erro: e.message });
+    }
+  });
+
+  // ===== Debug: ajustar etapas de uma vaga =====
+  app.post('/api/_debug/vaga-etapas', async (req, res) => {
+    try {
+      const { vaga_id, substituir } = req.body;
+      if (!vaga_id || !Array.isArray(substituir)) {
+        return res.status(400).json({ erro: 'vaga_id e substituir[] são obrigatórios' });
+      }
+      const { rows: v } = await pool.query('SELECT id, etapas FROM vagas WHERE id = $1', [vaga_id]);
+      if (v.length === 0) return res.status(404).json({ erro: 'Vaga não encontrada' });
+      let etapas = v[0].etapas;
+      if (typeof etapas === 'string') { try { etapas = JSON.parse(etapas); } catch (e) { etapas = []; } }
+      let alterado = false;
+      for (const e of (etapas || [])) {
+        for (const s of substituir) {
+          const nome = (typeof e === 'string' ? e : e.nome);
+          if (nome === s.de) {
+            if (typeof e === 'string') {
+              const idx = etapas.indexOf(e);
+              etapas[idx] = s.para;
+            } else {
+              e.nome = s.para;
+            }
+            alterado = true;
           }
-          alterado = true;
         }
       }
+      if (!alterado) return res.json({ ok: false, msg: 'Nenhuma etapa correspondia', etapas });
+      const upd = await pool.query(
+        'UPDATE vagas SET etapas = $1 WHERE id = $2 RETURNING etapas',
+        [JSON.stringify(etapas), vaga_id]
+      );
+      res.json({ ok: true, etapas: upd.rows[0].etapas });
+    } catch (e) {
+      console.error(e);
+      res.status(500).json({ erro: e.message });
     }
-    if (!alterado) return res.json({ ok: false, msg: 'Nenhuma etapa correspondia', etapas });
-    const upd = await pool.query(
-      'UPDATE vagas SET etapas = $1 WHERE id = $2 RETURNING etapas',
-      [JSON.stringify(etapas), vaga_id]
-    );
-    res.json({ ok: true, etapas: upd.rows[0].etapas });
-  } catch (e) {
-    console.error(e);
-    res.status(500).json({ erro: e.message });
-  }
-});
+  });
+} else {
+  // Em produção, todas as rotas de debug retornam 404
+  app.all('/api/_debug/*', (req, res) => res.status(404).json({ erro: 'Not found' }));
+}
 
 // ============= CEP (ViaCEP) =============
 app.get('/api/cep/:cep', async (req, res) => {
@@ -693,21 +702,27 @@ app.get('/api/admin/dashboard', authAdmin, async (req, res) => {
 });
 
 app.post('/api/admin/vagas', authAdmin, async (req, res) => {
-  const v = req.body;
-  const etapas = v.etapas || [
-    { nome: 'Inscrição' },
-    { nome: 'Triagem curricular' },
-    { nome: 'Entrevista RH' },
-    { nome: 'Entrevista gestor' },
-    { nome: 'Teste prático' },
-    { nome: 'Contratação' }
-  ];
-  const { rows } = await pool.query(
-    `INSERT INTO vagas (titulo, empresa, cidade, estado, tipo_contrato, nivel, area, salario_min, salario_max, descricao, requisitos, beneficios, etapas, criada_por)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
-    [v.titulo, v.empresa, v.cidade, v.estado, v.tipo_contrato, v.nivel, v.area, v.salario_min, v.salario_max, v.descricao, v.requisitos, v.beneficios, JSON.stringify(etapas), req.user.id]
-  );
-  res.json({ ok: true, vaga: rows[0] });
+  try {
+    const v = req.body;
+    if (!v.titulo) return res.status(400).json({ erro: 'Título é obrigatório' });
+    const etapas = v.etapas || [
+      { nome: 'Inscrição' },
+      { nome: 'Triagem curricular' },
+      { nome: 'Entrevista RH' },
+      { nome: 'Entrevista gestor' },
+      { nome: 'Teste prático' },
+      { nome: 'Contratação' }
+    ];
+    const { rows } = await pool.query(
+      `INSERT INTO vagas (titulo, empresa, cidade, estado, tipo_contrato, nivel, area, salario_min, salario_max, descricao, requisitos, beneficios, etapas, criada_por)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
+      [v.titulo, v.empresa, v.cidade, v.estado, v.tipo_contrato, v.nivel, v.area, v.salario_min, v.salario_max, v.descricao, v.requisitos, v.beneficios, JSON.stringify(etapas), req.user.id]
+    );
+    res.json({ ok: true, vaga: rows[0] });
+  } catch (e) {
+    console.error('[CRIAR VAGA ERRO]', e);
+    res.status(500).json({ erro: 'Erro ao criar vaga' });
+  }
 });
 
 app.get('/api/admin/vagas', authAdmin, async (req, res) => {
@@ -746,114 +761,152 @@ app.put('/api/admin/vagas/:id', authAdmin, async (req, res) => {
 });
 
 app.delete('/api/admin/vagas/:id', authAdmin, async (req, res) => {
-  await pool.query('DELETE FROM vagas WHERE id = $1', [req.params.id]);
-  res.json({ ok: true });
+  try {
+    await pool.query('DELETE FROM vagas WHERE id = $1', [req.params.id]);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[DELETE VAGA]', e);
+    res.status(500).json({ erro: 'Erro ao deletar vaga' });
+  }
 });
 
 app.get('/api/admin/vagas/:id', authAdmin, async (req, res) => {
-  const { rows } = await pool.query('SELECT * FROM vagas WHERE id = $1', [req.params.id]);
-  if (rows.length === 0) return res.status(404).json({ erro: 'Vaga não encontrada' });
-  res.json({ vaga: rows[0] });
+  try {
+    const { rows } = await pool.query('SELECT * FROM vagas WHERE id = $1', [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ erro: 'Vaga não encontrada' });
+    res.json({ vaga: rows[0] });
+  } catch (e) {
+    console.error('[GET VAGA]', e);
+    res.status(500).json({ erro: 'Erro ao buscar vaga' });
+  }
 });
 
 app.get('/api/admin/candidatos', authAdmin, async (req, res) => {
-  const { area } = req.query;
-  let sql = `SELECT id, nome, email, cpf, celular, cidade, estado, areas_interesse, banco_talentos, criado_em FROM candidatos`;
-  const params = [];
-  if (area) {
-    // Filtra candidatos que tenham a área no array areas_interesse (JSONB array)
-    // Wraps a string em ["..."] pra fazer match exato via @>
-    params.push(JSON.stringify([area]));
-    sql += ` WHERE areas_interesse @> $${params.length}::jsonb`;
+  try {
+    const { area } = req.query;
+    let sql = `SELECT id, nome, email, cpf, celular, cidade, estado, areas_interesse, banco_talentos, criado_em FROM candidatos`;
+    const params = [];
+    if (area) {
+      params.push(JSON.stringify([area]));
+      sql += ` WHERE areas_interesse @> $${params.length}::jsonb`;
+    }
+    sql += ' ORDER BY criado_em DESC';
+    const { rows } = await pool.query(sql, params);
+    res.json({ candidatos: rows });
+  } catch (e) {
+    console.error('[LIST CANDIDATOS]', e);
+    res.status(500).json({ erro: 'Erro ao listar candidatos' });
   }
-  sql += ' ORDER BY criado_em DESC';
-  const { rows } = await pool.query(sql, params);
-  res.json({ candidatos: rows });
 });
 
 // Retorna os dados completos de um candidato (currículo) para o admin
 app.get('/api/admin/candidato/:id', authAdmin, async (req, res) => {
-  const { rows } = await pool.query(
-    `SELECT id, nome, email, cpf, celular, data_nascimento, sexo,
-            acessibilidade, cep, estado, cidade, bairro, logradouro, numero, complemento,
-            formacao, instituicao, curso, situacao, data_conclusao,
-            primeiro_emprego, banco_talentos, areas_interesse, sobre_voce, experiencia,
-            criado_em
-     FROM candidatos WHERE id = $1`, [req.params.id]);
-  if (rows.length === 0) return res.status(404).json({ erro: 'Candidato não encontrado' });
-  res.json({ candidato: rows[0] });
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, nome, email, cpf, celular, data_nascimento, sexo,
+              acessibilidade, cep, estado, cidade, bairro, logradouro, numero, complemento,
+              formacao, instituicao, curso, situacao, data_conclusao,
+              primeiro_emprego, banco_talentos, areas_interesse, sobre_voce, experiencia,
+              criado_em
+       FROM candidatos WHERE id = $1`, [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ erro: 'Candidato não encontrado' });
+    res.json({ candidato: rows[0] });
+  } catch (e) {
+    console.error('[GET CANDIDATO]', e);
+    res.status(500).json({ erro: 'Erro ao buscar candidato' });
+  }
 });
 
 app.get('/api/admin/candidaturas', authAdmin, async (req, res) => {
-  const { rows } = await pool.query(`
-    SELECT c.*, v.titulo, v.empresa, cd.nome as candidato_nome, cd.email as candidato_email
-    FROM candidaturas c
-    JOIN vagas v ON v.id = c.vaga_id
-    JOIN candidatos cd ON cd.id = c.candidato_id
-    ORDER BY c.criada_em DESC
-  `);
-  res.json({ candidaturas: rows });
+  try {
+    const { rows } = await pool.query(`
+      SELECT c.*, v.titulo, v.empresa, cd.nome as candidato_nome, cd.email as candidato_email
+      FROM candidaturas c
+      JOIN vagas v ON v.id = c.vaga_id
+      JOIN candidatos cd ON cd.id = c.candidato_id
+      ORDER BY c.criada_em DESC
+    `);
+    res.json({ candidaturas: rows });
+  } catch (e) {
+    console.error('[LIST CANDIDATURAS]', e);
+    res.status(500).json({ erro: 'Erro ao listar candidaturas' });
+  }
 });
 
 // Lista de vagas com contagem de candidaturas (p/ painel admin)
 app.get('/api/admin/vagas-com-candidaturas', authAdmin, async (req, res) => {
-  const { rows } = await pool.query(`
-    SELECT v.id, v.titulo, v.empresa, v.cidade, v.estado, v.status, v.criada_em,
-           COUNT(c.id) FILTER (WHERE c.status NOT IN ('rejeitado','reprovado')) AS total_ativas,
-           COUNT(c.id) AS total_geral,
-           COUNT(c.id) FILTER (WHERE c.status = 'em_analise') AS em_analise,
-           COUNT(c.id) FILTER (WHERE c.status = 'em_andamento') AS em_andamento,
-           COUNT(c.id) FILTER (WHERE c.status = 'contratado') AS contratados
-    FROM vagas v
-    LEFT JOIN candidaturas c ON c.vaga_id = v.id
-    GROUP BY v.id
-    HAVING COUNT(c.id) > 0
-    ORDER BY v.criada_em DESC
-  `);
-  res.json({ vagas: rows });
+  try {
+    const { rows } = await pool.query(`
+      SELECT v.id, v.titulo, v.empresa, v.cidade, v.estado, v.status, v.criada_em,
+             COUNT(c.id) FILTER (WHERE c.status NOT IN ('rejeitado','reprovado')) AS total_ativas,
+             COUNT(c.id) AS total_geral,
+             COUNT(c.id) FILTER (WHERE c.status = 'em_analise') AS em_analise,
+             COUNT(c.id) FILTER (WHERE c.status = 'em_andamento') AS em_andamento,
+             COUNT(c.id) FILTER (WHERE c.status = 'contratado') AS contratados
+      FROM vagas v
+      LEFT JOIN candidaturas c ON c.vaga_id = v.id
+      GROUP BY v.id
+      HAVING COUNT(c.id) > 0
+      ORDER BY v.criada_em DESC
+    `);
+    res.json({ vagas: rows });
+  } catch (e) {
+    console.error('[VAGAS COM CANDIDATURAS]', e);
+    res.status(500).json({ erro: 'Erro ao listar vagas' });
+  }
 });
 
 // Candidatos de uma vaga específica
 app.get('/api/admin/vagas/:id/candidaturas', authAdmin, async (req, res) => {
-  const vagaId = req.params.id;
-  const { rows: vagaRows } = await pool.query('SELECT * FROM vagas WHERE id = $1', [vagaId]);
-  if (vagaRows.length === 0) return res.status(404).json({ erro: 'Vaga não encontrada' });
-  const vaga = vagaRows[0];
-  const { rows } = await pool.query(`
-    SELECT c.*, cd.nome, cd.email, cd.celular, cd.cidade, cd.estado
-    FROM candidaturas c
-    JOIN candidatos cd ON cd.id = c.candidato_id
-    WHERE c.vaga_id = $1
-    ORDER BY c.criada_em DESC
-  `, [vagaId]);
-  res.json({ vaga, candidaturas: rows });
+  try {
+    const vagaId = req.params.id;
+    const { rows: vagaRows } = await pool.query('SELECT * FROM vagas WHERE id = $1', [vagaId]);
+    if (vagaRows.length === 0) return res.status(404).json({ erro: 'Vaga não encontrada' });
+    const vaga = vagaRows[0];
+    const { rows } = await pool.query(`
+      SELECT c.*, cd.nome, cd.email, cd.celular, cd.cidade, cd.estado
+      FROM candidaturas c
+      JOIN candidatos cd ON cd.id = c.candidato_id
+      WHERE c.vaga_id = $1
+      ORDER BY c.criada_em DESC
+    `, [vagaId]);
+    res.json({ vaga, candidaturas: rows });
+  } catch (e) {
+    console.error('[VAGA CANDIDATURAS]', e);
+    res.status(500).json({ erro: 'Erro ao listar candidatos da vaga' });
+  }
 });
 
 app.get('/api/admin/candidatura/:id', authAdmin, async (req, res) => {
-  const { rows: cand } = await pool.query(`
-    SELECT c.*, v.titulo, v.empresa, v.etapas, v.cidade as v_cidade, v.estado as v_estado, v.descricao, v.requisitos,
-           cd.id as candidato_id_full, cd.nome, cd.email, cd.celular, cd.cpf, cd.data_nascimento,
-           cd.acessibilidade, cd.cep, cd.estado as cd_estado, cd.cidade as cd_cidade, cd.bairro,
-           cd.logradouro, cd.numero, cd.complemento,
-           cd.formacao, cd.instituicao, cd.curso, cd.situacao, cd.data_conclusao,
-           cd.primeiro_emprego, cd.sobre_voce, cd.experiencia, cd.foto_url,
-           cd.areas_interesse, cd.banco_talentos,
-           cd.criado_em as candidato_criado_em
-    FROM candidaturas c
-    JOIN vagas v ON v.id = c.vaga_id
-    JOIN candidatos cd ON cd.id = c.candidato_id
-    WHERE c.id = $1`, [req.params.id]);
-  if (cand.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
-  const candidatura = cand[0];
+  try {
+    const { rows: cand } = await pool.query(`
+      SELECT c.*, v.titulo, v.empresa, v.etapas, v.cidade as v_cidade, v.estado as v_estado, v.descricao, v.requisitos,
+             cd.id as candidato_id_full, cd.nome, cd.email, cd.celular, cd.cpf, cd.data_nascimento,
+             cd.acessibilidade, cd.cep, cd.estado as cd_estado, cd.cidade as cd_cidade, cd.bairro,
+             cd.logradouro, cd.numero, cd.complemento,
+             cd.formacao, cd.instituicao, cd.curso, cd.situacao, cd.data_conclusao,
+             cd.primeiro_emprego, cd.sobre_voce, cd.experiencia, cd.foto_url,
+             cd.areas_interesse, cd.banco_talentos,
+             cd.criado_em as candidato_criado_em
+      FROM candidaturas c
+      JOIN vagas v ON v.id = c.vaga_id
+      JOIN candidatos cd ON cd.id = c.candidato_id
+      WHERE c.id = $1`, [req.params.id]);
+    if (cand.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
+    const candidatura = cand[0];
 
-  // Buscar experiencias do candidato
-  const { rows: exps } = await pool.query(
-    'SELECT * FROM experiencias WHERE candidato_id = $1 ORDER BY inicio DESC NULLS LAST, id DESC',
-    [candidatura.candidato_id]
-  );
-  candidatura.experiencias = exps;
+    // Buscar experiencias do candidato
+    const { rows: exps } = await pool.query(
+      'SELECT * FROM experiencias WHERE candidato_id = $1 ORDER BY inicio DESC NULLS LAST, id DESC',
+      [candidatura.candidato_id]
+    );
+    candidatura.experiencias = exps;
 
-  res.json({ candidatura });
+    res.json({ candidatura });
+  } catch (e) {
+    console.error('[GET CANDIDATURA]', e);
+    res.status(500).json({ erro: 'Erro ao buscar candidatura' });
+  }
 });
 
 // ============= DOCUMENTOS DO CANDIDATO (etapa "Coleta de documentos") =============
@@ -975,21 +1028,6 @@ app.get('/api/admin/candidatura/:id/documentos', authAdmin, async (req, res) => 
        FROM documentos_candidatura WHERE candidatura_id = $1
        ORDER BY categoria, id`,
       [candidaturaId]
-    );
-    res.json({ documentos: rows, obrigatorios: DOCUMENTOS_OBRIGATORIOS });
-  } catch (e) {
-    res.status(500).json({ erro: e.message });
-  }
-});
-
-// Admin lista documentos de uma candidatura
-app.get('/api/admin/candidatura/:id/documentos', authAdmin, async (req, res) => {
-  try {
-    const { rows } = await pool.query(
-      `SELECT id, tipo, categoria, valor_texto, arquivo_nome, arquivo_tipo, arquivo_tamanho, status, justificativa_admin, enviado_em, revisado_em
-       FROM documentos_candidatura WHERE candidatura_id = $1
-       ORDER BY categoria, id`,
-      [Number(req.params.id)]
     );
     res.json({ documentos: rows, obrigatorios: DOCUMENTOS_OBRIGATORIOS });
   } catch (e) {
@@ -1157,4 +1195,3 @@ process.on('unhandledRejection', (e) => {
     process.exit(1);
   }
 })();
-
