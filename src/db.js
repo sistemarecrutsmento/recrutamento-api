@@ -137,6 +137,9 @@ async function init() {
     // Garantir colunas em tabelas já criadas (idempotente)
     await client.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS criada_em TIMESTAMP DEFAULT NOW();`);
     await client.query(`ALTER TABLE candidatos ADD COLUMN IF NOT EXISTS criado_em TIMESTAMP DEFAULT NOW();`);
+    // Migração: tabela documentos_candidatura pode ter sido criada com arquivo_base64 (versão antiga)
+    await client.query(`ALTER TABLE documentos_candidatura ADD COLUMN IF NOT EXISTS arquivo_url TEXT;`);
+    await client.query(`ALTER TABLE documentos_candidatura ADD COLUMN IF NOT EXISTS arquivo_public_id TEXT;`);
     await client.query(`ALTER TABLE admins ADD COLUMN IF NOT EXISTS criado_em TIMESTAMP DEFAULT NOW();`);
     await client.query(`ALTER TABLE candidatos ADD COLUMN IF NOT EXISTS senha_hash TEXT;`);
     await client.query(`ALTER TABLE candidatos ADD COLUMN IF NOT EXISTS email_verificado BOOLEAN DEFAULT false;`);
