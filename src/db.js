@@ -115,6 +115,26 @@ async function init() {
         texto TEXT,
         criado_em TIMESTAMP DEFAULT NOW()
       );
+
+      -- Documentos da etapa "Coleta de Documentos"
+      -- Pode ser campo de texto (cpf, rg, pis) OU arquivo (foto do RG, PDF)
+      CREATE TABLE IF NOT EXISTS documentos_candidatura (
+        id SERIAL PRIMARY KEY,
+        candidatura_id INTEGER REFERENCES candidaturas(id) ON DELETE CASCADE,
+        tipo TEXT NOT NULL,            -- 'cpf', 'rg_foto', 'pis', 'foto_3x4', etc
+        categoria TEXT NOT NULL,       -- 'texto' ou 'arquivo'
+        valor_texto TEXT,              -- preenchido quando categoria='texto'
+        url_arquivo TEXT,              -- preenchido quando categoria='arquivo' (link Cloudinary)
+        public_id TEXT,                -- public_id do Cloudinary (pra deletar depois)
+        nome_arquivo TEXT,             -- nome original (ex: 'rg-frente.jpg')
+        status TEXT DEFAULT 'pendente',-- 'pendente' | 'aprovado' | 'reprovado'
+        justificativa_admin TEXT,      -- quando reprovado, o admin justifica
+        justificativa_candidato TEXT,  -- candidato pode escrever obs (ex: 'substituindo por CNH')
+        revisado_em TIMESTAMP,
+        revisado_por TEXT,             -- nome do admin que revisou
+        criado_em TIMESTAMP DEFAULT NOW(),
+        UNIQUE(candidatura_id, tipo)
+      );
     `);
 
     // Garantir colunas em tabelas já criadas (idempotente)
