@@ -108,6 +108,15 @@ async function init() {
         UNIQUE(vaga_id, candidato_id)
       );
 
+      -- Adiciona colunas de proposta (se ainda não existirem)
+      ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS proposta_texto TEXT;
+      ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS proposta_pdf_url TEXT;
+      ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS proposta_pdf_public_id TEXT;
+      ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS proposta_enviada_em TIMESTAMP;
+      ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS proposta_aceita_em TIMESTAMP;
+      ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS proposta_recusada_em TIMESTAMP;
+      ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS proposta_motivo_recusa TEXT;
+
       CREATE TABLE IF NOT EXISTS mensagens_processo (
         id SERIAL PRIMARY KEY,
         candidatura_id INTEGER REFERENCES candidaturas(id) ON DELETE CASCADE,
