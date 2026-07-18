@@ -959,9 +959,15 @@ app.get('/api/admin/candidatura/:id/documentos', authAdmin, async (req, res) => 
 app.post('/api/admin/documento/:id/revisar', authAdmin, async (req, res) => {
   try {
     const docId = Number(req.params.id);
-    const { status, justificativa } = req.body;
-    if (!['aprovado', 'reprovado'].includes(status)) {
-      return res.status(400).json({ erro: 'status deve ser aprovado ou reprovado' });
+    // Aceita tanto {status: 'aprovado'|'reprovado'|'pendente'} quanto {acao: 'aprovar'|'reprovar'|'reverter'}
+    let { status, justificativa, acao } = req.body;
+    if (acao && !status) {
+      if (acao === 'aprovar') status = 'aprovado';
+      else if (acao === 'reprovar') status = 'reprovado';
+      else if (acao === 'reverter') status = 'pendente';
+    }
+    if (!['aprovado', 'reprovado', 'pendente'].includes(status)) {
+      return res.status(400).json({ erro: 'status/acao inválido (use aprovado, reprovado ou reverter)' });
     }
     if (status === 'reprovado' && !justificativa) {
       return res.status(400).json({ erro: 'Justificativa obrigatória ao reprovar' });
@@ -970,7 +976,7 @@ app.post('/api/admin/documento/:id/revisar', authAdmin, async (req, res) => {
       `UPDATE documentos_candidatura SET status = $1, justificativa_admin = $2, revisado_em = NOW() WHERE id = $3`,
       [status, justificativa || null, docId]
     );
-    res.json({ ok: true });
+    res.json({ ok: true, status });
   } catch (e) {
     res.status(500).json({ erro: e.message });
   }
