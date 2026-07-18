@@ -508,12 +508,10 @@ app.post('/api/candidato/candidatar/:vagaId', authCandidato, async (req, res) =>
   try {
     const { rows } = await pool.query(
       `INSERT INTO candidaturas (vaga_id, candidato_id, status, etapa_atual, historico)
-       VALUES ($1, $2, 'em_andamento', 2, $3)
+       VALUES ($1, $2, 'em_andamento', 1, $3)
        RETURNING *`,
       [req.params.vagaId, c[0].id, JSON.stringify([
-        { etapa: 0, status: 'em_analise', acao: 'inscricao', data: new Date().toISOString() },
-        { etapa: 1, status: 'em_andamento', acao: 'avancar', data: new Date().toISOString(), mensagem: 'Inscrição realizada — aguardando triagem curricular' },
-        { etapa: 2, status: 'em_andamento', acao: 'avancar', data: new Date().toISOString(), mensagem: 'Encaminhado para triagem curricular' }
+        { etapa: 0, status: 'concluida', acao: 'inscricao', data: new Date().toISOString(), mensagem: 'Inscrição realizada' }
       ])]
     );
     res.json({ ok: true, candidatura: rows[0] });
@@ -999,8 +997,18 @@ app.post('/api/admin/candidatura/:id/status', authAdmin, async (req, res) => {
   let novaEtapa = etapa ?? cand.etapa_atual;
 
   if (acao === 'avancar') {
-    // Trava da etapa 5 (Coleta de Documentos): só avança se todos os docs obrigatórios estiverem aprovados
-    if (cand.etapa_atual === 5) {
+    // Trava: se a etapa atual for a "Coleta de Documentos" (índice 4) e a vaga tiver 5 etapas
+    // (inscrição + 4 = total 5), só avança se todos os docs obrigatórios estiverem aprovados.
+    // Detectamos pelo nome da etapa, não por número fixo.
+    let nomeEtapaAtual = '';
+    try {
+      const etapasArr = typeof cand.etapas === 'string' ? JSON.parse(cand.etapas) : cand.etapas;
+      if (Array.isArray(etapasArr) && etapasArr.length > (cand.etapa_atual || 0)) {
+        const e = etapasArr[cand.etapa_atual || 0];
+        nomeEtapaAtual = (typeof e === 'string' ? e : (e?.nome || '')).toLowerCase();
+      }
+    } catch (e) {}
+    if (nomeEtapaAtual.includes('documento') || nomeEtapaAtual.includes('document')) {
       const tiposObrig = (DOCUMENTOS_OBRIGATORIOS || []).map(d => d.tipo);
       if (tiposObrig.length > 0) {
         const { rows: docsCand } = await pool.query(
