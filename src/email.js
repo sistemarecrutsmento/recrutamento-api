@@ -10,12 +10,23 @@ function getTransporter() {
       user: process.env.EMAIL_FROM,
       pass: process.env.EMAIL_APP_PASSWORD
     },
-    // Timeout agressivo: não deixa o SMTP pendurar
-    connectionTimeout: 8000,
-    socketTimeout: 8000,
-    greetingTimeout: 5000
+        // Timeout agressivo: não deixa o SMTP pendurar (4s é suficiente p/ Gmail)
+    connectionTimeout: 4000,
+    socketTimeout: 4000,
+    greetingTimeout: 3000
   });
   return transporter;
+}
+
+// Helper: dispara e-mail em BACKGROUND. NÃO bloqueia a resposta da API.
+// Falha silenciosa (loga, mas o sistema continua). Ideal p/ notificações secundárias.
+function enviarEmailBg(fn, ...args) {
+  // Dispara em próximo tick (não trava a response)
+  setImmediate(() => {
+    Promise.resolve()
+      .then(() => fn(...args))
+      .catch((e) => console.error('[email-bg] Falha ao enviar e-mail:', e.message));
+  });
 }
 
 const SISTEMA = process.env.SISTEMA_NOME || 'Recrutamento e Seleção';
@@ -75,7 +86,7 @@ async function enviarNotificacaoStatus(email, nome, vaga, novoStatus) {
   });
 }
 
-module.exports = { enviarCodigo, enviarNotificacaoStatus, enviarEmailProposta };
+module.exports = { enviarCodigo, enviarNotificacaoStatus, enviarEmailProposta, enviarEmailBg };
 
 async function enviarEmailProposta(email, nome, vaga, pdfUrl) {
   const t = getTransporter();
