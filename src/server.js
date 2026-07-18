@@ -1269,13 +1269,9 @@ app.post('/api/admin/candidatura/:id/status', authAdmin, async (req, res) => {
       if (Array.isArray(etapasArr) && etapasArr.length) totalEtapas = etapasArr.length;
     } catch (e) {}
 
-    // Trava: ao ENTRAR na etapa 5 (Proposta), exige que a proposta já tenha sido enviada
-    // (etapa_atual é 1-indexed: etapa 1=Inscrição, 2=Triagem, 3=RH, 4=Gestor, 5=Proposta)
-    if (novaEtapa === 5 && !cand.proposta_enviada_em) {
-      return res.status(400).json({
-        erro: 'Antes de avançar para a etapa "Proposta", você precisa enviar a proposta ao candidato (botão 📨 Enviar Proposta).'
-      });
-    }
+    // (Sem trava ao entrar na etapa 5: o admin envia a proposta via botão 📨 Enviar Proposta
+    //  que aparece quando o candidato já está na etapa 5. Ao aceitar, o candidato
+    //  avança automaticamente pra etapa 6 - sem precisar de nova ação do admin.)
 
     if (novaEtapa >= totalEtapas) {
       novoStatus = 'contratado';
