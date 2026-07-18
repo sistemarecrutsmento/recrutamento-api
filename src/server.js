@@ -1269,8 +1269,9 @@ app.post('/api/admin/candidatura/:id/status', authAdmin, async (req, res) => {
       if (Array.isArray(etapasArr) && etapasArr.length) totalEtapas = etapasArr.length;
     } catch (e) {}
 
-    // Trava: ao ENTRAR na etapa 5 (Proposta, índice 4), exige que a proposta já tenha sido enviada
-    if (novaEtapa === 4 && !cand.proposta_enviada_em) {
+    // Trava: ao ENTRAR na etapa 5 (Proposta), exige que a proposta já tenha sido enviada
+    // (etapa_atual é 1-indexed: etapa 1=Inscrição, 2=Triagem, 3=RH, 4=Gestor, 5=Proposta)
+    if (novaEtapa === 5 && !cand.proposta_enviada_em) {
       return res.status(400).json({
         erro: 'Antes de avançar para a etapa "Proposta", você precisa enviar a proposta ao candidato (botão 📨 Enviar Proposta).'
       });
@@ -1406,8 +1407,9 @@ app.post('/api/candidato/aceitar-proposta/:candidaturaId', authCandidato, async 
   // Garante que o candidato é o dono da candidatura
   if (cand.cand_email !== req.user.email) return res.status(403).json({ erro: 'Acesso negado' });
 
-  // Só pode aceitar se estiver na etapa 5 (índice 4) — Proposta
-  if ((cand.etapa_atual || 0) !== 4) {
+  // Só pode aceitar se estiver na etapa 5 (Proposta)
+  // (etapa_atual é 1-indexed: etapa 5 = Proposta)
+  if ((cand.etapa_atual || 0) !== 5) {
     return res.status(400).json({ erro: 'Você só pode aceitar a proposta quando estiver na etapa "Proposta"' });
   }
   if (!cand.proposta_enviada_em) {
@@ -1419,7 +1421,7 @@ app.post('/api/candidato/aceitar-proposta/:candidaturaId', authCandidato, async 
 
   const historico = Array.isArray(cand.historico) ? [...cand.historico] : [];
   historico.push({
-    etapa: 5, // próxima etapa = Coleta de documentos (índice 5)
+    etapa: 6, // próxima etapa = Coleta de documentos (etapa 6)
     status: 'em_andamento',
     acao: 'aceitar_proposta',
     mensagem: 'Candidato aceitou a proposta',
@@ -1430,7 +1432,7 @@ app.post('/api/candidato/aceitar-proposta/:candidaturaId', authCandidato, async 
   await pool.query(
     `UPDATE candidaturas
      SET proposta_aceita_em = NOW(),
-         etapa_atual = 5,
+         etapa_atual = 6,
          status = 'em_andamento',
          historico = $1
      WHERE id = $2`,
@@ -1453,13 +1455,13 @@ app.post('/api/candidato/recusar-proposta/:candidaturaId', authCandidato, async 
   const cand = c[0];
 
   if (cand.cand_email !== req.user.email) return res.status(403).json({ erro: 'Acesso negado' });
-  if ((cand.etapa_atual || 0) !== 4) {
+  if ((cand.etapa_atual || 0) !== 5) {
     return res.status(400).json({ erro: 'Você só pode recusar a proposta quando estiver na etapa "Proposta"' });
   }
 
   const historico = Array.isArray(cand.historico) ? [...cand.historico] : [];
   historico.push({
-    etapa: 4,
+    etapa: 5,
     status: 'rejeitado',
     acao: 'recusar_proposta',
     mensagem: 'Candidato recusou a proposta' + (motivo ? `: ${motivo}` : ''),
