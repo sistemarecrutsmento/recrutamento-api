@@ -1039,25 +1039,149 @@ app.get('/api/admin/candidatura/:id/documentos', authAdmin, async (req, res) => 
 app.post('/api/admin/documento/:id/revisar', authAdmin, async (req, res) => {
   try {
     const docId = Number(req.params.id);
-    // Aceita tanto {status: 'aprovado'|'reprovado'|'pendente'} quanto {acao: 'aprovar'|'reprovar'|'reverter'}
+    // Aceita tanto {status: 'aprovado'|'reprovado'|'retornado'|'pendente'}
+    // quanto {acao: 'aprovar'|'reprovar'|'retornar'|'reverter'}
     let { status, justificativa, acao } = req.body;
     if (acao && !status) {
       if (acao === 'aprovar') status = 'aprovado';
       else if (acao === 'reprovar') status = 'reprovado';
+      else if (acao === 'retornar') status = 'retornado';
       else if (acao === 'reverter') status = 'pendente';
     }
-    if (!['aprovado', 'reprovado', 'pendente'].includes(status)) {
-      return res.status(400).json({ erro: 'status/acao inválido (use aprovado, reprovado ou reverter)' });
+    if (!['aprovado', 'reprovado', 'retornado', 'pendente'].includes(status)) {
+      return res.status(400).json({ erro: 'status/acao inválido (use aprovado, reprovado, retornar ou reverter)' });
     }
-    if (status === 'reprovado' && !justificativa) {
-      return res.status(400).json({ erro: 'Justificativa obrigatória ao reprovar' });
+    if ((status === 'reprovado' || status === 'retornado') && !justificativa) {
+      return res.status(400).json({ erro: 'Justificativa obrigatória para retornar/reprovar' });
     }
+
+    // Busca dados do doc + candidatura + candidato (pra notificar e salvar na timeline)
+    const { rows: docRows } = await pool.query(
+      `SELECT dc.*, cand.id as cand_id, cand.nome as cand_nome, cand.email as cand_email,
+              v.titulo as vaga_titulo, c.id as candidatura_id
+       FROM documentos_candidatura dc
+       JOIN candidaturas c ON c.id = dc.candidatura_id
+       JOIN candidatos cand ON cand.id = c.candidato_id
+       JOIN vagas v ON v.id = c.vaga_id
+       WHERE dc.id = $1`,
+      [docId]
+    );
+    if (docRows.length === 0) return res.status(404).json({ erro: 'Documento não encontrado' });
+    const docInfo = docRows[0];
+
+    // Quando "retornado" é uma ação que LIBERA reenvio:
+    // - Se o doc tem arquivo, marcamos o antigo como "tombstone" (status='retornado', justificativa com msg)
+    //   e o CANDIDATO poderá enviar um novo doc (que vira um NOVO registro no banco).
     await pool.query(
       `UPDATE documentos_candidatura SET status = $1, justificativa_admin = $2, revisado_em = NOW() WHERE id = $3`,
       [status, justificativa || null, docId]
     );
-    res.json({ ok: true, status });
+
+    // Se for "retornado", adiciona uma mensagem na timeline da candidatura (aparece pro candidato no painel)
+    if (status === 'retornado' && justificativa) {
+      await pool.query(
+        `INSERT INTO mensagens_processo (candidatura_id, autor_tipo, autor_nome, texto, contexto)
+         VALUES ($1, 'admin', $2, $3, $4)`,
+        [docInfo.candidatura_id, req.user.nome, '📄 ' + (docInfo.tipo || 'documento') + ': ' + justificativa, 'documento_retornado']
+      );
+      // Volta a candidatura pra status "em_andamento" na etapa atual (pra liberar reenvio)
+      await pool.query(
+        `UPDATE candidaturas SET status = 'em_andamento' WHERE id = $1`,
+        [docInfo.candidatura_id]
+      );
+    }
+
+    res.json({ ok: true, status, documento: { id: docId, status, justificativa_admin: justificativa || null } });
   } catch (e) {
+    console.error('[DOC REVISAR]', e);
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+// Admin: APROVAR TODOS os documentos pendentes de uma candidatura e AVANÇAR etapa de uma vez
+app.post('/api/admin/candidatura/:id/aprovar-documentos', authAdmin, async (req, res) => {
+  try {
+    const candId = Number(req.params.id);
+    // 1) Buscar candidatura + vaga + candidato
+    const { rows: cRows } = await pool.query(
+      `SELECT c.*, v.titulo, v.etapas, cd.nome, cd.email
+       FROM candidaturas c
+       JOIN vagas v ON v.id = c.vaga_id
+       JOIN candidatos cd ON cd.id = c.candidato_id
+       WHERE c.id = $1`, [candId]);
+    if (cRows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
+    const cand = cRows[0];
+
+    // 2) Listar docs pendentes/retornados
+    const { rows: docs } = await pool.query(
+      `SELECT id, tipo, status FROM documentos_candidatura WHERE candidatura_id = $1`,
+      [candId]
+    );
+    const tiposObrig = (DOCUMENTOS_OBRIGATORIOS || []).map(d => d.tipo);
+    const obrigatoriosNaoAprovados = docs.filter(d =>
+      tiposObrig.includes(d.tipo) && d.status !== 'aprovado'
+    );
+    if (obrigatoriosNaoAprovados.length > 0) {
+      return res.status(400).json({
+        erro: 'Há documentos obrigatórios que ainda não foram aprovados.',
+        detalhes: {
+          reprovados: obrigatoriosNaoAprovados.filter(d => d.status === 'reprovado').length,
+          pendentes: obrigatoriosNaoAprovados.filter(d => d.status === 'pendente' || !d.status).length,
+          retornados: obrigatoriosNaoAprovados.filter(d => d.status === 'retornado').length
+        }
+      });
+    }
+    if (docs.length === 0) {
+      return res.status(400).json({ erro: 'Nenhum documento enviado ainda.' });
+    }
+
+    // 3) Marcar TODOS os docs como aprovados
+    await pool.query(
+      `UPDATE documentos_candidatura SET status = 'aprovado', justificativa_admin = 'Aprovado em lote', revisado_em = NOW()
+       WHERE candidatura_id = $1 AND status != 'aprovado'`,
+      [candId]
+    );
+
+    // 4) Avançar etapa
+    const novaEtapa = (cand.etapa_atual || 0) + 1;
+    let totalEtapas = 7;
+    try {
+      const etapasArr = typeof cand.etapas === 'string' ? JSON.parse(cand.etapas) : cand.etapas;
+      if (Array.isArray(etapasArr) && etapasArr.length) totalEtapas = etapasArr.length;
+    } catch (e) {}
+    const novoStatus = (novaEtapa >= totalEtapas) ? 'contratado' : 'em_andamento';
+
+    // 5) Adicionar ao histórico
+    const historico = Array.isArray(cand.historico) ? cand.historico : [];
+    historico.push({
+      etapa: novaEtapa,
+      status: novoStatus,
+      acao: 'aprovar_docs',
+      mensagem: 'Documentação aprovada e processo avançado',
+      data: new Date().toISOString(),
+      por: req.user.nome
+    });
+    await pool.query(
+      'UPDATE candidaturas SET status = $1, etapa_atual = $2, historico = $3 WHERE id = $4',
+      [novoStatus, novaEtapa, JSON.stringify(historico), candId]
+    );
+
+    // 6) Notificar candidato
+    try {
+      await enviarNotificacaoStatus(cand.email, cand.nome, cand.titulo, 'aprovado');
+    } catch (e) {
+      console.error('Falha ao notificar candidato:', e.message);
+    }
+
+    res.json({
+      ok: true,
+      novaEtapa,
+      novoStatus,
+      totalEtapas,
+      contratados: novoStatus === 'contratado'
+    });
+  } catch (e) {
+    console.error('[APROVAR DOCS E AVANCAR]', e);
     res.status(500).json({ erro: e.message });
   }
 });
