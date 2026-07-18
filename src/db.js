@@ -103,6 +103,7 @@ async function init() {
         status TEXT DEFAULT 'em_analise',
         etapa_atual INTEGER DEFAULT 0,
         historico JSONB DEFAULT '[]',
+        observacoes_etapas JSONB DEFAULT '{}',
         criada_em TIMESTAMP DEFAULT NOW(),
         UNIQUE(vaga_id, candidato_id)
       );
@@ -152,6 +153,9 @@ async function init() {
     await client.query(`ALTER TABLE candidatos ADD COLUMN IF NOT EXISTS areas_interesse JSONB DEFAULT '[]'::jsonb;`);
   // Mensagens de processo podem ter contexto (ex: 'documento_retornado') para filtrar no painel do candidato
   await client.query(`ALTER TABLE mensagens_processo ADD COLUMN IF NOT EXISTS contexto TEXT;`);
+  // Comentários internos do admin por etapa (entrevista RH, entrevista gestor, etc.)
+  // Estrutura: { "1": "obs etapa 1", "2": "obs etapa 2", ... }
+  await client.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS observacoes_etapas JSONB DEFAULT '{}'::jsonb;`);
 
     console.log('Tabelas criadas/verificadas + colunas garantidas');
   } finally {
