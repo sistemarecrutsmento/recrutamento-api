@@ -1186,9 +1186,30 @@ app.post('/api/admin/candidatura/:id/aprovar-documentos', authAdmin, async (req,
   }
 });
 
+// Admin: salva APENAS um comentário interno da etapa (sem mexer em status/etapa/historico)
+app.post('/api/admin/candidatura/:id/comentario', authAdmin, async (req, res) => {
+  const { etapa, comentario } = req.body;
+  if (etapa == null || !comentario || !String(comentario).trim()) {
+    return res.status(400).json({ erro: 'etapa e comentario são obrigatórios' });
+  }
+  const { rows: c } = await pool.query(
+    'SELECT observacoes_etapas FROM candidaturas WHERE id = $1',
+    [req.params.id]
+  );
+  if (c.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
+  const obs = (c[0].observacoes_etapas && typeof c[0].observacoes_etapas === 'object') ? { ...c[0].observacoes_etapas } : {};
+  obs[String(etapa)] = String(comentario).trim();
+  await pool.query(
+    'UPDATE candidaturas SET observacoes_etapas = $1 WHERE id = $2',
+    [JSON.stringify(obs), req.params.id]
+  );
+  res.json({ ok: true });
+});
+
 app.post('/api/admin/candidatura/:id/status', authAdmin, async (req, res) => {
-  const { status, etapa, mensagem, acao } = req.body;
+  const { status, etapa, mensagem, acao, comentario } = req.body;
   // acao: 'avancar' = incrementa etapa_atual, 'reprovar' = marca rejeitado, 'aprovar' = aprova atual
+  // comentario: observação interna do admin sobre a etapa atual (não vai pro candidato, fica em observacoes_etapas[etapa])
   const { rows: c } = await pool.query(`
     SELECT c.*, v.titulo, v.etapas, cd.nome, cd.email
     FROM candidaturas c
@@ -1199,6 +1220,7 @@ app.post('/api/admin/candidatura/:id/status', authAdmin, async (req, res) => {
 
   const cand = c[0];
   const historico = Array.isArray(cand.historico) ? cand.historico : [];
+  const observacoes = (cand.observacoes_etapas && typeof cand.observacoes_etapas === 'object') ? { ...cand.observacoes_etapas } : {};
   let novoStatus = status;
   let novaEtapa = etapa ?? cand.etapa_atual;
 
@@ -1257,9 +1279,15 @@ app.post('/api/admin/candidatura/:id/status', authAdmin, async (req, res) => {
 
   historico.push({ etapa: novaEtapa, status: novoStatus, mensagem, acao, data: new Date().toISOString(), por: req.user.nome });
 
+  // Se o admin mandou um comentário, salva no índice da etapa ATUAL (a que ele tava atuando)
+  // Quando avançar, vai pra próxima etapa e a próxima observação será salva lá.
+  if (comentario && String(comentario).trim()) {
+    observacoes[String(cand.etapa_atual || 0)] = String(comentario).trim();
+  }
+
   await pool.query(
-    'UPDATE candidaturas SET status = $1, etapa_atual = $2, historico = $3 WHERE id = $4',
-    [novoStatus, novaEtapa, JSON.stringify(historico), req.params.id]
+    'UPDATE candidaturas SET status = $1, etapa_atual = $2, historico = $3, observacoes_etapas = $4 WHERE id = $5',
+    [novoStatus, novaEtapa, JSON.stringify(historico), JSON.stringify(observacoes), req.params.id]
   );
 
   if (mensagem) {
