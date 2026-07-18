@@ -69,20 +69,6 @@ app.post('/api/_debug/reset-admin', async (req, res) => {
   }
 });
 
-// ONE-SHOT: apagar vagas (mantém admins). Rota removida depois.
-app.post('/api/_debug/limpar-vagas-agora', async (req, res) => {
-  const token = req.body.token || req.query.token;
-  if (token !== 'limpar-2026-vagas-once') return res.status(403).json({ erro: 'token errado' });
-  try {
-    const antes = (await pool.query('SELECT COUNT(*)::int as n FROM vagas')).rows[0].n;
-    await pool.query('DELETE FROM vagas');
-    await pool.query('ALTER SEQUENCE vagas_id_seq RESTART WITH 1');
-    res.json({ ok: true, vagas_removidas: antes });
-  } catch (e) {
-    res.status(500).json({ erro: e.message });
-  }
-});
-
 // Ver estado do admin
 app.get('/api/_debug/admin-info', async (req, res) => {
   try {
