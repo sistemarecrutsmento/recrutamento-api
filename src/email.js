@@ -75,4 +75,27 @@ async function enviarNotificacaoStatus(email, nome, vaga, novoStatus) {
   });
 }
 
-module.exports = { enviarCodigo, enviarNotificacaoStatus };
+module.exports = { enviarCodigo, enviarNotificacaoStatus, enviarEmailProposta };
+
+async function enviarEmailProposta(email, nome, vaga, pdfUrl) {
+  const t = getTransporter();
+  if (!t) throw new Error('SMTP não configurado');
+  return t.sendMail({
+    from: `"${SISTEMA}" <${process.env.EMAIL_FROM}>`,
+    to: email,
+    subject: `Você recebeu uma proposta - ${vaga}`,
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px; background: #fafafa; border-radius: 12px;">
+        <div style="background: #7a1f3d; color: #fff; padding: 20px; border-radius: 8px; text-align: center;">
+          <h2 style="margin: 0;">${SISTEMA}</h2>
+        </div>
+        <div style="background: #fff; padding: 28px; border-radius: 8px; margin-top: 16px;">
+          <p style="color: #2b2b2b; font-size: 15px;">Olá, <strong>${nome}</strong>!</p>
+          <p style="color: #2b2b2b; font-size: 15px;">Você recebeu uma proposta para a vaga <strong>${vaga}</strong>.</p>
+          ${pdfUrl ? `<p style="text-align:center;margin:20px 0"><a href="${pdfUrl}" style="background:#7a1f3d;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:600">📄 Baixar proposta (PDF)</a></p>` : ''}
+          <p style="color: #2b2b2b; font-size: 15px;">Acesse seu painel para visualizar a proposta completa e dar o seu aceite.</p>
+        </div>
+      </div>
+    `
+  });
+}
