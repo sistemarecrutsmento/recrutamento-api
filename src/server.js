@@ -999,6 +999,31 @@ app.post('/api/admin/candidatura/:id/status', authAdmin, async (req, res) => {
   let novaEtapa = etapa ?? cand.etapa_atual;
 
   if (acao === 'avancar') {
+    // Trava da etapa 5 (Coleta de Documentos): só avança se todos os docs obrigatórios estiverem aprovados
+    if (cand.etapa_atual === 5) {
+      const tiposObrig = (DOCUMENTOS_OBRIGATORIOS || []).map(d => d.tipo);
+      if (tiposObrig.length > 0) {
+        const { rows: docsCand } = await pool.query(
+          `SELECT tipo, status FROM documentos_candidatura WHERE candidatura_id = $1 AND tipo = ANY($2)`,
+          [cand.id, tiposObrig]
+        );
+        const enviadosTipos = new Set(docsCand.map(d => d.tipo));
+        const todosEnviados = tiposObrig.every(t => enviadosTipos.has(t));
+        const todosAprovados = docsCand.length === tiposObrig.length && docsCand.every(d => d.status === 'aprovado');
+        if (!todosEnviados || !todosAprovados) {
+          return res.status(400).json({
+            erro: 'Não é possível avançar: há documentos pendentes ou reprovados.',
+            detalhes: {
+              obrigatorios: tiposObrig.length,
+              enviados: docsCand.length,
+              aprovados: docsCand.filter(d => d.status === 'aprovado').length,
+              reprovados: docsCand.filter(d => d.status === 'reprovado').length,
+              pendentes: tiposObrig.length - docsCand.length
+            }
+          });
+        }
+      }
+    }
     novaEtapa = (cand.etapa_atual || 0) + 1;
     novoStatus = 'em_andamento';
     // Calcular total de etapas (do JSON etapas da vaga, ou usar padrão 7)
