@@ -49,13 +49,23 @@ app.get('/api/_debug-email-teste', async (req, res) => {
   const to = req.query.to || 'fabio08dejesusjunior@gmail.com';
   const hasResend = !!process.env.RESEND_API_KEY;
   const hasFrom = !!process.env.EMAIL_FROM;
+  // Lista todas as env vars relacionadas (mascaradas)
+  const envRelacionadas = {};
+  for (const k of Object.keys(process.env)) {
+    if (/RESEND|EMAIL|SISTEMA|MAIL|SMTP|NODE_ENV|DEBUG|RENDER/i.test(k)) {
+      const v = process.env[k];
+      envRelacionadas[k] = v && v.length > 12 ? v.substring(0, 6) + '...' + v.substring(v.length - 4) : v;
+    }
+  }
   const info = {
     hasResendApiKey: hasResend,
     hasEmailFrom: hasFrom,
     emailFrom: process.env.EMAIL_FROM || null,
     resendKeyPreview: hasResend ? process.env.RESEND_API_KEY.substring(0, 8) + '...' : null,
     nodeEnv: process.env.NODE_ENV || 'sem',
-    sistemaUrl: process.env.SISTEMA_URL || 'default'
+    sistemaUrl: process.env.SISTEMA_URL || 'default',
+    envRelacionadas,
+    processUptimeSeg: Math.round(process.uptime())
   };
   try {
     const result = await enviarEmail({
