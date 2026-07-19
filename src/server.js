@@ -43,6 +43,32 @@ app.use((err, req, res, next) => {
 // ============= SAÚDE =============
 app.get('/api/saude', (req, res) => res.json({ ok: true, sistema: process.env.SISTEMA_NOME, hora: new Date().toISOString() }));
 
+// ============= DEBUG TEMPORÁRIO (remover depois) =============
+// Tenta enviar e-mail de teste via Resend e mostra erro/sucesso
+app.get('/api/_debug-email-teste', async (req, res) => {
+  const to = req.query.to || 'fabio08dejesusjunior@gmail.com';
+  const hasResend = !!process.env.RESEND_API_KEY;
+  const hasFrom = !!process.env.EMAIL_FROM;
+  const info = {
+    hasResendApiKey: hasResend,
+    hasEmailFrom: hasFrom,
+    emailFrom: process.env.EMAIL_FROM || null,
+    resendKeyPreview: hasResend ? process.env.RESEND_API_KEY.substring(0, 8) + '...' : null,
+    nodeEnv: process.env.NODE_ENV || 'sem',
+    sistemaUrl: process.env.SISTEMA_URL || 'default'
+  };
+  try {
+    const result = await enviarEmail({
+      to,
+      subject: 'Teste de e-mail - Vagas.io',
+      html: '<p>Se você está lendo isso, o sistema de e-mail tá funcionando! ✅</p>'
+    });
+    res.json({ ok: true, info, result });
+  } catch (e) {
+    res.json({ ok: false, info, erro: e.message, code: e.code, response: e.response?.data });
+  }
+});
+
 // Debug: testa bcrypt isolado
 // =========================================================================
 // ROTAS DE DEBUG (APENAS DESENVOLVIMENTO)
