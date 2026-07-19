@@ -1,6 +1,15 @@
 const nodemailer = require('nodemailer');
 const axios = require('axios');
 
+// ===== Resolver chave Resend (aceita variações de nome) =====
+function getResendKey() {
+  return process.env.RESEND_API_KEY
+      || process.env.RESEND_KEY
+      || process.env.ResendApiKey
+      || process.env.RESENDAPIKEY
+      || null;
+}
+
 let transporter = null;
 function getTransporter() {
   if (transporter) return transporter;
@@ -35,7 +44,8 @@ function enviarEmailBg(fn, ...args) {
 
 // Envia via Resend (HTTP API — funciona onde SMTP tá bloqueado, tipo Render)
 async function enviarViaResend({ from, to, subject, html, text }) {
-  if (!process.env.RESEND_API_KEY) {
+  const apiKey = getResendKey();
+  if (!apiKey) {
     throw new Error('RESEND_API_KEY não configurada');
   }
   const r = await axios.post(
@@ -49,7 +59,7 @@ async function enviarViaResend({ from, to, subject, html, text }) {
     },
     {
       headers: {
-        'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
+        'Authorization': `Bearer ${apiKey}`,
         'Content-Type': 'application/json'
       },
       timeout: 8000
@@ -65,7 +75,7 @@ const SISTEMA = process.env.SISTEMA_NOME || 'Recrutamento e Seleção';
 // Resend é mais confiável em ambientes como Render que bloqueiam SMTP
 async function enviarEmail({ to, subject, html, text, from }) {
   // Tenta Resend primeiro se configurado
-  if (process.env.RESEND_API_KEY) {
+  if (getResendKey()) {
     console.log('[email] Enviando via Resend para:', to, '| subject:', subject);
     return enviarViaResend({ from, to, subject, html, text });
   }
@@ -295,6 +305,7 @@ async function enviarEmailInscricao(email, nome, vaga, empresa) {
 }
 
 module.exports = {
+  getResendKey,
   enviarCodigo,
   enviarNotificacaoStatus,
   enviarEmailProposta,
