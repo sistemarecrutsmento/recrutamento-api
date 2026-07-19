@@ -957,7 +957,7 @@ app.get('/api/admin/dashboard', authAdmin, async (req, res) => {
         taxa_documentacao: taxaDocumentacao
       },
       vagas_mais_candidatos: ranking.rows,
-      admin: { nome: req.admin?.nome || 'Recrutador' }
+      admin: { nome: req.user?.nome || req.user?.email || 'Recrutador' }
     });
   } catch (e) {
     console.error('[DASHBOARD ERRO]', e);
