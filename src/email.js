@@ -1,12 +1,18 @@
 const nodemailer = require('nodemailer');
 const axios = require('axios');
 
-// ===== Resolver chave Resend (aceita variações de nome) =====
+// ===== Resolver chave do provedor de e-mail =====
 function getResendKey() {
   return process.env.RESEND_API_KEY
       || process.env.RESEND_KEY
       || process.env.ResendApiKey
       || process.env.RESENDAPIKEY
+      || null;
+}
+function getWeb3FormsKey() {
+  return process.env.WEB3FORMS_ACCESS_KEY
+      || process.env.WEB3FORMS_KEY
+      || process.env.WEB3FORMS_API_KEY
       || null;
 }
 
@@ -68,21 +74,53 @@ async function enviarViaResend({ from, to, subject, html, text }) {
   return r.data;
 }
 
+// Envia via Web3Forms (HTTP POST simples — não precisa de SMTP)
+// Plano grátis: 250 e-mails/mês. API key é vinculada ao email do destinatário.
+async function enviarViaWeb3Forms({ from, to, subject, html, text }) {
+  const accessKey = getWeb3FormsKey();
+  if (!accessKey) {
+    throw new Error('WEB3FORMS_ACCESS_KEY não configurada');
+  }
+  const r = await axios.post(
+    'https://api.web3forms.com/submit',
+    {
+      access_key: accessKey,
+      from_name: from || (process.env.SISTEMA_NOME || 'Recrutamento'),
+      from_email: process.env.EMAIL_FROM || 'noreply@recrutamento.local',
+      to: Array.isArray(to) ? to.join(',') : to,
+      subject: subject || '(sem assunto)',
+      // Web3Forms aceita HTML no campo "message" e manda como HTML
+      message: html || text || '',
+      replyto: process.env.EMAIL_FROM || 'noreply@recrutamento.local'
+    },
+    {
+      headers: { 'Content-Type': 'application/json' },
+      timeout: 8000
+    }
+  );
+  return r.data;
+}
+
 const SISTEMA = process.env.SISTEMA_NOME || 'Recrutamento e Seleção';
 
 // ===== Estratégia de envio =====
-// Prioridade: Resend (HTTP API) > Gmail SMTP
-// Resend é mais confiável em ambientes como Render que bloqueiam SMTP
+// Prioridade: Resend (HTTP API) > Web3Forms (HTTP API) > Gmail SMTP
+// HTTP APIs funcionam onde SMTP tá bloqueado, tipo Render
 async function enviarEmail({ to, subject, html, text, from }) {
-  // Tenta Resend primeiro se configurado
+  // 1ª opção: Resend (se configurado)
   if (getResendKey()) {
     console.log('[email] Enviando via Resend para:', to, '| subject:', subject);
     return enviarViaResend({ from, to, subject, html, text });
   }
-  console.log('[email] RESEND_API_KEY não configurada, tentando Gmail SMTP (fallback)...');
-  // Fallback: Gmail SMTP
+  // 2ª opção: Web3Forms (se configurado)
+  if (getWeb3FormsKey()) {
+    console.log('[email] Enviando via Web3Forms para:', to, '| subject:', subject);
+    return enviarViaWeb3Forms({ from, to, subject, html, text });
+  }
+  console.log('[email] Nenhum provedor HTTP configurado, tentando Gmail SMTP (fallback)...');
+  // 3ª opção: Gmail SMTP (fallback final)
   const t = getTransporter();
-  if (!t) throw new Error('Nenhum provedor de e-mail configurado (RESEND_API_KEY ou EMAIL_FROM/EMAIL_APP_PASSWORD)');
+  if (!t) throw new Error('Nenhum provedor de e-mail configurado (RESEND_API_KEY, WEB3FORMS_ACCESS_KEY ou EMAIL_FROM/EMAIL_APP_PASSWORD)');
   return t.sendMail({
     from: from || `"${SISTEMA}" <${process.env.EMAIL_FROM}>`,
     to,
