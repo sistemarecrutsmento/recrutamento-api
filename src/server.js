@@ -26,7 +26,7 @@ else if (process.env.CLOUDINARY_CLOUD_NAME) {
 
 const app = express();
 app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
-app.use(express.json({ limit: '10mb' }));
+app.use(express.json({ limit: '100mb' }));
 
 // log toda requisição
 app.use((req, res, next) => {
