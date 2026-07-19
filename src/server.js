@@ -7,7 +7,10 @@ const cloudinary = require('cloudinary').v2;
 require('dotenv').config();
 
 const { pool, init } = require('./db');
-const { enviarCodigo, enviarNotificacaoStatus, enviarEmailProposta, enviarEmailBg } = require('./email');
+const { enviarCodigo, enviarNotificacaoStatus, enviarEmailProposta, enviarEmailBg, enviarEmailAtualizacao } = require('./email');
+
+// Email do admin pra receber notificações de ação do candidato
+const ADMIN_NOTIF_EMAIL = process.env.ADMIN_NOTIF_EMAIL || process.env.ADMIN_EMAIL || 'fabio08dejesusjunior@gmail.com';
 const { authMiddleware, authCandidato, authAdmin } = require('./auth');
 
 // Cloudinary: aceita CLOUDINARY_URL no formato cloudinary://key:secret@cloud_name
@@ -996,6 +999,33 @@ app.post('/api/candidatura/:id/documentos', async (req, res) => {
       `UPDATE candidaturas SET etapa_atual = GREATEST(etapa_atual, $1) WHERE id = $2`,
       [5, candidaturaId] // etapa 5 = coleta de documentos
     );
+
+    // Notifica o admin que documentos foram enviados (em background)
+    try {
+      if (ADMIN_NOTIF_EMAIL) {
+        const { rows: candRows } = await pool.query(
+          `SELECT c.id, cand.email, cand.nome, v.titulo
+           FROM candidaturas c
+           JOIN candidatos cand ON cand.id = c.candidato_id
+           JOIN vagas v ON v.id = c.vaga_id
+           WHERE c.id = $1`,
+          [candidaturaId]
+        );
+        if (candRows.length > 0) {
+          const cr = candRows[0];
+          enviarEmailBg(enviarEmailAtualizacao, ADMIN_NOTIF_EMAIL, 'Admin', cr.titulo, {
+            etapaNum: 6,
+            etapaNome: 'Coleta de Documentos',
+            acao: 'admin_docs_recebidos',
+            status: 'em_andamento',
+            mensagemAdmin: `Candidato ${cr.nome} (${cr.email}) enviou ${salvos} documento(s) na etapa de Coleta. Acesse o painel admin para revisar.`
+          });
+        }
+      }
+    } catch (e) {
+      console.error('Falha ao notificar admin sobre documentos:', e.message);
+    }
+
     res.json({ ok: true, salvos });
   } catch (e) {
     console.error('[DOCS] erro ao enviar:', e);
@@ -1089,6 +1119,65 @@ app.post('/api/admin/documento/:id/revisar', authAdmin, async (req, res) => {
         `UPDATE candidaturas SET status = 'em_andamento' WHERE id = $1`,
         [docInfo.candidatura_id]
       );
+
+      // Notifica o candidato por e-mail (em background)
+      try {
+        const { rows: candRows } = await pool.query(
+          'SELECT c.id, c.etapa_atual, c.etapas, cand.email, cand.nome, v.titulo FROM candidaturas c JOIN candidatos cand ON cand.id = c.candidato_id JOIN vagas v ON v.id = c.vaga_id WHERE c.id = $1',
+          [docInfo.candidatura_id]
+        );
+        if (candRows.length > 0) {
+          const cr = candRows[0];
+          const etapaNum = cr.etapa_atual;
+          let etapaNome = null;
+          try {
+            const arr = typeof cr.etapas === 'string' ? JSON.parse(cr.etapas) : cr.etapas;
+            if (Array.isArray(arr) && arr[etapaNum - 1]) {
+              etapaNome = typeof arr[etapaNum - 1] === 'string' ? arr[etapaNum - 1] : arr[etapaNum - 1].nome;
+            }
+          } catch (e) {}
+          enviarEmailBg(enviarEmailAtualizacao, cr.email, cr.nome, cr.titulo, {
+            etapaNum,
+            etapaNome,
+            acao: 'documento_retornado',
+            status: 'em_andamento',
+            mensagemAdmin: '📄 ' + (docInfo.tipo || 'documento') + ': ' + justificativa
+          });
+        }
+      } catch (e) {
+        console.error('Falha ao notificar retorno de documento:', e.message);
+      }
+    } else if (status === 'aprovado' || status === 'reprovado') {
+      // Aprovação ou reprovação de um documento individual (sem mudar etapa)
+      // Só notifica se for reprovado (aprovação individual não muda fluxo, candidato vê no painel)
+      if (status === 'reprovado') {
+        try {
+          const { rows: candRows } = await pool.query(
+            'SELECT c.id, c.etapa_atual, c.etapas, cand.email, cand.nome, v.titulo FROM candidaturas c JOIN candidatos cand ON cand.id = c.candidato_id JOIN vagas v ON v.id = c.vaga_id WHERE c.id = $1',
+            [docInfo.candidatura_id]
+          );
+          if (candRows.length > 0) {
+            const cr = candRows[0];
+            const etapaNum = cr.etapa_atual;
+            let etapaNome = null;
+            try {
+              const arr = typeof cr.etapas === 'string' ? JSON.parse(cr.etapas) : cr.etapas;
+              if (Array.isArray(arr) && arr[etapaNum - 1]) {
+                etapaNome = typeof arr[etapaNum - 1] === 'string' ? arr[etapaNum - 1] : arr[etapaNum - 1].nome;
+              }
+            } catch (e) {}
+            enviarEmailBg(enviarEmailAtualizacao, cr.email, cr.nome, cr.titulo, {
+              etapaNum,
+              etapaNome,
+              acao: 'documento_reprovado',
+              status: 'em_andamento',
+              mensagemAdmin: '📄 ' + (docInfo.tipo || 'documento') + (justificativa ? ': ' + justificativa : ' foi reprovado')
+            });
+          }
+        } catch (e) {
+          console.error('Falha ao notificar reprovação de documento:', e.message);
+        }
+      }
     }
 
     res.json({ ok: true, status, documento: { id: docId, status, justificativa_admin: justificativa || null } });
@@ -1168,7 +1257,22 @@ app.post('/api/admin/candidatura/:id/aprovar-documentos', authAdmin, async (req,
 
     // 6) Notificar candidato (em background — não trava a resposta)
     try {
-      enviarEmailBg(enviarNotificacaoStatus, cand.email, cand.nome, cand.titulo, 'aprovado');
+      // Pega o nome da etapa atual da vaga
+      const etapaNome = (() => {
+        try {
+          const arr = typeof cand.etapas === 'string' ? JSON.parse(cand.etapas) : cand.etapas;
+          if (Array.isArray(arr) && arr[novaEtapa - 1]) {
+            return typeof arr[novaEtapa - 1] === 'string' ? arr[novaEtapa - 1] : arr[novaEtapa - 1].nome;
+          }
+        } catch (e) {}
+        return null;
+      })();
+      enviarEmailBg(enviarEmailAtualizacao, cand.email, cand.nome, cand.titulo, {
+        etapaNum: novaEtapa,
+        etapaNome,
+        acao: novoStatus === 'contratado' ? null : 'avancar',
+        status: novoStatus
+      });
     } catch (e) {
       console.error('Falha ao agendar notificação:', e.message);
     }
@@ -1302,8 +1406,25 @@ app.post('/api/admin/candidatura/:id/status', authAdmin, async (req, res) => {
     );
   }
 
+  // Notifica o candidato por e-mail (em background — não trava a resposta)
   try {
-    enviarEmailBg(enviarNotificacaoStatus, cand.email, cand.nome, cand.titulo, status);
+    // Pega o nome da etapa atual da vaga
+    const etapaNome = (() => {
+      try {
+        const arr = typeof cand.etapas === 'string' ? JSON.parse(cand.etapas) : cand.etapas;
+        if (Array.isArray(arr) && arr[(novaEtapa || 1) - 1]) {
+          return typeof arr[(novaEtapa || 1) - 1] === 'string' ? arr[(novaEtapa || 1) - 1] : arr[(novaEtapa || 1) - 1].nome;
+        }
+      } catch (e) {}
+      return null;
+    })();
+    enviarEmailBg(enviarEmailAtualizacao, cand.email, cand.nome, cand.titulo, {
+      etapaNum: novaEtapa,
+      etapaNome,
+      acao,
+      status: novoStatus,
+      mensagemAdmin: mensagem || null
+    });
   } catch (e) {
     console.error('Falha ao agendar notificação:', e.message);
   }
@@ -1435,6 +1556,29 @@ app.post('/api/candidato/aceitar-proposta/:candidaturaId', authCandidato, async 
     [JSON.stringify(historico), req.params.candidaturaId]
   );
 
+  // Notifica o candidato por e-mail (em background)
+  try {
+    enviarEmailBg(enviarEmailAtualizacao, cand.cand_email, 'Candidato', cand.titulo, {
+      etapaNum: 6,
+      etapaNome: 'Coleta de Documentos',
+      acao: 'avancar',
+      status: 'em_andamento',
+      mensagemAdmin: 'Você aceitou a proposta! Agora é só enviar os documentos solicitados.'
+    });
+    // Notifica o admin também
+    if (ADMIN_NOTIF_EMAIL) {
+      enviarEmailBg(enviarEmailAtualizacao, ADMIN_NOTIF_EMAIL, 'Admin', cand.titulo, {
+        etapaNum: 6,
+        etapaNome: 'Coleta de Documentos',
+        acao: 'admin_candidato_aceitou',
+        status: 'em_andamento',
+        mensagemAdmin: `Candidato ${cand.cand_email} ACEITOU a proposta. Próxima etapa: Coleta de Documentos.`
+      });
+    }
+  } catch (e) {
+    console.error('Falha ao notificar aceite de proposta:', e.message);
+  }
+
   res.json({ ok: true, msg: 'Proposta aceita! Próxima etapa: Coleta de documentos.' });
 });
 
@@ -1474,6 +1618,29 @@ app.post('/api/candidato/recusar-proposta/:candidaturaId', authCandidato, async 
      WHERE id = $3`,
     [motivo || null, JSON.stringify(historico), req.params.candidaturaId]
   );
+
+  // Notifica o candidato por e-mail (em background)
+  try {
+    enviarEmailBg(enviarEmailAtualizacao, cand.cand_email, 'Candidato', cand.titulo, {
+      etapaNum: 5,
+      etapaNome: 'Proposta',
+      acao: 'recusar_proposta',
+      status: 'rejeitado',
+      mensagemAdmin: 'Você recusou a proposta. O processo foi encerrado. Obrigado por participar!'
+    });
+    // Notifica o admin
+    if (ADMIN_NOTIF_EMAIL) {
+      enviarEmailBg(enviarEmailAtualizacao, ADMIN_NOTIF_EMAIL, 'Admin', cand.titulo, {
+        etapaNum: 5,
+        etapaNome: 'Proposta',
+        acao: 'admin_candidato_recusou',
+        status: 'rejeitado',
+        mensagemAdmin: `Candidato ${cand.cand_email} RECUSOU a proposta${motivo ? '. Motivo: ' + motivo : ''}.`
+      });
+    }
+  } catch (e) {
+    console.error('Falha ao notificar recusa de proposta:', e.message);
+  }
 
   res.json({ ok: true, msg: 'Proposta recusada.' });
 });
