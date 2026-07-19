@@ -66,8 +66,10 @@ const SISTEMA = process.env.SISTEMA_NOME || 'Recrutamento e Seleção';
 async function enviarEmail({ to, subject, html, text, from }) {
   // Tenta Resend primeiro se configurado
   if (process.env.RESEND_API_KEY) {
+    console.log('[email] Enviando via Resend para:', to, '| subject:', subject);
     return enviarViaResend({ from, to, subject, html, text });
   }
+  console.log('[email] RESEND_API_KEY não configurada, tentando Gmail SMTP (fallback)...');
   // Fallback: Gmail SMTP
   const t = getTransporter();
   if (!t) throw new Error('Nenhum provedor de e-mail configurado (RESEND_API_KEY ou EMAIL_FROM/EMAIL_APP_PASSWORD)');
