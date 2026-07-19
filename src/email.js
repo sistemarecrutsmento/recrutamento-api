@@ -129,8 +129,6 @@ async function enviarNotificacaoStatus(email, nome, vaga, novoStatus) {
   });
 }
 
-module.exports = { enviarCodigo, enviarNotificacaoStatus, enviarEmailProposta, enviarEmailBg, enviarEmailAtualizacao, enviarViaResend, enviarEmail };
-
 // ===== E-mail rico de atualização do processo =====
 // Disparado em cada mudança de etapa/status. Inclui nome da etapa, número, e link pro painel.
 const NOMES_ETAPAS = {
@@ -173,6 +171,24 @@ async function enviarEmailAtualizacao(email, nome, vaga, { etapaNum, etapaNome, 
     corHeader = '#0a6e2e';
     emoji = '🎉';
     detalhe = 'Em breve o RH entrará em contato com os próximos passos da sua contratação.';
+  } else if (acao === 'documento_aprovado') {
+    subject = `Documento aprovado - ${vaga}`;
+    intro = `Seu documento <strong>${mensagemAdmin || 'enviado'}</strong> foi aprovado pelo recrutador na vaga <strong>${vaga}</strong>.`;
+    corHeader = '#0a6e2e';
+    emoji = '✅';
+    detalhe = 'Continue acompanhando seu painel para mais atualizações.';
+  } else if (acao === 'documentos_aprovados_massa') {
+    subject = `Documentos aprovados! - ${vaga}`;
+    intro = `Todos os seus documentos da vaga <strong>${vaga}</strong> foram aprovados!`;
+    corHeader = '#0a6e2e';
+    emoji = '🎉';
+    detalhe = 'Acesse seu painel para ver o andamento do processo.';
+  } else if (acao === 'inscricao_recebida') {
+    subject = `Inscrição recebida - ${vaga}`;
+    intro = `Recebemos sua inscrição para a vaga <strong>${vaga}</strong>. A partir de agora, você pode acompanhar cada etapa do processo pelo seu painel.`;
+    corHeader = '#7a1f3d';
+    emoji = '📝';
+    detalhe = 'Fique de olho no seu e-mail e no painel. A cada nova etapa, avisaremos você!';
   } else {
     subject = `Atualização do seu processo - ${vaga}`;
     intro = `Houve uma atualização no seu processo para a vaga <strong>${vaga}</strong>.`;
@@ -247,3 +263,42 @@ async function enviarEmailProposta(email, nome, vaga, pdfUrl) {
     `
   });
 }
+
+// ===== E-mail de inscrição recebida (boas-vindas ao candidato) =====
+async function enviarEmailInscricao(email, nome, vaga, empresa) {
+  const linkPainel = (process.env.SISTEMA_URL || 'https://sistemarecrutsmento.github.io/vagas') + '/painel.html';
+  return enviarEmail({
+    to: email,
+    subject: `Inscrição recebida - ${vaga}`,
+    html: `
+      <div style="font-family: Arial, sans-serif; max-width: 520px; margin: 0 auto; padding: 24px; background: #fafafa; border-radius: 12px;">
+        <div style="background: #7a1f3d; color: #fff; padding: 22px 20px; border-radius: 8px; text-align: center;">
+          <div style="font-size:32px;margin-bottom:6px">📝</div>
+          <h2 style="margin:0;font-size:20px">${SISTEMA}</h2>
+        </div>
+        <div style="background: #fff; padding: 28px 24px; border-radius: 8px; margin-top: 16px;">
+          <p style="color: #2b2b2b; font-size: 15px; line-height: 1.5;">Olá, <strong>${nome}</strong>!</p>
+          <p style="color: #2b2b2b; font-size: 15px; line-height: 1.5;">Recebemos sua inscrição para a vaga <strong>${vaga}</strong>${empresa ? ' na <strong>' + empresa + '</strong>' : ''}.</p>
+          <p style="color: #2b2b2b; font-size: 15px; line-height: 1.5;">A partir de agora, você pode acompanhar cada etapa do processo pelo seu painel. A cada avanço, reprovação ou necessidade de documento, avisaremos você por aqui.</p>
+          <div style="text-align:center;margin:24px 0 8px">
+            <a href="${linkPainel}" style="background:#7a1f3d;color:#fff;padding:12px 24px;border-radius:6px;text-decoration:none;font-weight:600;display:inline-block">Acessar meu painel</a>
+          </div>
+        </div>
+        <div style="text-align:center;padding:14px 8px 0;color:#999;font-size:11px">
+          Você está recebendo este e-mail porque se candidatou à vaga ${vaga}.
+        </div>
+      </div>
+    `
+  });
+}
+
+module.exports = {
+  enviarCodigo,
+  enviarNotificacaoStatus,
+  enviarEmailProposta,
+  enviarEmailBg,
+  enviarEmailAtualizacao,
+  enviarViaResend,
+  enviarEmail,
+  enviarEmailInscricao
+};
