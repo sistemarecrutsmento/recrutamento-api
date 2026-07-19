@@ -80,6 +80,29 @@ app.get('/api/_debug-email-teste', async (req, res) => {
   }
 });
 
+// MARKER-DEBUG-ENV: mostra tudo sobre o processo
+app.get('/api/_debug-processo', (req, res) => {
+  res.json({
+    pid: process.pid,
+    uptimeSeg: Math.round(process.uptime()),
+    startedAt: new Date(Date.now() - process.uptime() * 1000).toISOString(),
+    nodeVersion: process.version,
+    platform: process.platform,
+    memoryMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
+    env: {
+      hasResendApiKey: !!process.env.RESEND_API_KEY,
+      resendKeyLen: (process.env.RESEND_API_KEY || '').length,
+      hasDatabaseUrl: !!process.env.DATABASE_URL,
+      databaseUrlPreview: process.env.DATABASE_URL ? process.env.DATABASE_URL.substring(0, 25) + '...' : null,
+      hasJwtSecret: !!process.env.JWT_SECRET,
+      hasEmailFrom: !!process.env.EMAIL_FROM,
+      hasEmailAppPassword: !!process.env.EMAIL_APP_PASSWORD,
+      hasAdminNotifEmail: !!process.env.ADMIN_NOTIF_EMAIL
+    },
+    gitCommit: process.env.RENDER_GIT_COMMIT || 'n/a'
+  });
+});
+
 // Log no startup: mostra TODAS env vars que contenham "RESEND" no nome
 console.log('[STARTUP] Variáveis de ambiente com "RESEND" no nome:');
 const foundResend = Object.keys(process.env).filter(k => k.toUpperCase().includes('RESEND'));
@@ -1916,29 +1939,3 @@ process.on('unhandledRejection', (e) => {
 })();
 
 
-
-// MARKER-DEPLOY-FORCADO-2026-07-19
-
-
-// MARKER-DEBUG-ENV: mostra tudo sobre o processo
-app.get('/api/_debug-processo', (req, res) => {
-  res.json({
-    pid: process.pid,
-    uptimeSeg: Math.round(process.uptime()),
-    startedAt: new Date(Date.now() - process.uptime() * 1000).toISOString(),
-    nodeVersion: process.version,
-    platform: process.platform,
-    memoryMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
-    env: {
-      hasResendApiKey: !!process.env.RESEND_API_KEY,
-      resendKeyLen: (process.env.RESEND_API_KEY || '').length,
-      hasDatabaseUrl: !!process.env.DATABASE_URL,
-      databaseUrlPreview: process.env.DATABASE_URL ? process.env.DATABASE_URL.substring(0, 25) + '...' : null,
-      hasJwtSecret: !!process.env.JWT_SECRET,
-      hasEmailFrom: !!process.env.EMAIL_FROM,
-      hasEmailAppPassword: !!process.env.EMAIL_APP_PASSWORD,
-      hasAdminNotifEmail: !!process.env.ADMIN_NOTIF_EMAIL
-    },
-    gitCommit: process.env.RENDER_GIT_COMMIT || 'n/a'
-  });
-});
