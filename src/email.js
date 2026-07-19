@@ -4,16 +4,19 @@ let transporter = null;
 function getTransporter() {
   if (transporter) return transporter;
   if (!process.env.EMAIL_FROM || !process.env.EMAIL_APP_PASSWORD) return null;
+  // Usa Gmail SMTP com SSL porta 465 (mais confiável em ambientes como Render)
   transporter = nodemailer.createTransport({
-    service: 'gmail',
+    host: 'smtp.gmail.com',
+    port: 465,
+    secure: true, // usa SSL
     auth: {
       user: process.env.EMAIL_FROM,
       pass: process.env.EMAIL_APP_PASSWORD
     },
-        // Timeout agressivo: não deixa o SMTP pendurar (4s é suficiente p/ Gmail)
-    connectionTimeout: 4000,
-    socketTimeout: 4000,
-    greetingTimeout: 3000
+    // Timeout agressivo: não deixa o SMTP pendurar
+    connectionTimeout: 6000,
+    socketTimeout: 6000,
+    greetingTimeout: 4000
   });
   return transporter;
 }
