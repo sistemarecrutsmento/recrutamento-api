@@ -2,17 +2,12 @@ const nodemailer = require('nodemailer');
 const axios = require('axios');
 
 // ===== Resolver chave Resend (aceita variações de nome) =====
-// WORKAROUND 19/07/2026: a env var não tava chegando no Render free tier
-// então a chave tá como fallback hardcoded. Pode revogar e remover quando
-// o problema do Render for resolvido.
-const RESEND_KEY_FALLBACK = 'rnd_q0r08ggsDg4KoszUj1ufw44VWYvI';
-
 function getResendKey() {
   return process.env.RESEND_API_KEY
       || process.env.RESEND_KEY
       || process.env.ResendApiKey
       || process.env.RESENDAPIKEY
-      || RESEND_KEY_FALLBACK;
+      || null;
 }
 
 let transporter = null;
