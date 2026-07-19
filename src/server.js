@@ -7,7 +7,7 @@ const cloudinary = require('cloudinary').v2;
 require('dotenv').config();
 
 const { pool, init } = require('./db');
-const { enviarCodigo, enviarNotificacaoStatus, enviarEmailProposta, enviarEmailBg, enviarEmailAtualizacao } = require('./email');
+const { enviarCodigo, enviarNotificacaoStatus, enviarEmailProposta, enviarEmailBg, enviarEmailAtualizacao, enviarEmail } = require('./email');
 
 // Email do admin pra receber notificações de ação do candidato
 const ADMIN_NOTIF_EMAIL = process.env.ADMIN_NOTIF_EMAIL || process.env.ADMIN_EMAIL || 'fabio08dejesusjunior@gmail.com';
@@ -1712,22 +1712,21 @@ process.on('unhandledRejection', (e) => {
   app.get('/api/_teste/email', async (req, res) => {
     const to = req.query.to;
     if (!to) return res.status(400).json({ erro: 'Passe ?to=email@dominio.com' });
-    if (!process.env.EMAIL_FROM || !process.env.EMAIL_APP_PASSWORD) {
+    if (!process.env.EMAIL_FROM && !process.env.RESEND_API_KEY) {
       return res.status(500).json({
-        erro: 'Email não configurado no servidor',
+        erro: 'Nenhum provedor de e-mail configurado',
         hasEmailFrom: !!process.env.EMAIL_FROM,
-        hasPassword: !!process.env.EMAIL_APP_PASSWORD
+        hasResend: !!process.env.RESEND_API_KEY
       });
     }
     try {
-      const result = await enviarEmailAtualizacao(to, 'Teste', 'Vaga de Teste', {
-        etapaNum: 2,
-        etapaNome: 'Triagem',
-        acao: 'avancar',
-        status: 'em_andamento',
-        mensagemAdmin: 'Email de teste enviado pelo Zapia'
+      const result = await enviarEmail({
+        to,
+        subject: '🧪 Teste de envio - Recrutamento',
+        html: '<h1>Funcionando! ✅</h1><p>Este é um teste do Zapia. Se você recebeu, o e-mail tá ok.</p>',
+        text: 'Teste Zapia OK'
       });
-      res.json({ ok: true, messageId: result?.messageId });
+      res.json({ ok: true, provedor: process.env.RESEND_API_KEY ? 'Resend' : 'Gmail SMTP', result });
     } catch (e) {
       console.error('[teste-email] ERRO:', e.message);
       res.status(500).json({
