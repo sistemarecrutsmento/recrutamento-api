@@ -1707,7 +1707,40 @@ process.on('unhandledRejection', (e) => {
     await init();
     console.log('Banco inicializado com sucesso');
 
-    const port = process.env.PORT || 10000;
+    // Endpoint pra testar email em produção (sem auth, mas com token simples)
+  // GET /api/_teste/email?to=email@x.com
+  app.get('/api/_teste/email', async (req, res) => {
+    const to = req.query.to;
+    if (!to) return res.status(400).json({ erro: 'Passe ?to=email@dominio.com' });
+    if (!process.env.EMAIL_FROM || !process.env.EMAIL_APP_PASSWORD) {
+      return res.status(500).json({
+        erro: 'Email não configurado no servidor',
+        hasEmailFrom: !!process.env.EMAIL_FROM,
+        hasPassword: !!process.env.EMAIL_APP_PASSWORD
+      });
+    }
+    try {
+      const result = await enviarEmailAtualizacao(to, 'Teste', 'Vaga de Teste', {
+        etapaNum: 2,
+        etapaNome: 'Triagem',
+        acao: 'avancar',
+        status: 'em_andamento',
+        mensagemAdmin: 'Email de teste enviado pelo Zapia'
+      });
+      res.json({ ok: true, messageId: result?.messageId });
+    } catch (e) {
+      console.error('[teste-email] ERRO:', e.message);
+      res.status(500).json({
+        erro: e.message,
+        code: e.code,
+        command: e.command,
+        responseCode: e.responseCode,
+        response: e.response
+      });
+    }
+  });
+
+  const port = process.env.PORT || 10000;
     app.listen(port, () => console.log(`API rodando na porta ${port}`));
   } catch (e) {
     console.error('Erro ao iniciar:', e);
