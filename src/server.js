@@ -1902,3 +1902,6 @@ process.on('unhandledRejection', (e) => {
   }
 })();
 
+
+
+// MARKER-DEPLOY-FORCADO-2026-07-19
