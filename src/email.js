@@ -1,4 +1,5 @@
 const nodemailer = require('nodemailer');
+const axios = require('axios');
 
 let transporter = null;
 function getTransporter() {
@@ -28,17 +29,59 @@ function enviarEmailBg(fn, ...args) {
   setImmediate(() => {
     Promise.resolve()
       .then(() => fn(...args))
-      .catch((e) => console.error('[email-bg] Falha ao enviar e-mail:', e.message));
+      .catch((e) => console.error('[email-bg] Falha ao enviar e-mail:', e.message, '| code:', e.code));
   });
+}
+
+// Envia via Resend (HTTP API — funciona onde SMTP tá bloqueado, tipo Render)
+async function enviarViaResend({ from, to, subject, html, text }) {
+  if (!process.env.RESEND_API_KEY) {
+    throw new Error('RESEND_API_KEY não configurada');
+  }
+  const r = await axios.post(
+    'https://api.resend.com/emails',
+    {
+      from: from || `${process.env.SISTEMA_NOME || 'Recrutamento'} <onboarding@resend.dev>`,
+      to: Array.isArray(to) ? to : [to],
+      subject,
+      html,
+      text: text || ''
+    },
+    {
+      headers: {
+        'Authorization': `Bearer ${process.env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json'
+      },
+      timeout: 8000
+    }
+  );
+  return r.data;
 }
 
 const SISTEMA = process.env.SISTEMA_NOME || 'Recrutamento e Seleção';
 
-async function enviarCodigo(email, codigo) {
+// ===== Estratégia de envio =====
+// Prioridade: Resend (HTTP API) > Gmail SMTP
+// Resend é mais confiável em ambientes como Render que bloqueiam SMTP
+async function enviarEmail({ to, subject, html, text, from }) {
+  // Tenta Resend primeiro se configurado
+  if (process.env.RESEND_API_KEY) {
+    return enviarViaResend({ from, to, subject, html, text });
+  }
+  // Fallback: Gmail SMTP
   const t = getTransporter();
-  if (!t) throw new Error('SMTP não configurado');
+  if (!t) throw new Error('Nenhum provedor de e-mail configurado (RESEND_API_KEY ou EMAIL_FROM/EMAIL_APP_PASSWORD)');
   return t.sendMail({
-    from: `"${SISTEMA}" <${process.env.EMAIL_FROM}>`,
+    from: from || `"${SISTEMA}" <${process.env.EMAIL_FROM}>`,
+    to,
+    subject,
+    html,
+    text
+  });
+}
+
+async function enviarCodigo(email, codigo) {
+  return enviarEmail({
     to: email,
     subject: `Seu código de verificação - ${SISTEMA}`,
     html: `
@@ -60,8 +103,6 @@ async function enviarCodigo(email, codigo) {
 }
 
 async function enviarNotificacaoStatus(email, nome, vaga, novoStatus) {
-  const t = getTransporter();
-  if (!t) throw new Error('SMTP não configurado');
   const statusTexto = {
     'em_analise': 'em análise',
     'entrevista': 'avançou para etapa de entrevista',
@@ -70,8 +111,7 @@ async function enviarNotificacaoStatus(email, nome, vaga, novoStatus) {
     'contratado': 'foi contratado(a) 🎉'
   }[novoStatus] || novoStatus;
 
-  return t.sendMail({
-    from: `"${SISTEMA}" <${process.env.EMAIL_FROM}>`,
+  return enviarEmail({
     to: email,
     subject: `Atualização do seu processo - ${vaga}`,
     html: `
@@ -89,7 +129,7 @@ async function enviarNotificacaoStatus(email, nome, vaga, novoStatus) {
   });
 }
 
-module.exports = { enviarCodigo, enviarNotificacaoStatus, enviarEmailProposta, enviarEmailBg, enviarEmailAtualizacao };
+module.exports = { enviarCodigo, enviarNotificacaoStatus, enviarEmailProposta, enviarEmailBg, enviarEmailAtualizacao, enviarViaResend, enviarEmail };
 
 // ===== E-mail rico de atualização do processo =====
 // Disparado em cada mudança de etapa/status. Inclui nome da etapa, número, e link pro painel.
@@ -104,9 +144,6 @@ const NOMES_ETAPAS = {
 };
 
 async function enviarEmailAtualizacao(email, nome, vaga, { etapaNum, etapaNome, acao, status, mensagemAdmin }) {
-  const t = getTransporter();
-  if (!t) throw new Error('SMTP não configurado');
-
   // Monta assunto e copy baseado na ação
   let subject, intro, corHeader, emoji, detalhe = '';
   const linkPainel = (process.env.SISTEMA_URL || 'https://sistemarecrutsmento.github.io/vagas') + '/painel.html';
@@ -164,8 +201,7 @@ async function enviarEmailAtualizacao(email, nome, vaga, { etapaNum, etapaNome, 
       </div>`;
   }
 
-  return t.sendMail({
-    from: `"${SISTEMA}" <${process.env.EMAIL_FROM}>`,
+  return enviarEmail({
     to: email,
     subject,
     html: `
@@ -193,10 +229,7 @@ async function enviarEmailAtualizacao(email, nome, vaga, { etapaNum, etapaNome, 
 }
 
 async function enviarEmailProposta(email, nome, vaga, pdfUrl) {
-  const t = getTransporter();
-  if (!t) throw new Error('SMTP não configurado');
-  return t.sendMail({
-    from: `"${SISTEMA}" <${process.env.EMAIL_FROM}>`,
+  return enviarEmail({
     to: email,
     subject: `Você recebeu uma proposta - ${vaga}`,
     html: `
