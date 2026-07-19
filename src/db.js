@@ -143,6 +143,22 @@ async function init() {
         enviado_em TIMESTAMP DEFAULT NOW(),
         revisado_em TIMESTAMP
       );
+
+      -- Entrevistas agendadas (jul/2026 - dashboard profissional)
+      CREATE TABLE IF NOT EXISTS entrevistas (
+        id SERIAL PRIMARY KEY,
+        candidatura_id INTEGER REFERENCES candidaturas(id) ON DELETE CASCADE,
+        etapa INTEGER NOT NULL,
+        data_hora TIMESTAMP NOT NULL,
+        duracao_minutos INTEGER DEFAULT 60,
+        local TEXT,
+        link_reuniao TEXT,
+        observacoes TEXT,
+        status TEXT DEFAULT 'agendada',
+        criado_por INTEGER REFERENCES admins(id),
+        criado_em TIMESTAMP DEFAULT NOW(),
+        atualizado_em TIMESTAMP DEFAULT NOW()
+      );
     `);
 
     // Garantir colunas em tabelas já criadas (idempotente)
