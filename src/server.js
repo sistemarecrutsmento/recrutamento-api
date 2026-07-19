@@ -1201,23 +1201,29 @@ app.post('/api/admin/candidatura/:id/aprovar-documentos', authAdmin, async (req,
     if (cRows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
     const cand = cRows[0];
 
-    // 2) Listar docs pendentes/retornados
+    // 2) Listar docs da candidatura e checar quais foram ENVIADOS
     const { rows: docs } = await pool.query(
       `SELECT id, tipo, status FROM documentos_candidatura WHERE candidatura_id = $1`,
       [candId]
     );
     const tiposObrig = (DOCUMENTOS_OBRIGATORIOS || []).map(d => d.tipo);
-    const obrigatoriosNaoAprovados = docs.filter(d =>
-      tiposObrig.includes(d.tipo) && d.status !== 'aprovado'
-    );
-    if (obrigatoriosNaoAprovados.length > 0) {
+    // Falta enviar: tipos obrigatórios que nem têm linha no banco
+    const tiposEnviados = new Set(docs.map(d => d.tipo));
+    const tiposFaltando = tiposObrig.filter(t => !tiposEnviados.has(t));
+    if (tiposFaltando.length > 0) {
       return res.status(400).json({
-        erro: 'Há documentos obrigatórios que ainda não foram aprovados.',
-        detalhes: {
-          reprovados: obrigatoriosNaoAprovados.filter(d => d.status === 'reprovado').length,
-          pendentes: obrigatoriosNaoAprovados.filter(d => d.status === 'pendente' || !d.status).length,
-          retornados: obrigatoriosNaoAprovados.filter(d => d.status === 'retornado').length
-        }
+        erro: 'Candidato ainda não enviou todos os documentos obrigatórios.',
+        detalhes: { faltando: tiposFaltando }
+      });
+    }
+    // Bloqueia só se há docs "retornado" (candidato precisa reenviar) ou "reprovado" (precisa reverter)
+    const bloqueia = docs.filter(d =>
+      tiposObrig.includes(d.tipo) && (d.status === 'retornado' || d.status === 'reprovado')
+    );
+    if (bloqueia.length > 0) {
+      return res.status(400).json({
+        erro: 'Há documentos marcados para reenviar/reprovados. Aguarde o candidato regularizar.',
+        detalhes: { bloqueados: bloqueia.length }
       });
     }
     if (docs.length === 0) {
