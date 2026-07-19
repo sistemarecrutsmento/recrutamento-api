@@ -7,7 +7,7 @@ const cloudinary = require('cloudinary').v2;
 require('dotenv').config();
 
 const { pool, init } = require('./db');
-const { enviarCodigo, enviarNotificacaoStatus, enviarEmailProposta, enviarEmailBg, enviarEmailAtualizacao, enviarEmail, enviarEmailInscricao } = require('./email');
+const { enviarCodigo, enviarNotificacaoStatus, enviarEmailProposta, enviarEmailBg, enviarEmailAtualizacao, enviarEmail, enviarEmailInscricao, getResendKey } = require('./email');
 
 // Email do admin pra receber notificações de ação do candidato
 const ADMIN_NOTIF_EMAIL = process.env.ADMIN_NOTIF_EMAIL || process.env.ADMIN_EMAIL || 'fabio08dejesusjunior@gmail.com';
@@ -79,6 +79,19 @@ app.get('/api/_debug-email-teste', async (req, res) => {
     res.json({ ok: false, info, erro: e.message, code: e.code, response: e.response?.data });
   }
 });
+
+// Log no startup: mostra TODAS env vars que contenham "RESEND" no nome
+console.log('[STARTUP] Variáveis de ambiente com "RESEND" no nome:');
+const foundResend = Object.keys(process.env).filter(k => k.toUpperCase().includes('RESEND'));
+if (foundResend.length === 0) {
+  console.log('  ❌ NENHUMA encontrada');
+} else {
+  foundResend.forEach(k => {
+    const v = process.env[k];
+    console.log(`  ✅ ${k} = ${v ? v.substring(0, 8) + '... (len=' + v.length + ')' : 'VAZIA'}`);
+  });
+}
+console.log('[STARTUP] getResendKey() retorna:', getResendKey() ? getResendKey().substring(0, 8) + '... (len=' + getResendKey().length + ')' : 'null');
 
 // Debug: testa bcrypt isolado
 // =========================================================================
