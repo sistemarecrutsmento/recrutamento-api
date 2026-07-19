@@ -45,6 +45,7 @@ app.get('/api/saude', (req, res) => res.json({ ok: true, sistema: process.env.SI
 
 // ============= DEBUG TEMPORÁRIO (remover depois) =============
 // Tenta enviar e-mail de teste via Resend e mostra erro/sucesso
+// v2 - força redeploy p/ pegar RESEND_API_KEY
 app.get('/api/_debug-email-teste', async (req, res) => {
   const to = req.query.to || 'fabio08dejesusjunior@gmail.com';
   const hasResend = !!process.env.RESEND_API_KEY;
