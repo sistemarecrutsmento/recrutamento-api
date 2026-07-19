@@ -82,6 +82,19 @@ app.get('/api/_debug-email-teste', async (req, res) => {
 
 // MARKER-DEBUG-ENV: mostra tudo sobre o processo
 app.get('/api/_debug-processo', (req, res) => {
+  // Lista TODAS as env vars com "RESEND" no nome (independente de case)
+  const resendEnvVars = {};
+  Object.keys(process.env).forEach(k => {
+    if (k.toUpperCase().includes('RESEND')) {
+      const v = process.env[k];
+      resendEnvVars[k] = {
+        len: v ? v.length : 0,
+        preview: v ? v.substring(0, 8) + '...' : null,
+        starts: v ? v.substring(0, 4) : null
+      };
+    }
+  });
+
   res.json({
     pid: process.pid,
     uptimeSeg: Math.round(process.uptime()),
@@ -92,6 +105,7 @@ app.get('/api/_debug-processo', (req, res) => {
     env: {
       hasResendApiKey: !!process.env.RESEND_API_KEY,
       resendKeyLen: (process.env.RESEND_API_KEY || '').length,
+      resendKeyPreview: process.env.RESEND_API_KEY ? process.env.RESEND_API_KEY.substring(0, 8) + '...' : null,
       hasDatabaseUrl: !!process.env.DATABASE_URL,
       databaseUrlPreview: process.env.DATABASE_URL ? process.env.DATABASE_URL.substring(0, 25) + '...' : null,
       hasJwtSecret: !!process.env.JWT_SECRET,
@@ -99,6 +113,8 @@ app.get('/api/_debug-processo', (req, res) => {
       hasEmailAppPassword: !!process.env.EMAIL_APP_PASSWORD,
       hasAdminNotifEmail: !!process.env.ADMIN_NOTIF_EMAIL
     },
+    resendEnvVars,         // ← NOVO: lista TODAS as env vars com "RESEND" no nome
+    resendCount: Object.keys(resendEnvVars).length,
     gitCommit: process.env.RENDER_GIT_COMMIT || 'n/a'
   });
 });
