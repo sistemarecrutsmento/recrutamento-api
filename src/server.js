@@ -7,7 +7,7 @@ const cloudinary = require('cloudinary').v2;
 require('dotenv').config();
 
 const { pool, init } = require('./db');
-const { enviarCodigo, enviarNotificacaoStatus, enviarEmailProposta, enviarEmailBg, enviarEmailAtualizacao, enviarEmail } = require('./email');
+const { enviarCodigo, enviarNotificacaoStatus, enviarEmailProposta, enviarEmailBg, enviarEmailAtualizacao, enviarEmail, enviarEmailInscricao } = require('./email');
 
 // Email do admin pra receber notificações de ação do candidato
 const ADMIN_NOTIF_EMAIL = process.env.ADMIN_NOTIF_EMAIL || process.env.ADMIN_EMAIL || 'fabio08dejesusjunior@gmail.com';
@@ -565,6 +565,18 @@ app.post('/api/candidato/candidatar/:vagaId', authCandidato, async (req, res) =>
         { etapa: 0, status: 'concluida', acao: 'inscricao', data: new Date().toISOString(), mensagem: 'Inscrição realizada' }
       ])]
     );
+    // E-mail de boas-vindas: inscrição recebida (em background, não trava a response)
+    try {
+      const { rows: vd } = await pool.query(
+        'SELECT v.titulo, v.empresa, cd.nome FROM vagas v, candidatos cd WHERE v.id = $1 AND cd.id = $2',
+        [req.params.vagaId, c[0].id]
+      );
+      if (vd.length > 0) {
+        enviarEmailBg(enviarEmailInscricao, req.user.email, vd[0].nome, vd[0].titulo, vd[0].empresa);
+      }
+    } catch (e) {
+      console.error('[candidatar] Falha ao enviar e-mail de inscrição:', e.message);
+    }
     res.json({ ok: true, candidatura: rows[0] });
   } catch (e) {
     if (e.code === '23505') return res.status(400).json({ erro: 'Você já se candidatou a esta vaga' });
@@ -1149,34 +1161,35 @@ app.post('/api/admin/documento/:id/revisar', authAdmin, async (req, res) => {
       }
     } else if (status === 'aprovado' || status === 'reprovado') {
       // Aprovação ou reprovação de um documento individual (sem mudar etapa)
-      // Só notifica se for reprovado (aprovação individual não muda fluxo, candidato vê no painel)
-      if (status === 'reprovado') {
-        try {
-          const { rows: candRows } = await pool.query(
-            'SELECT c.id, c.etapa_atual, c.etapas, cand.email, cand.nome, v.titulo FROM candidaturas c JOIN candidatos cand ON cand.id = c.candidato_id JOIN vagas v ON v.id = c.vaga_id WHERE c.id = $1',
-            [docInfo.candidatura_id]
-          );
-          if (candRows.length > 0) {
-            const cr = candRows[0];
-            const etapaNum = cr.etapa_atual;
-            let etapaNome = null;
-            try {
-              const arr = typeof cr.etapas === 'string' ? JSON.parse(cr.etapas) : cr.etapas;
-              if (Array.isArray(arr) && arr[etapaNum - 1]) {
-                etapaNome = typeof arr[etapaNum - 1] === 'string' ? arr[etapaNum - 1] : arr[etapaNum - 1].nome;
-              }
-            } catch (e) {}
-            enviarEmailBg(enviarEmailAtualizacao, cr.email, cr.nome, cr.titulo, {
-              etapaNum,
-              etapaNome,
-              acao: 'documento_reprovado',
-              status: 'em_andamento',
-              mensagemAdmin: '📄 ' + (docInfo.tipo || 'documento') + (justificativa ? ': ' + justificativa : ' foi reprovado')
-            });
-          }
-        } catch (e) {
-          console.error('Falha ao notificar reprovação de documento:', e.message);
+      // Notifica o candidato em ambos os casos (aprovação E reprovação)
+      const tipoDoc = docInfo.tipo || 'documento';
+      const acaoDoc = status === 'aprovado' ? 'documento_aprovado' : 'documento_reprovado';
+      const justificativaDoc = status === 'reprovado' ? (justificativa || 'Documento reprovado') : tipoDoc;
+      try {
+        const { rows: candRows } = await pool.query(
+          'SELECT c.id, c.etapa_atual, c.etapas, cand.email, cand.nome, v.titulo FROM candidaturas c JOIN candidatos cand ON cand.id = c.candidato_id JOIN vagas v ON v.id = c.vaga_id WHERE c.id = $1',
+          [docInfo.candidatura_id]
+        );
+        if (candRows.length > 0) {
+          const cr = candRows[0];
+          const etapaNum = cr.etapa_atual;
+          let etapaNome = null;
+          try {
+            const arr = typeof cr.etapas === 'string' ? JSON.parse(cr.etapas) : cr.etapas;
+            if (Array.isArray(arr) && arr[etapaNum - 1]) {
+              etapaNome = typeof arr[etapaNum - 1] === 'string' ? arr[etapaNum - 1] : arr[etapaNum - 1].nome;
+            }
+          } catch (e) {}
+          enviarEmailBg(enviarEmailAtualizacao, cr.email, cr.nome, cr.titulo, {
+            etapaNum,
+            etapaNome,
+            acao: acaoDoc,
+            status: 'em_andamento',
+            mensagemAdmin: status === 'aprovado' ? tipoDoc : (tipoDoc + ': ' + justificativa)
+          });
         }
+      } catch (e) {
+        console.error('Falha ao notificar ' + (status === 'aprovado' ? 'aprovação' : 'reprovação') + ' de documento:', e.message);
       }
     }
 
