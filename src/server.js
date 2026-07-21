@@ -1627,8 +1627,42 @@ app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
   }
 });
 
-// Listar entrevistas de uma candidatura
-app.get('/api/admin/candidatura/:id/entrevistas', authAdmin, async (req, res) => {
+// Listar TODAS as entrevistas (pra página Agenda)
+app.get('/api/admin/entrevistas', authAdmin, async (req, res) => {
+  try {
+    const { periodo } = req.query; // 'hoje' | 'proximas' | 'passadas' | 'todas'
+    let where = '';
+    const params = [];
+    if (periodo === 'hoje') {
+      where = `WHERE e.data_hora::date = CURRENT_DATE`;
+    } else if (periodo === 'proximas') {
+      where = `WHERE e.data_hora >= NOW() AND e.status IN ('agendada','confirmada')`;
+    } else if (periodo === 'passadas') {
+      where = `WHERE e.data_hora < NOW() OR e.status IN ('realizada','cancelada','faltou')`;
+    }
+    const r = await pool.query(`
+      SELECT e.id, e.candidatura_id, e.etapa, e.data_hora, e.duracao_minutos, e.local,
+             e.link_reuniao, e.observacoes, e.status, e.criado_em,
+             v.titulo as vaga_titulo, v.id as vaga_id,
+             c.nome as candidato_nome, c.email as candidato_email, c.telefone as candidato_telefone,
+             emp.nome as empresa_nome
+      FROM entrevistas e
+      JOIN candidaturas cd ON cd.id = e.candidatura_id
+      JOIN candidatos c ON c.id = cd.candidato_id
+      JOIN vagas v ON v.id = cd.vaga_id
+      LEFT JOIN empresas emp ON emp.id = v.empresa_id
+      ${where}
+      ORDER BY e.data_hora ${periodo === 'passadas' ? 'DESC' : 'ASC'}
+    `, params);
+    res.json({ entrevistas: r.rows });
+  } catch (e) {
+    console.error('[ENTREVISTAS TODAS ERRO]', e);
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+// Atualizar status da entrevista (cancelar, realizar, no-show)
+app.put('/api/admin/entrevista/:id', authAdmin, async (req, res) => {
   try {
     const r = await pool.query(`
       SELECT e.*, a.nome as criado_por_nome
