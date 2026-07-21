@@ -839,7 +839,7 @@ app.get('/api/admin/dashboard', authAdmin, async (req, res) => {
       taxaConversao
     ];
 
-    // ==== Próximas entrevistas (próximos 7 dias) ====
+    // ==== Próximas entrevistas (próximos 30 dias, OU atrasadas até 3 dias) ====
     const proximas = await pool.query(`
       SELECT
         e.id, e.candidatura_id, e.etapa, e.data_hora, e.duracao_minutos,
@@ -850,11 +850,11 @@ app.get('/api/admin/dashboard', authAdmin, async (req, res) => {
       JOIN candidaturas c ON c.id = e.candidatura_id
       JOIN vagas v ON v.id = c.vaga_id
       JOIN candidatos cd ON cd.id = c.candidato_id
-      WHERE e.data_hora >= NOW()
-        AND e.data_hora < NOW() + INTERVAL '7 days'
-        AND e.status = 'agendada'
+      WHERE e.status = 'agendada'
+        AND e.data_hora >= NOW() - INTERVAL '3 days'
+        AND e.data_hora < NOW() + INTERVAL '30 days'
       ORDER BY e.data_hora ASC
-      LIMIT 5
+      LIMIT 10
     `);
 
     // ==== Atividades recentes (do histórico das candidaturas) ====
