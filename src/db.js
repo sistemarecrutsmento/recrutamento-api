@@ -25,7 +25,57 @@ async function init() {
         senha_hash TEXT NOT NULL,
         criado_por INTEGER REFERENCES admins(id),
         ativo BOOLEAN DEFAULT true,
+        role TEXT DEFAULT 'recrutador',
+        primeiro_acesso BOOLEAN DEFAULT true,
         criado_em TIMESTAMP DEFAULT NOW()
+      );
+
+      -- Tabela de empresas (clientes que contratam vagas)
+      CREATE TABLE IF NOT EXISTS empresas (
+        id SERIAL PRIMARY KEY,
+        nome TEXT NOT NULL,
+        cnpj TEXT,
+        email_principal TEXT,
+        telefone TEXT,
+        ativo BOOLEAN DEFAULT true,
+        criado_por INTEGER REFERENCES admins(id),
+        criado_em TIMESTAMP DEFAULT NOW()
+      );
+
+      -- Usuários que acessam o sistema como empresa (múltiplos por empresa)
+      CREATE TABLE IF NOT EXISTS empresa_usuarios (
+        id SERIAL PRIMARY KEY,
+        empresa_id INTEGER REFERENCES empresas(id) ON DELETE CASCADE,
+        nome TEXT NOT NULL,
+        email TEXT UNIQUE NOT NULL,
+        senha_hash TEXT NOT NULL,
+        cargo TEXT,
+        ativo BOOLEAN DEFAULT true,
+        primeiro_acesso BOOLEAN DEFAULT true,
+        criado_por INTEGER REFERENCES admins(id),
+        criado_em TIMESTAMP DEFAULT NOW()
+      );
+
+      -- N:N — quais vagas cada empresa tem acesso
+      CREATE TABLE IF NOT EXISTS empresa_vaga_acesso (
+        id SERIAL PRIMARY KEY,
+        empresa_id INTEGER REFERENCES empresas(id) ON DELETE CASCADE,
+        vaga_id INTEGER REFERENCES vagas(id) ON DELETE CASCADE,
+        concedido_por INTEGER REFERENCES admins(id),
+        concedido_em TIMESTAMP DEFAULT NOW(),
+        UNIQUE(empresa_id, vaga_id)
+      );
+
+      -- Log de notificações enviadas para a empresa
+      CREATE TABLE IF NOT EXISTS empresa_notificacoes (
+        id SERIAL PRIMARY KEY,
+        empresa_id INTEGER REFERENCES empresas(id) ON DELETE CASCADE,
+        candidatura_id INTEGER REFERENCES candidaturas(id) ON DELETE CASCADE,
+        tipo TEXT NOT NULL,
+        assunto TEXT,
+        corpo TEXT,
+        enviado_em TIMESTAMP DEFAULT NOW(),
+        status TEXT DEFAULT 'enviado'
       );
 
       CREATE TABLE IF NOT EXISTS candidatos (
