@@ -2162,6 +2162,29 @@ app.post('/api/auth/trocar-senha-recrutador', authAdmin, async (req, res) => {
 
 // ========== EMPRESAS (clientes) ==========
 
+// Listar recrutadores + empresas em um único endpoint (pra página /admin/equipe)
+app.get('/api/admin/equipe', authAdmin, async (req, res) => {
+  try {
+    const recrutadores = await pool.query(`
+      SELECT id, nome, email, ativo, criado_em
+      FROM recrutadores
+      ORDER BY criado_em DESC
+    `);
+    const empresas = await pool.query(`
+      SELECT id, nome, email_principal as email, cnpj, ativo, criado_em
+      FROM empresas
+      ORDER BY criado_em DESC
+    `);
+    res.json({
+      recrutadores: recrutadores.rows,
+      empresas: empresas.rows
+    });
+  } catch (err) {
+    console.error('[/api/admin/equipe]', err);
+    res.status(500).json({ erro: 'Erro ao carregar equipe' });
+  }
+});
+
 // Listar empresas + quais vagas cada uma tem acesso
 app.get('/api/admin/empresas', authAdmin, async (req, res) => {
   try {
