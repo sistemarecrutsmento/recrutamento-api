@@ -1644,13 +1644,11 @@ app.get('/api/admin/entrevistas', authAdmin, async (req, res) => {
       SELECT e.id, e.candidatura_id, e.etapa, e.data_hora, e.duracao_minutos, e.local,
              e.link_reuniao, e.observacoes, e.status, e.criado_em,
              v.titulo as vaga_titulo, v.id as vaga_id,
-             c.nome as candidato_nome, c.email as candidato_email, c.telefone as candidato_telefone,
-             emp.nome as empresa_nome
+             c.nome as candidato_nome, c.email as candidato_email, c.telefone as candidato_telefone
       FROM entrevistas e
       JOIN candidaturas cd ON cd.id = e.candidatura_id
       JOIN candidatos c ON c.id = cd.candidato_id
       JOIN vagas v ON v.id = cd.vaga_id
-      LEFT JOIN empresas emp ON emp.id = v.empresa_id
       ${where}
       ORDER BY e.data_hora ${periodo === 'passadas' ? 'DESC' : 'ASC'}
     `, params);
