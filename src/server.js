@@ -11,7 +11,7 @@ const { enviarCodigo, enviarNotificacaoStatus, enviarEmailProposta, enviarEmailB
 
 // Email do admin pra receber notificações de ação do candidato
 const ADMIN_NOTIF_EMAIL = process.env.ADMIN_NOTIF_EMAIL || process.env.ADMIN_EMAIL || 'fabio08dejesusjunior@gmail.com';
-const { authMiddleware, authCandidato, authAdmin } = require('./auth');
+const { authMiddleware, authCandidato, authAdmin, authEmpresa, authAdminOnly } = require('./auth');
 
 // Cloudinary: aceita CLOUDINARY_URL no formato cloudinary://key:secret@cloud_name
 if (process.env.CLOUDINARY_URL) cloudinary.config({ url: process.env.CLOUDINARY_URL, secure: true });
@@ -2070,8 +2070,478 @@ app.post('/api/admin/recrutadores', authAdmin, async (req, res) => {
 });
 
 app.get('/api/admin/recrutadores', authAdmin, async (req, res) => {
-  const { rows } = await pool.query('SELECT id, nome, email, ativo, criado_em FROM recrutadores ORDER BY criado_em DESC');
+  const { rows } = await pool.query('SELECT id, nome, email, ativo, role, primeiro_acesso, criado_em FROM recrutadores ORDER BY criado_em DESC');
   res.json({ recrutadores: rows });
+});
+
+// Atualizar recrutador (ativar/desativar, resetar senha)
+app.put('/api/admin/recrutadores/:id', authAdminOnly, async (req, res) => {
+  const { id } = req.params;
+  const { nome, ativo, senha } = req.body;
+  try {
+    let query = 'UPDATE recrutadores SET ';
+    const sets = [];
+    const params = [];
+    let i = 1;
+    if (nome !== undefined) { sets.push(`nome = $${i++}`); params.push(nome); }
+    if (ativo !== undefined) { sets.push(`ativo = $${i++}`); params.push(ativo); }
+    if (senha) {
+      const hash = await bcrypt.hash(senha, 10);
+      sets.push(`senha_hash = $${i++}`); params.push(hash);
+      sets.push(`primeiro_acesso = true`);
+    }
+    if (sets.length === 0) return res.status(400).json({ erro: 'Nada para atualizar' });
+    query += sets.join(', ') + ` WHERE id = $${i} RETURNING id, nome, email, ativo, role`;
+    params.push(id);
+    const { rows } = await pool.query(query, params);
+    if (rows.length === 0) return res.status(404).json({ erro: 'Recrutador não encontrado' });
+    res.json({ ok: true, recrutador: rows[0] });
+  } catch (e) {
+    console.error('[atualizar recrutador]', e);
+    res.status(500).json({ erro: 'Erro ao atualizar' });
+  }
+});
+
+app.delete('/api/admin/recrutadores/:id', authAdminOnly, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { rows } = await pool.query('DELETE FROM recrutadores WHERE id = $1 RETURNING id', [id]);
+    if (rows.length === 0) return res.status(404).json({ erro: 'Recrutador não encontrado' });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ erro: 'Erro ao deletar' });
+  }
+});
+
+// ========== LOGIN RECRUTADOR ==========
+app.post('/api/auth/login-recrutador', async (req, res) => {
+  const { email, senha } = req.body;
+  if (!email || !senha) return res.status(400).json({ erro: 'E-mail e senha obrigatórios' });
+  try {
+    const { rows } = await pool.query(
+      'SELECT id, nome, email, senha_hash, ativo, role, primeiro_acesso FROM recrutadores WHERE email = $1',
+      [email.toLowerCase()]
+    );
+    if (rows.length === 0) return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
+    const r = rows[0];
+    if (!r.ativo) return res.status(403).json({ erro: 'Conta desativada. Fale com o admin.' });
+    const ok = await bcrypt.compare(senha, r.senha_hash);
+    if (!ok) return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
+    const token = jwt.sign(
+      { id: r.id, email: r.email, nome: r.nome, tipo: 'recrutador', role: r.role },
+      process.env.JWT_SECRET,
+      { expiresIn: '30d' }
+    );
+    res.json({
+      ok: true,
+      token,
+      usuario: { id: r.id, nome: r.nome, email: r.email, tipo: 'recrutador', role: r.role, primeiro_acesso: r.primeiro_acesso }
+    });
+  } catch (e) {
+    console.error('[login recrutador]', e);
+    res.status(500).json({ erro: 'Erro ao fazer login' });
+  }
+});
+
+// Trocar própria senha (recrutador)
+app.post('/api/auth/trocar-senha-recrutador', authAdmin, async (req, res) => {
+  const { senha_atual, senha_nova } = req.body;
+  if (!senha_atual || !senha_nova) return res.status(400).json({ erro: 'Informe senha atual e nova' });
+  try {
+    const { rows } = await pool.query('SELECT senha_hash FROM recrutadores WHERE id = $1', [req.user.id]);
+    if (rows.length === 0) return res.status(404).json({ erro: 'Usuário não encontrado' });
+    const ok = await bcrypt.compare(senha_atual, rows[0].senha_hash);
+    if (!ok) return res.status(401).json({ erro: 'Senha atual incorreta' });
+    const hash = await bcrypt.hash(senha_nova, 10);
+    await pool.query('UPDATE recrutadores SET senha_hash = $1, primeiro_acesso = false WHERE id = $2', [hash, req.user.id]);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ erro: 'Erro ao trocar senha' });
+  }
+});
+
+// ========== EMPRESAS (clientes) ==========
+
+// Listar empresas + quais vagas cada uma tem acesso
+app.get('/api/admin/empresas', authAdmin, async (req, res) => {
+  try {
+    const empresas = await pool.query(`
+      SELECT e.id, e.nome, e.cnpj, e.email_principal, e.telefone, e.ativo, e.criado_em,
+        (SELECT COUNT(*) FROM empresa_usuarios WHERE empresa_id = e.id) as qtd_usuarios,
+        (SELECT COUNT(*) FROM empresa_vaga_acesso WHERE empresa_id = e.id) as qtd_vagas
+      FROM empresas e
+      ORDER BY e.criado_em DESC
+    `);
+    const usuarios = await pool.query(`
+      SELECT id, empresa_id, nome, email, cargo, ativo, primeiro_acesso, criado_em
+      FROM empresa_usuarios ORDER BY criado_em DESC
+    `);
+    res.json({ empresas: empresas.rows, usuarios: usuarios.rows });
+  } catch (e) {
+    console.error('[listar empresas]', e);
+    res.status(500).json({ erro: 'Erro ao listar empresas' });
+  }
+});
+
+// Criar empresa
+app.post('/api/admin/empresas', authAdminOnly, async (req, res) => {
+  const { nome, cnpj, email_principal, telefone } = req.body;
+  if (!nome) return res.status(400).json({ erro: 'Nome obrigatório' });
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO empresas (nome, cnpj, email_principal, telefone, criado_por)
+       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+      [nome, cnpj, email_principal, telefone, req.user.id]
+    );
+    res.json({ ok: true, empresa: rows[0] });
+  } catch (e) {
+    console.error('[criar empresa]', e);
+    res.status(500).json({ erro: 'Erro ao criar empresa' });
+  }
+});
+
+// Atualizar empresa
+app.put('/api/admin/empresas/:id', authAdminOnly, async (req, res) => {
+  const { id } = req.params;
+  const { nome, cnpj, email_principal, telefone, ativo } = req.body;
+  try {
+    const { rows } = await pool.query(
+      `UPDATE empresas SET
+        nome = COALESCE($1, nome),
+        cnpj = COALESCE($2, cnpj),
+        email_principal = COALESCE($3, email_principal),
+        telefone = COALESCE($4, telefone),
+        ativo = COALESCE($5, ativo)
+       WHERE id = $6 RETURNING *`,
+      [nome, cnpj, email_principal, telefone, ativo, id]
+    );
+    if (rows.length === 0) return res.status(404).json({ erro: 'Empresa não encontrada' });
+    res.json({ ok: true, empresa: rows[0] });
+  } catch (e) {
+    res.status(500).json({ erro: 'Erro ao atualizar' });
+  }
+});
+
+// ========== USUÁRIOS DA EMPRESA ==========
+app.post('/api/admin/empresas/:id/usuarios', authAdminOnly, async (req, res) => {
+  const { id: empresa_id } = req.params;
+  const { nome, email, senha, cargo } = req.body;
+  if (!nome || !email || !senha) return res.status(400).json({ erro: 'Nome, e-mail e senha obrigatórios' });
+  try {
+    // Verifica se a empresa existe
+    const emp = await pool.query('SELECT id FROM empresas WHERE id = $1', [empresa_id]);
+    if (emp.rows.length === 0) return res.status(404).json({ erro: 'Empresa não encontrada' });
+    const hash = await bcrypt.hash(senha, 10);
+    const { rows } = await pool.query(
+      `INSERT INTO empresa_usuarios (empresa_id, nome, email, senha_hash, cargo, criado_por)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, nome, email, cargo, ativo`,
+      [empresa_id, nome, email.toLowerCase(), hash, cargo, req.user.id]
+    );
+    res.json({ ok: true, usuario: rows[0] });
+  } catch (e) {
+    if (e.code === '23505') return res.status(400).json({ erro: 'E-mail já cadastrado' });
+    console.error('[criar usuario empresa]', e);
+    res.status(500).json({ erro: 'Erro ao criar usuário' });
+  }
+});
+
+app.put('/api/admin/empresa-usuarios/:id', authAdminOnly, async (req, res) => {
+  const { id } = req.params;
+  const { nome, cargo, ativo, senha } = req.body;
+  try {
+    let q = 'UPDATE empresa_usuarios SET ';
+    const sets = [], params = [];
+    let i = 1;
+    if (nome !== undefined) { sets.push(`nome = $${i++}`); params.push(nome); }
+    if (cargo !== undefined) { sets.push(`cargo = $${i++}`); params.push(cargo); }
+    if (ativo !== undefined) { sets.push(`ativo = $${i++}`); params.push(ativo); }
+    if (senha) {
+      const hash = await bcrypt.hash(senha, 10);
+      sets.push(`senha_hash = $${i++}`); params.push(hash);
+      sets.push(`primeiro_acesso = true`);
+    }
+    if (sets.length === 0) return res.status(400).json({ erro: 'Nada para atualizar' });
+    q += sets.join(', ') + ` WHERE id = $${i} RETURNING id, nome, email, cargo, ativo`;
+    params.push(id);
+    const { rows } = await pool.query(q, params);
+    if (rows.length === 0) return res.status(404).json({ erro: 'Usuário não encontrado' });
+    res.json({ ok: true, usuario: rows[0] });
+  } catch (e) {
+    res.status(500).json({ erro: 'Erro ao atualizar' });
+  }
+});
+
+app.delete('/api/admin/empresa-usuarios/:id', authAdminOnly, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { rows } = await pool.query('DELETE FROM empresa_usuarios WHERE id = $1 RETURNING id', [id]);
+    if (rows.length === 0) return res.status(404).json({ erro: 'Usuário não encontrado' });
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ erro: 'Erro ao deletar' });
+  }
+});
+
+// ========== LIBERAR VAGAS PARA EMPRESA ==========
+app.post('/api/admin/empresa-vaga', authAdminOnly, async (req, res) => {
+  const { empresa_id, vaga_id } = req.body;
+  if (!empresa_id || !vaga_id) return res.status(400).json({ erro: 'empresa_id e vaga_id obrigatórios' });
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO empresa_vaga_acesso (empresa_id, vaga_id, concedido_por)
+       VALUES ($1,$2,$3)
+       ON CONFLICT (empresa_id, vaga_id) DO NOTHING
+       RETURNING *`,
+      [empresa_id, vaga_id, req.user.id]
+    );
+    res.json({ ok: true, acesso: rows[0] || 'já existia' });
+  } catch (e) {
+    res.status(500).json({ erro: 'Erro ao liberar vaga' });
+  }
+});
+
+app.delete('/api/admin/empresa-vaga', authAdminOnly, async (req, res) => {
+  const { empresa_id, vaga_id } = req.body;
+  if (!empresa_id || !vaga_id) return res.status(400).json({ erro: 'empresa_id e vaga_id obrigatórios' });
+  try {
+    await pool.query('DELETE FROM empresa_vaga_acesso WHERE empresa_id = $1 AND vaga_id = $2', [empresa_id, vaga_id]);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ erro: 'Erro ao remover acesso' });
+  }
+});
+
+app.get('/api/admin/empresa-vaga/:empresa_id', authAdmin, async (req, res) => {
+  const { empresa_id } = req.params;
+  try {
+    const { rows } = await pool.query(`
+      SELECT v.id, v.titulo, v.empresa, v.status, eva.concedido_em
+      FROM empresa_vaga_acesso eva
+      JOIN vagas v ON v.id = eva.vaga_id
+      WHERE eva.empresa_id = $1
+      ORDER BY v.titulo
+    `, [empresa_id]);
+    res.json({ vagas: rows });
+  } catch (e) {
+    res.status(500).json({ erro: 'Erro ao listar vagas da empresa' });
+  }
+});
+
+// ========== LOGIN EMPRESA ==========
+app.post('/api/auth/login-empresa', async (req, res) => {
+  const { email, senha } = req.body;
+  if (!email || !senha) return res.status(400).json({ erro: 'E-mail e senha obrigatórios' });
+  try {
+    const { rows } = await pool.query(`
+      SELECT u.id, u.nome, u.email, u.senha_hash, u.ativo, u.primeiro_acesso, u.cargo,
+        u.empresa_id, e.nome as empresa_nome, e.ativo as empresa_ativa
+      FROM empresa_usuarios u
+      JOIN empresas e ON e.id = u.empresa_id
+      WHERE u.email = $1
+    `, [email.toLowerCase()]);
+    if (rows.length === 0) return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
+    const u = rows[0];
+    if (!u.ativo || !u.empresa_ativa) return res.status(403).json({ erro: 'Conta ou empresa desativada' });
+    const ok = await bcrypt.compare(senha, u.senha_hash);
+    if (!ok) return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
+    const token = jwt.sign(
+      { id: u.id, email: u.email, nome: u.nome, tipo: 'empresa', empresa_id: u.empresa_id, empresa_nome: u.empresa_nome },
+      process.env.JWT_SECRET,
+      { expiresIn: '30d' }
+    );
+    res.json({
+      ok: true,
+      token,
+      usuario: {
+        id: u.id, nome: u.nome, email: u.email, tipo: 'empresa',
+        cargo: u.cargo, empresa_id: u.empresa_id, empresa_nome: u.empresa_nome,
+        primeiro_acesso: u.primeiro_acesso
+      }
+    });
+  } catch (e) {
+    console.error('[login empresa]', e);
+    res.status(500).json({ erro: 'Erro ao fazer login' });
+  }
+});
+
+// Trocar própria senha (empresa)
+app.post('/api/auth/trocar-senha-empresa', authEmpresa, async (req, res) => {
+  const { senha_atual, senha_nova } = req.body;
+  if (!senha_atual || !senha_nova) return res.status(400).json({ erro: 'Informe senha atual e nova' });
+  try {
+    const { rows } = await pool.query('SELECT senha_hash FROM empresa_usuarios WHERE id = $1', [req.user.id]);
+    if (rows.length === 0) return res.status(404).json({ erro: 'Usuário não encontrado' });
+    const ok = await bcrypt.compare(senha_atual, rows[0].senha_hash);
+    if (!ok) return res.status(401).json({ erro: 'Senha atual incorreta' });
+    const hash = await bcrypt.hash(senha_nova, 10);
+    await pool.query('UPDATE empresa_usuarios SET senha_hash = $1, primeiro_acesso = false WHERE id = $2', [hash, req.user.id]);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(500).json({ erro: 'Erro ao trocar senha' });
+  }
+});
+
+// ========== ROTAS DA EMPRESA (acesso às vagas liberadas) ==========
+
+// Dashboard da empresa
+app.get('/api/empresa/dashboard', authEmpresa, async (req, res) => {
+  const { empresa_id } = req.user;
+  try {
+    const vagas = await pool.query(`
+      SELECT v.id, v.titulo, v.status, v.criada_em,
+        (SELECT COUNT(*) FROM candidaturas c WHERE c.vaga_id = v.id) as total_candidatos,
+        (SELECT COUNT(*) FROM candidaturas c WHERE c.vaga_id = v.id AND c.status = 'em_andamento') as em_andamento,
+        (SELECT COUNT(*) FROM candidaturas c WHERE c.vaga_id = v.id AND c.status = 'contratado') as contratados
+      FROM empresa_vaga_acesso eva
+      JOIN vagas v ON v.id = eva.vaga_id
+      WHERE eva.empresa_id = $1
+      ORDER BY v.criada_em DESC
+    `, [empresa_id]);
+
+    const totalCandidatos = await pool.query(`
+      SELECT COUNT(*)::int as total FROM candidaturas c
+      JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id
+      WHERE eva.empresa_id = $1
+    `, [empresa_id]);
+
+    const contratacoes = await pool.query(`
+      SELECT COUNT(*)::int as total FROM candidaturas c
+      JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id
+      WHERE eva.empresa_id = $1 AND c.status = 'contratado'
+    `, [empresa_id]);
+
+    const emEtapa4 = await pool.query(`
+      SELECT COUNT(*)::int as total FROM candidaturas c
+      JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id
+      WHERE eva.empresa_id = $1 AND c.etapa_atual >= 4 AND c.status = 'em_andamento'
+    `, [empresa_id]);
+
+    res.json({
+      kpis: {
+        vagas_liberadas: vagas.rows.length,
+        total_candidatos: totalCandidatos.rows[0].total,
+        contratacoes: contratacoes.rows[0].total,
+        em_etapa_gestor: emEtapa4.rows[0].total
+      },
+      vagas: vagas.rows
+    });
+  } catch (e) {
+    console.error('[empresa dashboard]', e);
+    res.status(500).json({ erro: 'Erro ao carregar dashboard' });
+  }
+});
+
+// Lista candidatos de UMA vaga liberada
+app.get('/api/empresa/vagas/:vaga_id/candidatos', authEmpresa, async (req, res) => {
+  const { empresa_id } = req.user;
+  const { vaga_id } = req.params;
+  try {
+    // Verifica se a empresa tem acesso a essa vaga
+    const acesso = await pool.query(
+      'SELECT 1 FROM empresa_vaga_acesso WHERE empresa_id = $1 AND vaga_id = $2',
+      [empresa_id, vaga_id]
+    );
+    if (acesso.rows.length === 0) return res.status(403).json({ erro: 'Sem acesso a esta vaga' });
+
+    const { rows } = await pool.query(`
+      SELECT c.id, c.status, c.etapa_atual, c.atualizada_em, c.criada_em,
+        cd.id as candidato_id, cd.nome, cd.email, cd.celular, cd.foto_url,
+        v.titulo as vaga_titulo, v.etapas
+      FROM candidaturas c
+      JOIN candidatos cd ON cd.id = c.candidato_id
+      JOIN vagas v ON v.id = c.vaga_id
+      WHERE c.vaga_id = $1
+      ORDER BY c.atualizada_em DESC
+    `, [vaga_id]);
+    res.json({ candidatos: rows });
+  } catch (e) {
+    console.error('[empresa listar candidatos]', e);
+    res.status(500).json({ erro: 'Erro ao listar candidatos' });
+  }
+});
+
+// Detalhe do candidato (com verificação de acesso)
+app.get('/api/empresa/candidatura/:id', authEmpresa, async (req, res) => {
+  const { empresa_id } = req.user;
+  const { id } = req.params;
+  try {
+    const { rows } = await pool.query(`
+      SELECT c.*, cd.*, v.titulo as vaga_titulo, v.etapas, v.empresa as vaga_empresa,
+        (SELECT 1 FROM empresa_vaga_acesso WHERE empresa_id = $1 AND vaga_id = c.vaga_id) as tem_acesso
+      FROM candidaturas c
+      JOIN candidatos cd ON cd.id = c.candidato_id
+      JOIN vagas v ON v.id = c.vaga_id
+      WHERE c.id = $2
+    `, [empresa_id, id]);
+    if (rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
+    if (!rows[0].tem_acesso) return res.status(403).json({ erro: 'Sem acesso a esta candidatura' });
+    res.json(rows[0]);
+  } catch (e) {
+    console.error('[empresa detalhe candidatura]', e);
+    res.status(500).json({ erro: 'Erro ao carregar' });
+  }
+});
+
+// Ação da empresa (aprovar, reprovar, avançar) — só etapa 4+
+app.post('/api/empresa/candidatura/:id/acao', authEmpresa, async (req, res) => {
+  const { empresa_id, nome: empresa_nome } = req.user;
+  const { id } = req.params;
+  const { acao, motivo } = req.body; // acao: 'avancar' | 'reprovar' | 'comentar'
+  if (!['avancar', 'reprovar', 'comentar'].includes(acao)) {
+    return res.status(400).json({ erro: 'Ação inválida' });
+  }
+  try {
+    // Verifica acesso
+    const acc = await pool.query(`
+      SELECT c.id, c.etapa_atual, c.status, c.historico, c.vaga_id
+      FROM candidaturas c
+      JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id
+      WHERE c.id = $1 AND eva.empresa_id = $2
+    `, [id, empresa_id]);
+    if (acc.rows.length === 0) return res.status(403).json({ erro: 'Sem acesso a esta candidatura' });
+    const cand = acc.rows[0];
+
+    // REGRA: só pode agir a partir da etapa 4
+    if ((acao === 'avancar' || acao === 'reprovar') && cand.etapa_atual < 4) {
+      return res.status(403).json({ erro: 'Você só pode agir a partir da etapa de entrevista com gestor (etapa 4)' });
+    }
+
+    // Adiciona entrada no histórico
+    const hist = cand.historico || [];
+    let novoStatus = cand.status;
+    let novaEtapa = cand.etapa_atual;
+    const agora = new Date().toISOString();
+
+    if (acao === 'avancar') {
+      novaEtapa = cand.etapa_atual + 1;
+      // Não passa do total de etapas (deixar pro admin finalizar contratação)
+      hist.push({ tipo: 'avancar', por: `empresa:${empresa_nome}`, quando: agora, etapa_de: cand.etapa_atual, etapa_para: novaEtapa });
+    } else if (acao === 'reprovar') {
+      novoStatus = 'rejeitado';
+      hist.push({ tipo: 'reprovar', por: `empresa:${empresa_nome}`, quando: agora, motivo: motivo || '' });
+    } else if (acao === 'comentar') {
+      hist.push({ tipo: 'comentario', por: `empresa:${empresa_nome}`, quando: agora, texto: motivo || '' });
+    }
+
+    await pool.query(
+      `UPDATE candidaturas SET historico = $1::jsonb, status = $2, etapa_atual = $3, atualizada_em = NOW() WHERE id = $4`,
+      [JSON.stringify(hist), novoStatus, novaEtapa, id]
+    );
+
+    // Loga notificação (pra histórico, e-mail pode ser enviado depois)
+    try {
+      await pool.query(
+        `INSERT INTO empresa_notificacoes (empresa_id, candidatura_id, tipo, assunto, corpo)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [empresa_id, id, acao, `Empresa ${acao} em candidatura #${id}`, `Empresa ${empresa_nome} executou ${acao} na etapa ${cand.etapa_atual}`]
+      );
+    } catch (_) { /* não bloquear se log falhar */ }
+
+    res.json({ ok: true, etapa_atual: novaEtapa, status: novoStatus });
+  } catch (e) {
+    console.error('[empresa acao]', e);
+    res.status(500).json({ erro: 'Erro ao processar ação' });
+  }
 });
 
 // ============= INIT =============
