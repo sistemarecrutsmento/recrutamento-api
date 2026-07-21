@@ -28,4 +28,23 @@ function authAdmin(req, res, next) {
   });
 }
 
-module.exports = { authMiddleware, authCandidato, authAdmin };
+function authEmpresa(req, res, next) {
+  return authMiddleware(req, res, () => {
+    if (req.user.tipo !== 'empresa') {
+      return res.status(403).json({ erro: 'Acesso apenas de empresa' });
+    }
+    next();
+  });
+}
+
+// Permissão total: só admin (recrutador NÃO pode criar usuários / mexer em config)
+function authAdminOnly(req, res, next) {
+  return authMiddleware(req, res, () => {
+    if (req.user.tipo !== 'admin') {
+      return res.status(403).json({ erro: 'Acesso apenas de admin' });
+    }
+    next();
+  });
+}
+
+module.exports = { authMiddleware, authCandidato, authAdmin, authEmpresa, authAdminOnly };
