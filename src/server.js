@@ -1762,16 +1762,24 @@ app.get('/api/admin/entrevistas', authAdmin, async (req, res) => {
 // Atualizar status da entrevista (cancelar, realizar, no-show)
 app.put('/api/admin/entrevista/:id', authAdmin, async (req, res) => {
   try {
-    const r = await pool.query(`
-      SELECT e.*, a.nome as criado_por_nome
-      FROM entrevistas e
-      LEFT JOIN admins a ON a.id = e.criado_por
-      WHERE e.candidatura_id = $1
-      ORDER BY e.data_hora DESC
-    `, [req.params.id]);
-    res.json({ entrevistas: r.rows });
+    const { status, data_hora, link_reuniao, observacoes, duracao_minutos, local } = req.body;
+    const updates = [];
+    const values = [];
+    let i = 1;
+    if (status) { updates.push(`status = $${i++}`); values.push(status); }
+    if (data_hora) { updates.push(`data_hora = $${i++}`); values.push(data_hora); }
+    if (link_reuniao !== undefined) { updates.push(`link_reuniao = $${i++}`); values.push(link_reuniao); }
+    if (observacoes !== undefined) { updates.push(`observacoes = $${i++}`); values.push(observacoes); }
+    if (duracao_minutos !== undefined) { updates.push(`duracao_minutos = $${i++}`); values.push(duracao_minutos); }
+    if (local !== undefined) { updates.push(`local = $${i++}`); values.push(local); }
+    if (updates.length === 0) return res.status(400).json({ erro: 'Nada para atualizar' });
+    updates.push(`atualizado_em = NOW()`);
+    values.push(req.params.id);
+    const r = await pool.query(`UPDATE entrevistas SET ${updates.join(', ')} WHERE id = $${i} RETURNING *`, values);
+    if (r.rows.length === 0) return res.status(404).json({ erro: 'Entrevista não encontrada' });
+    res.json({ ok: true, entrevista: r.rows[0] });
   } catch (e) {
-    console.error('[ENTREVISTAS LISTAR ERRO]', e);
+    console.error('[ENTREVISTA ATUALIZAR ERRO]', e);
     res.status(500).json({ erro: e.message });
   }
 });
