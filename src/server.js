@@ -1952,6 +1952,133 @@ app.post('/api/admin/candidatura/:id/status', authAdmin, async (req, res) => {
   res.json({ ok: true });
 });
 
+// ===== CHAT CANDIDATO ↔ ADMIN (jul/2026) =====
+function authCandidatoOrAdmin(req, res, next) {
+  const token = (req.headers.authorization || '').replace('Bearer ', '');
+  if (!token) return res.status(401).json({ erro: 'Não autenticado' });
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET);
+    req.user = decoded;
+    return next();
+  } catch (e) {
+    return res.status(401).json({ erro: 'Token inválido' });
+  }
+}
+
+// Lista mensagens de uma candidatura (candidato ou admin autenticado)
+app.get('/api/chat/:candidatura_id/mensagens', authCandidatoOrAdmin, async (req, res) => {
+  try {
+    const cid = parseInt(req.params.candidatura_id);
+    const { rows: cand } = await pool.query(`
+      SELECT c.id, c.candidato_id, cd.email, cd.id as cand_id, v.empresa
+      FROM candidaturas c
+      JOIN candidatos cd ON cd.id = c.candidato_id
+      JOIN vagas v ON v.id = c.vaga_id
+      WHERE c.id = $1`, [cid]);
+    if (cand.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
+    const c = cand[0];
+    if (req.user.tipo === 'candidato') {
+      // Verifica se o email do token bate com o email do candidato da candidatura
+      if (c.email.toLowerCase() !== (req.user.email || '').toLowerCase()) {
+        return res.status(403).json({ erro: 'Sem permissão' });
+      }
+    } else if (req.user.tipo !== 'admin') {
+      return res.status(403).json({ erro: 'Sem permissão' });
+    }
+    const { rows: msgs } = await pool.query(
+      'SELECT id, autor_tipo, autor_nome, texto, contexto, criado_em FROM mensagens_processo WHERE candidatura_id = $1 ORDER BY criado_em ASC LIMIT 500',
+      [cid]
+    );
+    res.json({ mensagens: msgs });
+  } catch (e) {
+    console.error('[CHAT LISTAR]', e);
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+// Envia mensagem (candidato ou admin)
+app.post('/api/chat/:candidatura_id/mensagens', authCandidatoOrAdmin, async (req, res) => {
+  try {
+    const cid = parseInt(req.params.candidatura_id);
+    const { texto } = req.body;
+    if (!texto || !texto.trim()) return res.status(400).json({ erro: 'Mensagem vazia' });
+    if (texto.length > 2000) return res.status(400).json({ erro: 'Mensagem muito longa (máx 2000 caracteres)' });
+
+    const { rows: cand } = await pool.query(`
+      SELECT c.id, c.candidato_id, cd.email, cd.nome as cand_nome, v.titulo, v.empresa
+      FROM candidaturas c
+      JOIN candidatos cd ON cd.id = c.candidato_id
+      JOIN vagas v ON v.id = c.vaga_id
+      WHERE c.id = $1`, [cid]);
+    if (cand.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
+    const c = cand[0];
+    if (req.user.tipo === 'candidato') {
+      if (c.email.toLowerCase() !== (req.user.email || '').toLowerCase()) {
+        return res.status(403).json({ erro: 'Sem permissão' });
+      }
+    } else if (req.user.tipo !== 'admin') {
+      return res.status(403).json({ erro: 'Sem permissão' });
+    }
+    const autorTipo = req.user.tipo === 'admin' ? 'admin' : 'candidato';
+    const autorNome = req.user.tipo === 'admin' ? (req.user.nome || 'Recrutador') : c.cand_nome;
+
+    const { rows: msg } = await pool.query(
+      'INSERT INTO mensagens_processo (candidatura_id, autor_tipo, autor_nome, texto, contexto) VALUES ($1,$2,$3,$4,$5) RETURNING *',
+      [cid, autorTipo, autorNome, texto.trim(), 'chat']
+    );
+
+    // Notifica o outro lado por e-mail (em background)
+    setImmediate(() => {
+      try {
+        const safe = texto.replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        if (autorTipo === 'candidato') {
+          enviarEmailBg(enviarEmail, ADMIN_NOTIF_EMAIL,
+            `💬 Nova mensagem de ${autorNome}`,
+            `<p><b>${autorNome}</b> enviou uma mensagem sobre a vaga <b>${c.titulo}</b>:</p>
+             <blockquote style="border-left:3px solid #d4a017;padding:8px 12px;background:#f8f8f8;">${safe}</blockquote>
+             <p><a href="https://vagasio.com.br/admin/analisar.html?id=${cid}">Responder no painel →</a></p>`
+          );
+        } else {
+          enviarEmailBg(enviarEmail, c.email,
+            `💬 Nova mensagem sobre sua candidatura - ${c.titulo}`,
+            `<p>Olá <b>${c.cand_nome}</b>,</p>
+             <p><b>${autorNome}</b> enviou uma mensagem sobre sua candidatura na vaga <b>${c.titulo}</b>:</p>
+             <blockquote style="border-left:3px solid #d4a017;padding:8px 12px;background:#f8f8f8;">${safe}</blockquote>
+             <p><a href="https://vagasio.com.br/candidato/entrevistas.html">Responder no portal →</a></p>`
+          );
+        }
+      } catch (e) { console.error('[CHAT EMAIL]', e.message); }
+    });
+
+    res.json({ ok: true, mensagem: msg[0] });
+  } catch (e) {
+    console.error('[CHAT ENVIAR]', e);
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+// Lista TODAS as conversas (admin) agrupadas por candidatura
+app.get('/api/admin/conversas', authAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT c.id as candidatura_id, v.titulo as vaga_titulo, cd.nome as candidato_nome,
+             cd.email as candidato_email, c.etapa_atual, c.status,
+             (SELECT COUNT(*) FROM mensagens_processo WHERE candidatura_id = c.id AND autor_tipo = 'candidato' AND criado_em > COALESCE((SELECT MAX(criado_em) FROM mensagens_processo WHERE candidatura_id = c.id AND autor_tipo = 'admin'), '1970-01-01')) as nao_lidas_admin,
+             (SELECT MAX(criado_em) FROM mensagens_processo WHERE candidatura_id = c.id) as ultima_msg_em,
+             (SELECT texto FROM mensagens_processo WHERE candidatura_id = c.id ORDER BY criado_em DESC LIMIT 1) as ultima_msg
+      FROM candidaturas c
+      JOIN vagas v ON v.id = c.vaga_id
+      JOIN candidatos cd ON cd.id = c.candidato_id
+      WHERE EXISTS (SELECT 1 FROM mensagens_processo WHERE candidatura_id = c.id)
+      ORDER BY ultima_msg_em DESC
+    `);
+    res.json({ conversas: rows });
+  } catch (e) {
+    console.error('[CONVERSAS LISTAR]', e);
+    res.status(500).json({ erro: e.message });
+  }
+});
+
 // ===== Admin: enviar proposta ao candidato (etapa 5 - Proposta) =====
 // Recebe texto da proposta + opcional PDF (data URL base64) ou já com URL pública
 app.post('/api/admin/candidatura/:id/enviar-proposta', authAdmin, async (req, res) => {
