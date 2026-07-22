@@ -3260,6 +3260,71 @@ app.post('/api/admin/candidatura/:id/chat-empresa', authAdmin, async (req, res) 
   }
 });
 
+// ============= LISTA DE CONVERSAS CHAT EMPRESA (para bolinha flutuante) =============
+// Lista TODAS as candidaturas com mensagens trocadas com empresas (para o admin)
+app.get('/api/admin/chat-empresa-lista', authAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT
+        c.id AS candidatura_id,
+        cand.nome AS candidato_nome,
+        v.titulo AS vaga_titulo,
+        v.empresa_nome,
+        (SELECT COUNT(*) FROM empresa_chat ec
+         WHERE ec.candidatura_id = c.id AND ec.remetente_tipo = 'empresa' AND ec.lida_em IS NULL) AS nao_lidas,
+        (SELECT ec.mensagem FROM empresa_chat ec
+         WHERE ec.candidatura_id = c.id ORDER BY ec.criado_em DESC LIMIT 1) AS ultima_mensagem,
+        (SELECT ec.criado_em FROM empresa_chat ec
+         WHERE ec.candidatura_id = c.id ORDER BY ec.criado_em DESC LIMIT 1) AS ultima_data,
+        (SELECT ec.remetente_tipo FROM empresa_chat ec
+         WHERE ec.candidatura_id = c.id ORDER BY ec.criado_em DESC LIMIT 1) AS ultimo_remetente_tipo
+      FROM candidaturas c
+      JOIN candidatos cand ON cand.id = c.candidato_id
+      JOIN vagas v ON v.id = c.vaga_id
+      WHERE EXISTS (SELECT 1 FROM empresa_chat ec WHERE ec.candidatura_id = c.id)
+        AND c.status NOT IN ('rejeitado', 'contratado', 'reprovado')
+      ORDER BY ultima_data DESC NULLS LAST
+    `);
+    res.json({ conversas: rows });
+  } catch (e) {
+    console.error('[admin chat empresa lista]', e);
+    res.status(500).json({ erro: 'Erro ao listar conversas' });
+  }
+});
+
+// Lista conversas chat RH para a empresa logada (para a bolinha flutuante da empresa)
+app.get('/api/empresa/chat-rh-lista', authEmpresa, async (req, res) => {
+  const { empresa_id } = req.user;
+  try {
+    const { rows } = await pool.query(`
+      SELECT
+        c.id AS candidatura_id,
+        cand.nome AS candidato_nome,
+        v.titulo AS vaga_titulo,
+        (SELECT COUNT(*) FROM empresa_chat ec
+         WHERE ec.candidatura_id = c.id AND ec.remetente_tipo = 'rh' AND ec.lida_em IS NULL) AS nao_lidas,
+        (SELECT ec.mensagem FROM empresa_chat ec
+         WHERE ec.candidatura_id = c.id ORDER BY ec.criado_em DESC LIMIT 1) AS ultima_mensagem,
+        (SELECT ec.criado_em FROM empresa_chat ec
+         WHERE ec.candidatura_id = c.id ORDER BY ec.criado_em DESC LIMIT 1) AS ultima_data,
+        (SELECT ec.remetente_tipo FROM empresa_chat ec
+         WHERE ec.candidatura_id = c.id ORDER BY ec.criado_em DESC LIMIT 1) AS ultimo_remetente_tipo
+      FROM candidaturas c
+      JOIN candidatos cand ON cand.id = c.candidato_id
+      JOIN vagas v ON v.id = c.vaga_id
+      JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id
+      WHERE eva.empresa_id = $1
+        AND EXISTS (SELECT 1 FROM empresa_chat ec WHERE ec.candidatura_id = c.id)
+        AND c.status NOT IN ('rejeitado', 'contratado', 'reprovado')
+      ORDER BY ultima_data DESC NULLS LAST
+    `, [empresa_id]);
+    res.json({ conversas: rows });
+  } catch (e) {
+    console.error('[empresa chat rh lista]', e);
+    res.status(500).json({ erro: 'Erro ao listar conversas' });
+  }
+});
+
 // ============= INIT =============
 process.on('uncaughtException', (e) => {
   console.error('[UNCAUGHT EXCEPTION]', e);
