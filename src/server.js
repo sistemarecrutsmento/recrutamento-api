@@ -1236,7 +1236,11 @@ app.get('/api/admin/candidatura/:id', authAdmin, async (req, res) => {
              cd.formacao, cd.instituicao, cd.curso, cd.situacao, cd.data_conclusao,
              cd.primeiro_emprego, cd.sobre_voce, cd.experiencia, cd.foto_url,
              cd.areas_interesse, cd.banco_talentos,
-             cd.criado_em as candidato_criado_em
+             cd.criado_em as candidato_criado_em,
+             (SELECT e.id FROM empresa_vaga_acesso eva JOIN empresas e ON e.id = eva.empresa_id
+                WHERE eva.vaga_id = c.vaga_id LIMIT 1) as empresa_id,
+             (SELECT e.nome FROM empresa_vaga_acesso eva JOIN empresas e ON e.id = eva.empresa_id
+                WHERE eva.vaga_id = c.vaga_id LIMIT 1) as empresa_nome
       FROM candidaturas c
       JOIN vagas v ON v.id = c.vaga_id
       JOIN candidatos cd ON cd.id = c.candidato_id
@@ -3123,7 +3127,13 @@ app.get('/api/empresa/candidatura/:id', authEmpresa, async (req, res) => {
   const { id } = req.params;
   try {
     const { rows } = await pool.query(`
-      SELECT c.*, cd.*, v.titulo as vaga_titulo, v.etapas, v.empresa as vaga_empresa,
+      SELECT c.*, cd.id as candidato_id_full, cd.nome, cd.email, cd.celular, cd.cpf, cd.data_nascimento,
+             cd.acessibilidade, cd.cep, cd.estado, cd.cidade, cd.bairro,
+             cd.logradouro, cd.numero, cd.complemento,
+             cd.formacao, cd.instituicao, cd.curso, cd.situacao, cd.data_conclusao,
+             cd.primeiro_emprego, cd.sobre_voce, cd.experiencia, cd.foto_url,
+             cd.areas_interesse, cd.banco_talentos,
+             v.titulo as vaga_titulo, v.etapas, v.empresa as vaga_empresa, v.cidade as v_cidade, v.estado as v_estado,
         (SELECT 1 FROM empresa_vaga_acesso WHERE empresa_id = $1 AND vaga_id = c.vaga_id) as tem_acesso
       FROM candidaturas c
       JOIN candidatos cd ON cd.id = c.candidato_id
@@ -3132,7 +3142,16 @@ app.get('/api/empresa/candidatura/:id', authEmpresa, async (req, res) => {
     `, [empresa_id, id]);
     if (rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
     if (!rows[0].tem_acesso) return res.status(403).json({ erro: 'Sem acesso a esta candidatura' });
-    res.json(rows[0]);
+    const candidatura = rows[0];
+
+    // Buscar experiencias do candidato (mesma tabela usada pelo admin)
+    const { rows: exps } = await pool.query(
+      'SELECT * FROM experiencias WHERE candidato_id = $1 ORDER BY inicio DESC NULLS LAST, id DESC',
+      [candidatura.candidato_id]
+    );
+    candidatura.experiencias = exps;
+
+    res.json(candidatura);
   } catch (e) {
     console.error('[empresa detalhe candidatura]', e);
     res.status(500).json({ erro: 'Erro ao carregar' });
