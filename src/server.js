@@ -712,9 +712,11 @@ app.post('/api/candidato/candidatar/:vagaId', authCandidato, async (req, res) =>
   if (c.length === 0) return res.status(400).json({ erro: 'Complete seu cadastro antes de se candidatar' });
 
   try {
+    // etapa_atual=0: candidato acabou de se inscrever, está na etapa 0 (Inscrição) — semântica 0-indexed
+    // (o admin trata etapa_atual=N como "próxima a fazer é N+1", ver comentário em analisar.html linha 356)
     const { rows } = await pool.query(
       `INSERT INTO candidaturas (vaga_id, candidato_id, status, etapa_atual, historico)
-       VALUES ($1, $2, 'em_andamento', 1, $3)
+       VALUES ($1, $2, 'em_andamento', 0, $3)
        RETURNING *`,
       [req.params.vagaId, c[0].id, JSON.stringify([
         { etapa: 0, status: 'concluida', acao: 'inscricao', data: new Date().toISOString(), mensagem: 'Inscrição realizada' }
