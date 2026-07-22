@@ -3053,7 +3053,7 @@ app.get('/api/empresa/agenda', authEmpresa, async (req, res) => {
       SELECT e.id, e.etapa, e.data_hora, e.duracao_minutos, e.local, e.link_reuniao, e.observacoes, e.status,
         c.id as candidatura_id, c.etapa_atual, c.status as cand_status,
         cd.id as candidato_id, cd.nome as candidato_nome, cd.email as candidato_email, cd.foto_url,
-        v.id as vaga_id, v.titulo as vaga_titulo
+        v.id as vaga_id, v.titulo as vaga_titulo, v.etapas as vaga_etapas
       FROM entrevistas e
       JOIN candidaturas c ON c.id = e.candidatura_id
       JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.empresa_id = $1
