@@ -2187,6 +2187,13 @@ app.get('/api/chat/mensagem/:id/arquivos', authCandidatoOrAdmin, async (req, res
 // Lista TODAS as conversas (admin) agrupadas por candidatura
 app.get('/api/admin/conversas', authAdmin, async (req, res) => {
   try {
+    // Filtro opcional: ?candidatura_id=X → só 1 conversa
+    // Sem filtro: lista TODAS as conversas com mensagens (modo antigo)
+    const cid = parseInt(req.query.candidatura_id);
+    const where = cid
+      ? 'WHERE c.id = $1'
+      : 'WHERE EXISTS (SELECT 1 FROM mensagens_processo WHERE candidatura_id = c.id)';
+    const params = cid ? [cid] : [];
     const { rows } = await pool.query(`
       SELECT c.id as candidatura_id, v.titulo as vaga_titulo, cd.nome as candidato_nome,
              cd.email as candidato_email, c.etapa_atual, c.status,
@@ -2196,9 +2203,9 @@ app.get('/api/admin/conversas', authAdmin, async (req, res) => {
       FROM candidaturas c
       JOIN vagas v ON v.id = c.vaga_id
       JOIN candidatos cd ON cd.id = c.candidato_id
-      WHERE EXISTS (SELECT 1 FROM mensagens_processo WHERE candidatura_id = c.id)
+      ${where}
       ORDER BY ultima_msg_em DESC
-    `);
+    `, params);
     res.json({ conversas: rows });
   } catch (e) {
     console.error('[CONVERSAS LISTAR]', e);
