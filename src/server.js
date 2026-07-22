@@ -641,6 +641,32 @@ app.get('/api/candidato/candidaturas', authCandidato, async (req, res) => {
   res.json({ candidaturas: rows });
 });
 
+// Lista as entrevistas do candidato logado
+app.get('/api/candidato/entrevistas', authCandidato, async (req, res) => {
+  try {
+    const { rows: c } = await pool.query('SELECT id FROM candidatos WHERE email = $1', [req.user.email]);
+    if (c.length === 0) return res.json({ entrevistas: [] });
+    const candidatoId = c[0].id;
+    // Busca entrevistas das candidaturas desse candidato
+    const { rows } = await pool.query(`
+      SELECT
+        e.id, e.candidatura_id, e.etapa, e.data_hora, e.duracao_minutos,
+        e.local, e.link_reuniao, e.observacoes, e.status,
+        v.titulo AS vaga_titulo, v.empresa AS vaga_empresa
+      FROM entrevistas e
+      JOIN candidaturas cand ON cand.id = e.candidatura_id
+      JOIN vagas v ON v.id = cand.vaga_id
+      WHERE cand.candidato_id = $1
+        AND e.status IN ('agendada', 'confirmada', 'realizada')
+      ORDER BY e.data_hora ASC
+    `, [candidatoId]);
+    res.json({ entrevistas: rows });
+  } catch (e) {
+    console.error('[CANDIDATO ENTREVISTAS ERRO]', e);
+    res.status(500).json({ erro: e.message });
+  }
+});
+
 app.post('/api/candidato/candidatar/:vagaId', authCandidato, async (req, res) => {
   const { rows: c } = await pool.query('SELECT id FROM candidatos WHERE email = $1', [req.user.email]);
   if (c.length === 0) return res.status(400).json({ erro: 'Complete seu cadastro antes de se candidatar' });
@@ -1602,12 +1628,16 @@ app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
     if (cand.rows.length === 0) {
       return res.status(404).json({ erro: 'Candidatura não encontrada' });
     }
+    // Gera link da sala Whereby automaticamente (se não veio do frontend)
+    // Sua sala Whereby Embedded: a URL da sala é fixa + um identificador único da entrevista
+    const linkGerado = link_reuniao || `https://whereby.com/vagasio?room=entrevista-${candidatura_id}-${Date.now()}`;
+
     // Cria a entrevista
     const r = await pool.query(`
       INSERT INTO entrevistas (candidatura_id, etapa, data_hora, duracao_minutos, local, link_reuniao, observacoes, criado_por)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
       RETURNING *
-    `, [candidatura_id, etapa, data_hora, duracao_minutos || 60, local || null, link_reuniao || null, observacoes || null, req.admin?.id || null]);
+    `, [candidatura_id, etapa, data_hora, duracao_minutos || 60, local || null, linkGerado, observacoes || null, req.admin?.id || null]);
     const entrevista = r.rows[0];
     // Adiciona no histórico da candidatura
     const etapaNome = etapa === 3 ? 'Entrevista RH' : 'Entrevista Gestor';
