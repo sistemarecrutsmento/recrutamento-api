@@ -729,6 +729,13 @@ app.get('/api/vagas/:id', async (req, res) => {
   res.json({ vaga: rows[0] });
 });
 
+// ============= RECUPERAÇÃO DE SENHA =============
+const { esqueciSenha, redefinirSenha, validarToken } = require('./passwordReset');
+
+app.post('/api/auth/esqueci-senha', esqueciSenha);
+app.post('/api/auth/redefinir-senha', redefinirSenha);
+app.get('/api/auth/validar-token', validarToken);
+
 // ============= ADMIN/RECRUTADOR =============
 app.post('/api/admin/login', async (req, res) => {
   try {
