@@ -1116,13 +1116,25 @@ app.get('/api/admin/candidato/:id', authAdmin, async (req, res) => {
 
 app.get('/api/admin/candidaturas', authAdmin, async (req, res) => {
   try {
+    // Filtro opcional por etapa (?etapa=3,4 ou ?etapa=3)
+    const { etapa } = req.query;
+    let where = '';
+    const params = [];
+    if (etapa) {
+      const etapas = etapa.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
+      if (etapas.length > 0) {
+        where = `WHERE c.etapa_atual = ANY($1::int[])`;
+        params.push(etapas);
+      }
+    }
     const { rows } = await pool.query(`
       SELECT c.*, v.titulo, v.empresa, cd.nome as candidato_nome, cd.email as candidato_email
       FROM candidaturas c
       JOIN vagas v ON v.id = c.vaga_id
       JOIN candidatos cd ON cd.id = c.candidato_id
+      ${where}
       ORDER BY c.criada_em DESC
-    `);
+    `, params);
     res.json({ candidaturas: rows });
   } catch (e) {
     console.error('[LIST CANDIDATURAS]', e);
