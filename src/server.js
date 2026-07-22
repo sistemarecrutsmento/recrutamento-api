@@ -641,6 +641,44 @@ app.get('/api/candidato/candidaturas', authCandidato, async (req, res) => {
   res.json({ candidaturas: rows });
 });
 
+// Lista as CONVERSAS do candidato logado (estilo WhatsApp)
+// Critérios:
+//  - etapa_atual >= 3 (candidato já passou da triagem)
+//  - status não encerrado (rejeitado/reprovado/cancelado/contratado)
+// Inclui última mensagem, contagem de não lidas (msgs do admin que o candidato ainda não abriu)
+// Ordena pela última msg (mais recente primeiro); quem nunca teve msg fica no fim
+app.get('/api/candidato/conversas', authCandidato, async (req, res) => {
+  try {
+    const { rows: c } = await pool.query('SELECT id FROM candidatos WHERE email = $1', [req.user.email]);
+    if (c.length === 0) return res.json({ conversas: [] });
+    const candidatoId = c[0].id;
+    const { rows } = await pool.query(`
+      SELECT c.id as candidatura_id, v.titulo as vaga_titulo, v.empresa as vaga_empresa,
+             c.etapa_atual, c.status,
+             (SELECT COUNT(*) FROM mensagens_processo
+              WHERE candidatura_id = c.id AND autor_tipo = 'admin'
+              AND criado_em > COALESCE(
+                (SELECT MAX(criado_em) FROM mensagens_processo
+                 WHERE candidatura_id = c.id AND autor_tipo = 'candidato'),
+                '1970-01-01'
+              )
+             ) as nao_lidas_candidato,
+             (SELECT MAX(criado_em) FROM mensagens_processo WHERE candidatura_id = c.id) as ultima_msg_em,
+             (SELECT texto FROM mensagens_processo WHERE candidatura_id = c.id ORDER BY criado_em DESC LIMIT 1) as ultima_msg
+      FROM candidaturas c
+      JOIN vagas v ON v.id = c.vaga_id
+      WHERE c.candidato_id = $1
+        AND c.etapa_atual >= 3
+        AND c.status NOT IN ('rejeitado','reprovado','cancelado','contratado')
+      ORDER BY ultima_msg_em DESC NULLS LAST, c.criada_em DESC
+    `, [candidatoId]);
+    res.json({ conversas: rows });
+  } catch (e) {
+    console.error('[CANDIDATO CONVERSAS]', e);
+    res.status(500).json({ erro: e.message });
+  }
+});
+
 // Lista as entrevistas do candidato logado
 app.get('/api/candidato/entrevistas', authCandidato, async (req, res) => {
   try {
