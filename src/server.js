@@ -1644,16 +1644,30 @@ app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
     // Sua sala Whereby Embedded: a URL da sala é fixa + um identificador único da entrevista
     const linkGerado = link_reuniao || `https://whereby.com/vagasio?room=entrevista-${candidatura_id}-${Date.now()}`;
 
+    // Converte data_hora pra timestamp com fuso: o JS manda ISO (ex: 2026-07-25T14:30:00-03:00),
+    // o Postgres interpreta corretamente e armazena em UTC internamente
+    let dataHoraFinal = data_hora;
+    if (typeof data_hora === 'string' && !data_hora.endsWith('Z') && !data_hora.match(/[+-]\d{2}:\d{2}$/)) {
+      // String sem fuso (legado): interpreta como horário BR e converte pra ISO com -03:00
+      const d = new Date(data_hora);
+      if (!isNaN(d.getTime())) dataHoraFinal = d.toISOString();
+    } else {
+      // Já tem fuso: valida e converte pra timestamp
+      const d = new Date(data_hora);
+      if (isNaN(d.getTime())) return res.status(400).json({ erro: 'data_hora inválida' });
+      dataHoraFinal = d.toISOString();
+    }
+
     // Cria a entrevista
     const r = await pool.query(`
       INSERT INTO entrevistas (candidatura_id, etapa, data_hora, duracao_minutos, local, link_reuniao, observacoes, criado_por)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
       RETURNING *
-    `, [candidatura_id, etapa, data_hora, duracao_minutos || 60, local || null, linkGerado, observacoes || null, req.admin?.id || null]);
+    `, [candidatura_id, etapa, dataHoraFinal, duracao_minutos || 60, local || null, linkGerado, observacoes || null, req.admin?.id || null]);
     const entrevista = r.rows[0];
     // Adiciona no histórico da candidatura
     const etapaNome = etapa === 3 ? 'Entrevista RH' : 'Entrevista Gestor';
-    const dataFormatada = new Date(data_hora).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
+    const dataFormatada = new Date(dataHoraFinal).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
     await pool.query(`
       UPDATE candidaturas
       SET historico = COALESCE(historico, '[]'::jsonb) || $1::jsonb,
@@ -1664,7 +1678,7 @@ app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
       etapa: parseInt(etapa),
       em: new Date().toISOString(),
       tipo: 'entrevista',
-      data_hora: data_hora,
+      data_hora: dataHoraFinal,
       por: req.admin?.nome || 'Recrutador',
       detalhes: `Data: ${dataFormatada}${link_reuniao ? ` • Link: ${link_reuniao}` : ''}${local ? ` • Local: ${local}` : ''}`
     }]), candidatura_id]);
@@ -1672,6 +1686,43 @@ app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
     res.json({ ok: true, entrevista });
   } catch (e) {
     console.error('[ENTREVISTA CRIAR ERRO]', e);
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+// Migração: corrige entrevistas quebradas (status 'pendente' -> 'agendada', link null -> gerado, data sem fuso -> +3h)
+app.post('/api/_debug/fix-entrevistas', async (req, res) => {
+  try {
+    // 1) Status 'pendente' -> 'agendada'
+    const r1 = await pool.query(`UPDATE entrevistas SET status = 'agendada' WHERE status = 'pendente' RETURNING id`);
+    // 2) Link null -> gera link
+    const semLink = await pool.query(`SELECT id, candidatura_id FROM entrevistas WHERE link_reuniao IS NULL`);
+    let linksFix = 0;
+    for (const row of semLink.rows) {
+      const link = `https://whereby.com/vagasio?room=entrevista-${row.candidatura_id}-${Date.now()}-${row.id}`;
+      await pool.query(`UPDATE entrevistas SET link_reuniao = $1 WHERE id = $2`, [link, row.id]);
+      linksFix++;
+    }
+    // 3) Data quebrada (string sem fuso armazenada como UTC): procura entrevistas em que data_hora < NOW() - 1 dia e link_reuniao não é null
+    //    mas foram criadas após 2026-07-21 (período dos testes)
+    //    Estratégia simples: pra todas entrevistas com data_hora < 2026-07-23, soma 3h
+    const r3 = await pool.query(`
+      UPDATE entrevistas
+      SET data_hora = data_hora + INTERVAL '3 hours',
+          atualizado_em = NOW()
+      WHERE criado_em > '2026-07-21'
+        AND data_hora < '2026-07-23'
+      RETURNING id, candidatura_id
+    `);
+    res.json({
+      ok: true,
+      status_corrigidos: r1.rowCount,
+      links_gerados: linksFix,
+      datas_corrigidas: r3.rowCount,
+      ids_corrigidos: r3.rows.map(r => r.id)
+    });
+  } catch (e) {
+    console.error('[FIX ENTREVISTAS]', e);
     res.status(500).json({ erro: e.message });
   }
 });
