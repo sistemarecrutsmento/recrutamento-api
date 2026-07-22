@@ -2723,6 +2723,21 @@ app.put('/api/admin/empresas/:id', authAdminOnly, async (req, res) => {
   }
 });
 
+// Excluir empresa (e seus vínculos)
+app.delete('/api/admin/empresas/:id', authAdminOnly, async (req, res) => {
+  const { id } = req.params;
+  try {
+    await pool.query('DELETE FROM empresa_vaga_acesso WHERE empresa_id = $1', [id]);
+    await pool.query('DELETE FROM empresa_usuarios WHERE empresa_id = $1', [id]);
+    const { rows } = await pool.query('DELETE FROM empresas WHERE id = $1 RETURNING id', [id]);
+    if (rows.length === 0) return res.status(404).json({ erro: 'Empresa não encontrada' });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('[excluir empresa]', e);
+    res.status(500).json({ erro: 'Erro ao excluir' });
+  }
+});
+
 // ========== USUÁRIOS DA EMPRESA ==========
 app.post('/api/admin/empresas/:id/usuarios', authAdminOnly, async (req, res) => {
   const { id: empresa_id } = req.params;
