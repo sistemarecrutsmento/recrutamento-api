@@ -642,9 +642,10 @@ app.get('/api/candidato/candidaturas', authCandidato, async (req, res) => {
 });
 
 // Lista as CONVERSAS do candidato logado (estilo WhatsApp)
-// Critérios:
-//  - etapa_atual >= 3 (candidato já passou da triagem)
-//  - status não encerrado (rejeitado/reprovado/cancelado/contratado)
+// Critérios (regra aprovada 22/07/2026):
+//  - etapa_atual >= 2 (candidato passou da INSCRIÇÃO; a partir da TRIAGEM aparece)
+//  - status da candidatura não encerrado (rejeitado/reprovado/cancelado/contratado)
+//  - vaga ativa (não fechada/encerrada)
 // Inclui última mensagem, contagem de não lidas (msgs do admin que o candidato ainda não abriu)
 // Ordena pela última msg (mais recente primeiro); quem nunca teve msg fica no fim
 app.get('/api/candidato/conversas', authCandidato, async (req, res) => {
@@ -668,8 +669,9 @@ app.get('/api/candidato/conversas', authCandidato, async (req, res) => {
       FROM candidaturas c
       JOIN vagas v ON v.id = c.vaga_id
       WHERE c.candidato_id = $1
-        AND c.etapa_atual >= 3
+        AND c.etapa_atual >= 2
         AND c.status NOT IN ('rejeitado','reprovado','cancelado','contratado')
+        AND COALESCE(v.status, 'publicada') NOT IN ('fechada','encerrada','cancelada')
       ORDER BY ultima_msg_em DESC NULLS LAST, c.criada_em DESC
     `, [candidatoId]);
     res.json({ conversas: rows });
@@ -2053,14 +2055,30 @@ app.get('/api/chat/:candidatura_id/mensagens', authCandidatoOrAdmin, async (req,
 app.post('/api/chat/:candidatura_id/mensagens', authCandidatoOrAdmin, async (req, res) => {
   try {
     const cid = parseInt(req.params.candidatura_id);
-    // Bloqueia envio se a candidatura já foi encerrada
-    const { rows: statusCheck } = await pool.query('SELECT status FROM candidaturas WHERE id = $1', [cid]);
+    // Bloqueia envio se a candidatura já foi encerrada OU se ainda tá na etapa 1 (inscrição)
+    // Regra (22/07/2026): chat só fica disponível após primeira aprovação (etapa >= 2)
+    const { rows: statusCheck } = await pool.query(
+      'SELECT c.status, c.etapa_atual, v.status as vaga_status FROM candidaturas c JOIN vagas v ON v.id = c.vaga_id WHERE c.id = $1',
+      [cid]
+    );
     if (statusCheck.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
-    const statusCand = statusCheck[0].status;
-    if (['rejeitado','reprovado','cancelado','contratado'].includes(statusCand)) {
+    const candCheck = statusCheck[0];
+    if (['rejeitado','reprovado','cancelado','contratado'].includes(candCheck.status)) {
       return res.status(403).json({
         erro: 'Chat encerrado. Esta candidatura foi finalizada.',
-        candidatura_status: statusCand
+        candidatura_status: candCheck.status
+      });
+    }
+    if ((candCheck.etapa_atual || 0) < 2) {
+      return res.status(403).json({
+        erro: 'Chat ainda não disponível. O recrutador precisa aprovar sua inscrição na triagem primeiro.',
+        etapa_atual: candCheck.etapa_atual
+      });
+    }
+    if (['fechada','encerrada','cancelada'].includes(candCheck.vaga_status)) {
+      return res.status(403).json({
+        erro: 'Esta vaga foi encerrada.',
+        vaga_status: candCheck.vaga_status
       });
     }
     const { texto } = req.body;
@@ -2234,12 +2252,12 @@ app.get('/api/chat/mensagem/:id/arquivos', authCandidatoOrAdmin, async (req, res
 });
 
 // Lista TODAS as conversas (admin) agrupadas por candidatura
+// Regra (22/07/2026): chat só aparece se candidato passou da INSCRIÇÃO (etapa_atual >= 2)
+// e se a vaga não foi fechada/encerrada
 app.get('/api/admin/conversas', authAdmin, async (req, res) => {
   try {
     // Filtro opcional: ?candidatura_id=X → só 1 conversa
-    // Sem filtro: lista conversas ATIVAS (candidatura não encerrada)
-    // - status = 'rejeitado' / 'reprovado' / 'cancelado' → NÃO aparece (chat encerrado)
-    // - status = 'contratado' → também não aparece (virou funcionário)
+    // Sem filtro: lista conversas ATIVAS (candidatura não encerrada E etapa >= 2 E vaga ativa)
     const cid = parseInt(req.query.candidatura_id);
     let where, params = [];
     if (cid) {
@@ -2247,9 +2265,11 @@ app.get('/api/admin/conversas', authAdmin, async (req, res) => {
       where = 'WHERE c.id = $1';
       params = [cid];
     } else {
-      // Lista geral: só candidaturas ativas
+      // Lista geral: só candidaturas ativas e pós-inscrição, com vaga ativa
       where = `WHERE EXISTS (SELECT 1 FROM mensagens_processo WHERE candidatura_id = c.id)
-                AND c.status NOT IN ('rejeitado','reprovado','cancelado','contratado')`;
+                AND c.etapa_atual >= 2
+                AND c.status NOT IN ('rejeitado','reprovado','cancelado','contratado')
+                AND COALESCE(v.status, 'publicada') NOT IN ('fechada','encerrada','cancelada')`;
     }
     const { rows } = await pool.query(`
       SELECT c.id as candidatura_id, v.titulo as vaga_titulo, cd.nome as candidato_nome,
