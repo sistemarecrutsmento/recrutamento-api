@@ -126,6 +126,18 @@ async function init() {
         usado BOOLEAN DEFAULT false
       );
 
+      CREATE TABLE IF NOT EXISTS password_resets (
+        id SERIAL PRIMARY KEY,
+        user_id INT NOT NULL,
+        user_tipo TEXT NOT NULL,
+        token_hash TEXT NOT NULL,
+        expira_em TIMESTAMP NOT NULL,
+        usado_em TIMESTAMP,
+        created_at TIMESTAMP DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_password_resets_token ON password_resets(token_hash);
+      CREATE INDEX IF NOT EXISTS idx_password_resets_user ON password_resets(user_id, user_tipo);
+
       CREATE TABLE IF NOT EXISTS vagas (
         id SERIAL PRIMARY KEY,
         titulo TEXT NOT NULL,
