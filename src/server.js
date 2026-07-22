@@ -3269,7 +3269,9 @@ app.get('/api/admin/chat-empresa-lista', authAdmin, async (req, res) => {
         c.id AS candidatura_id,
         cand.nome AS candidato_nome,
         v.titulo AS vaga_titulo,
-        v.empresa_nome,
+        (SELECT e.nome FROM empresa_vaga_acesso eva
+         JOIN empresas e ON e.id = eva.empresa_id
+         WHERE eva.vaga_id = v.id ORDER BY eva.concedido_em DESC LIMIT 1) AS empresa_nome,
         (SELECT COUNT(*) FROM empresa_chat ec
          WHERE ec.candidatura_id = c.id AND ec.remetente_tipo = 'empresa' AND ec.lida_em IS NULL) AS nao_lidas,
         (SELECT ec.mensagem FROM empresa_chat ec
