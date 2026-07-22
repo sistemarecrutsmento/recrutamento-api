@@ -3283,8 +3283,7 @@ app.get('/api/admin/chat-empresa-lista', authAdmin, async (req, res) => {
       FROM candidaturas c
       JOIN candidatos cand ON cand.id = c.candidato_id
       JOIN vagas v ON v.id = c.vaga_id
-      WHERE EXISTS (SELECT 1 FROM empresa_chat ec WHERE ec.candidatura_id = c.id)
-        AND c.status NOT IN ('rejeitado', 'contratado', 'reprovado')
+      WHERE c.status NOT IN ('rejeitado', 'contratado', 'reprovado')
       ORDER BY ultima_data DESC NULLS LAST
     `);
     res.json({ conversas: rows });
@@ -3316,7 +3315,6 @@ app.get('/api/empresa/chat-rh-lista', authEmpresa, async (req, res) => {
       JOIN vagas v ON v.id = c.vaga_id
       JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id
       WHERE eva.empresa_id = $1
-        AND EXISTS (SELECT 1 FROM empresa_chat ec WHERE ec.candidatura_id = c.id)
         AND c.status NOT IN ('rejeitado', 'contratado', 'reprovado')
       ORDER BY ultima_data DESC NULLS LAST
     `, [empresa_id]);
