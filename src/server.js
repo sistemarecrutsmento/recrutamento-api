@@ -2977,6 +2977,28 @@ app.get('/api/empresa/dashboard', authEmpresa, async (req, res) => {
   }
 });
 
+// Detalhes de uma vaga liberada (info completa, não só KPIs)
+app.get('/api/empresa/vagas/:vaga_id', authEmpresa, async (req, res) => {
+  const { empresa_id } = req.user;
+  const { vaga_id } = req.params;
+  try {
+    const acesso = await pool.query(
+      'SELECT 1 FROM empresa_vaga_acesso WHERE empresa_id = $1 AND vaga_id = $2',
+      [empresa_id, vaga_id]
+    );
+    if (acesso.rows.length === 0) return res.status(403).json({ erro: 'Sem acesso a esta vaga' });
+    const { rows } = await pool.query(
+      'SELECT id, titulo, empresa, cidade, estado, tipo_contrato, nivel, area, salario_min, salario_max, descricao, requisitos, beneficios, etapas, status, criada_em FROM vagas WHERE id = $1',
+      [vaga_id]
+    );
+    if (rows.length === 0) return res.status(404).json({ erro: 'Vaga não encontrada' });
+    res.json({ vaga: rows[0] });
+  } catch (e) {
+    console.error('[empresa vaga detail]', e);
+    res.status(500).json({ erro: 'Erro ao buscar vaga' });
+  }
+});
+
 // Lista candidatos de UMA vaga liberada
 app.get('/api/empresa/vagas/:vaga_id/candidatos', authEmpresa, async (req, res) => {
   const { empresa_id } = req.user;
