@@ -1970,7 +1970,7 @@ app.get('/api/chat/:candidatura_id/mensagens', authCandidatoOrAdmin, async (req,
   try {
     const cid = parseInt(req.params.candidatura_id);
     const { rows: cand } = await pool.query(`
-      SELECT c.id, c.candidato_id, cd.email, cd.id as cand_id, v.empresa
+      SELECT c.id, c.candidato_id, c.status, cd.email, cd.id as cand_id, v.empresa
       FROM candidaturas c
       JOIN candidatos cd ON cd.id = c.candidato_id
       JOIN vagas v ON v.id = c.vaga_id
@@ -1985,6 +1985,7 @@ app.get('/api/chat/:candidatura_id/mensagens', authCandidatoOrAdmin, async (req,
     } else if (req.user.tipo !== 'admin') {
       return res.status(403).json({ erro: 'Sem permissão' });
     }
+    // Retorna o status da candidatura pra frontend decidir se mostra ou não
     const { rows: msgs } = await pool.query(
       'SELECT id, autor_tipo, autor_nome, texto, contexto, criado_em FROM mensagens_processo WHERE candidatura_id = $1 ORDER BY criado_em ASC LIMIT 500',
       [cid]
@@ -2003,7 +2004,7 @@ app.get('/api/chat/:candidatura_id/mensagens', authCandidatoOrAdmin, async (req,
       });
       msgs.forEach(m => { m.arquivos = porMsg[m.id] || []; });
     }
-    res.json({ mensagens: msgs });
+    res.json({ mensagens: msgs, candidatura_status: c.status });
   } catch (e) {
     console.error('[CHAT LISTAR]', e);
     res.status(500).json({ erro: e.message });
@@ -2014,6 +2015,16 @@ app.get('/api/chat/:candidatura_id/mensagens', authCandidatoOrAdmin, async (req,
 app.post('/api/chat/:candidatura_id/mensagens', authCandidatoOrAdmin, async (req, res) => {
   try {
     const cid = parseInt(req.params.candidatura_id);
+    // Bloqueia envio se a candidatura já foi encerrada
+    const { rows: statusCheck } = await pool.query('SELECT status FROM candidaturas WHERE id = $1', [cid]);
+    if (statusCheck.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
+    const statusCand = statusCheck[0].status;
+    if (['rejeitado','reprovado','cancelado','contratado'].includes(statusCand)) {
+      return res.status(403).json({
+        erro: 'Chat encerrado. Esta candidatura foi finalizada.',
+        candidatura_status: statusCand
+      });
+    }
     const { texto } = req.body;
     if (!texto || !texto.trim()) return res.status(400).json({ erro: 'Mensagem vazia' });
     if (texto.length > 2000) return res.status(400).json({ erro: 'Mensagem muito longa (máx 2000 caracteres)' });
@@ -2188,12 +2199,20 @@ app.get('/api/chat/mensagem/:id/arquivos', authCandidatoOrAdmin, async (req, res
 app.get('/api/admin/conversas', authAdmin, async (req, res) => {
   try {
     // Filtro opcional: ?candidatura_id=X → só 1 conversa
-    // Sem filtro: lista TODAS as conversas com mensagens (modo antigo)
+    // Sem filtro: lista conversas ATIVAS (candidatura não encerrada)
+    // - status = 'rejeitado' / 'reprovado' / 'cancelado' → NÃO aparece (chat encerrado)
+    // - status = 'contratado' → também não aparece (virou funcionário)
     const cid = parseInt(req.query.candidatura_id);
-    const where = cid
-      ? 'WHERE c.id = $1'
-      : 'WHERE EXISTS (SELECT 1 FROM mensagens_processo WHERE candidatura_id = c.id)';
-    const params = cid ? [cid] : [];
+    let where, params = [];
+    if (cid) {
+      // Quando filtra por id específico, ignora o status (pra admin ver histórico ao reprovar)
+      where = 'WHERE c.id = $1';
+      params = [cid];
+    } else {
+      // Lista geral: só candidaturas ativas
+      where = `WHERE EXISTS (SELECT 1 FROM mensagens_processo WHERE candidatura_id = c.id)
+                AND c.status NOT IN ('rejeitado','reprovado','cancelado','contratado')`;
+    }
     const { rows } = await pool.query(`
       SELECT c.id as candidatura_id, v.titulo as vaga_titulo, cd.nome as candidato_nome,
              cd.email as candidato_email, c.etapa_atual, c.status,
