@@ -2930,7 +2930,7 @@ app.get('/api/empresa/dashboard', authEmpresa, async (req, res) => {
   const { empresa_id } = req.user;
   try {
     const vagas = await pool.query(`
-      SELECT v.id, v.titulo, v.status, v.criada_em,
+      SELECT v.id, v.titulo, v.empresa, v.cidade, v.estado, v.status, v.criada_em,
         (SELECT COUNT(*) FROM candidaturas c WHERE c.vaga_id = v.id) as total_candidatos,
         (SELECT COUNT(*) FROM candidaturas c WHERE c.vaga_id = v.id AND c.status = 'em_andamento') as em_andamento,
         (SELECT COUNT(*) FROM candidaturas c WHERE c.vaga_id = v.id AND c.status = 'contratado') as contratados
