@@ -189,6 +189,20 @@ async function init() {
         criado_em TIMESTAMP DEFAULT NOW()
       );
 
+      -- Arquivos anexados em mensagens de chat
+      CREATE TABLE IF NOT EXISTS chat_arquivos (
+        id SERIAL PRIMARY KEY,
+        mensagem_id INTEGER REFERENCES mensagens_processo(id) ON DELETE CASCADE,
+        candidatura_id INTEGER REFERENCES candidaturas(id) ON DELETE CASCADE,
+        nome_original TEXT NOT NULL,
+        mime_type TEXT NOT NULL,
+        tamanho_bytes INTEGER NOT NULL,
+        base64_data TEXT NOT NULL,
+        criado_em TIMESTAMP DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_chat_arquivos_msg ON chat_arquivos(mensagem_id);
+      CREATE INDEX IF NOT EXISTS idx_chat_arquivos_cand ON chat_arquivos(candidatura_id);
+
       CREATE TABLE IF NOT EXISTS documentos_candidatura (
         id SERIAL PRIMARY KEY,
         candidatura_id INTEGER REFERENCES candidaturas(id) ON DELETE CASCADE,
