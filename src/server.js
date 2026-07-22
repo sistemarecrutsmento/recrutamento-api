@@ -2686,7 +2686,7 @@ app.get('/api/admin/empresas', authAdmin, async (req, res) => {
 
 // Criar empresa
 app.post('/api/admin/empresas', authAdminOnly, async (req, res) => {
-  const { nome, cnpj, email_principal, telefone } = req.body;
+  const { nome, cnpj, email_principal, telefone, usuario } = req.body;
   if (!nome) return res.status(400).json({ erro: 'Nome obrigatório' });
   try {
     const { rows } = await pool.query(
@@ -2694,8 +2694,26 @@ app.post('/api/admin/empresas', authAdminOnly, async (req, res) => {
        VALUES ($1,$2,$3,$4,$5) RETURNING *`,
       [nome, cnpj, email_principal, telefone, req.user.id]
     );
-    res.json({ ok: true, empresa: rows[0] });
+    const empresa = rows[0];
+    let usuarioCriado = null;
+    // Se veio bloco 'usuario' (opcional), cria o usuário principal da empresa
+    if (usuario && usuario.nome && usuario.email && usuario.senha) {
+      try {
+        const hash = await bcrypt.hash(usuario.senha, 10);
+        const ur = await pool.query(
+          `INSERT INTO empresa_usuarios (empresa_id, nome, email, senha_hash, cargo, criado_por)
+           VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, nome, email, cargo, ativo`,
+          [empresa.id, usuario.nome, usuario.email.toLowerCase(), hash, usuario.cargo || 'admin', req.user.id]
+        );
+        usuarioCriado = ur.rows[0];
+      } catch (e) {
+        if (e.code === '23505') return res.status(400).json({ erro: 'E-mail do usuário já cadastrado' });
+        throw e;
+      }
+    }
+    res.json({ ok: true, empresa, usuario: usuarioCriado });
   } catch (e) {
+    if (e.code === '23505') return res.status(400).json({ erro: 'E-mail já cadastrado' });
     console.error('[criar empresa]', e);
     res.status(500).json({ erro: 'Erro ao criar empresa' });
   }
