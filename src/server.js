@@ -3002,6 +3002,121 @@ app.get('/api/empresa/vagas/:vaga_id/candidatos', authEmpresa, async (req, res) 
   }
 });
 
+// Vagas com candidatos (espelho de /api/admin/vagas-com-candidaturas, filtrado por empresa)
+app.get('/api/empresa/vagas-com-candidaturas', authEmpresa, async (req, res) => {
+  const { empresa_id } = req.user;
+  try {
+    const { rows } = await pool.query(`
+      SELECT v.id, v.titulo, v.empresa, v.cidade, v.estado, v.status, v.criada_em,
+        COUNT(c.id) as total_geral,
+        COUNT(c.id) FILTER (WHERE c.status = 'em_analise') as em_analise,
+        COUNT(c.id) FILTER (WHERE c.status = 'em_andamento') as em_andamento,
+        COUNT(c.id) FILTER (WHERE c.status = 'contratado') as contratados,
+        COUNT(c.id) FILTER (WHERE c.status IN ('em_analise','em_andamento')) as total_ativas
+      FROM empresa_vaga_acesso eva
+      JOIN vagas v ON v.id = eva.vaga_id
+      LEFT JOIN candidaturas c ON c.vaga_id = v.id
+      WHERE eva.empresa_id = $1
+      GROUP BY v.id
+      HAVING COUNT(c.id) > 0
+      ORDER BY v.criada_em DESC
+    `, [empresa_id]);
+    res.json({ vagas: rows });
+  } catch (e) {
+    console.error('[empresa vagas-com-candidatos]', e);
+    res.status(500).json({ erro: 'Erro ao listar vagas com candidatos' });
+  }
+});
+
+// Agenda da empresa (entrevistas marcadas nas vagas liberadas)
+app.get('/api/empresa/agenda', authEmpresa, async (req, res) => {
+  const { empresa_id } = req.user;
+  const { periodo } = req.query; // 'hoje' | 'proximos' | 'passados' | 'todos'
+  try {
+    let whereExtra = '';
+    const params = [empresa_id];
+    if (periodo === 'hoje') {
+      const inicio = new Date(); inicio.setHours(0,0,0,0);
+      const fim = new Date(); fim.setHours(23,59,59,999);
+      whereExtra = `AND e.data_hora BETWEEN $2 AND $3`;
+      params.push(inicio.toISOString(), fim.toISOString());
+    } else if (periodo === 'proximos') {
+      whereExtra = `AND e.data_hora >= NOW()`;
+    } else if (periodo === 'passados') {
+      whereExtra = `AND e.data_hora < NOW()`;
+    }
+    const { rows } = await pool.query(`
+      SELECT e.id, e.etapa, e.data_hora, e.duracao_minutos, e.local, e.link_reuniao, e.observacoes, e.status,
+        c.id as candidatura_id, c.etapa_atual, c.status as cand_status,
+        cd.id as candidato_id, cd.nome as candidato_nome, cd.email as candidato_email, cd.foto_url,
+        v.id as vaga_id, v.titulo as vaga_titulo
+      FROM entrevistas e
+      JOIN candidaturas c ON c.id = e.candidatura_id
+      JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.empresa_id = $1
+      JOIN candidatos cd ON cd.id = c.candidato_id
+      JOIN vagas v ON v.id = c.vaga_id
+      WHERE eva.empresa_id = $1 ${whereExtra}
+      ORDER BY e.data_hora ASC
+    `, params);
+    res.json({ entrevistas: rows });
+  } catch (e) {
+    console.error('[empresa agenda]', e);
+    res.status(500).json({ erro: 'Erro ao carregar agenda' });
+  }
+});
+
+// Chat Empresa ↔ RH (mensagens trocadas entre empresa e admin/recrutador)
+app.get('/api/empresa/candidatura/:id/chat', authEmpresa, async (req, res) => {
+  const { empresa_id } = req.user;
+  const { id } = req.params;
+  try {
+    // Verifica acesso
+    const acc = await pool.query(`
+      SELECT c.id FROM candidaturas c
+      JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id
+      WHERE c.id = $1 AND eva.empresa_id = $2
+    `, [id, empresa_id]);
+    if (acc.rows.length === 0) return res.status(403).json({ erro: 'Sem acesso a esta candidatura' });
+
+    const { rows } = await pool.query(`
+      SELECT id, candidatura_id, remetente_tipo, remetente_nome, mensagem, criado_em
+      FROM empresa_chat
+      WHERE candidatura_id = $1
+      ORDER BY criado_em ASC
+    `, [id]);
+    res.json({ mensagens: rows });
+  } catch (e) {
+    console.error('[empresa chat listar]', e);
+    res.status(500).json({ erro: 'Erro ao carregar chat' });
+  }
+});
+
+app.post('/api/empresa/candidatura/:id/chat', authEmpresa, async (req, res) => {
+  const { empresa_id, nome: empresa_nome } = req.user;
+  const { id } = req.params;
+  const { mensagem } = req.body;
+  if (!mensagem || !mensagem.trim()) return res.status(400).json({ erro: 'Mensagem vazia' });
+  try {
+    // Verifica acesso
+    const acc = await pool.query(`
+      SELECT c.id FROM candidaturas c
+      JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id
+      WHERE c.id = $1 AND eva.empresa_id = $2
+    `, [id, empresa_id]);
+    if (acc.rows.length === 0) return res.status(403).json({ erro: 'Sem acesso a esta candidatura' });
+
+    const { rows } = await pool.query(`
+      INSERT INTO empresa_chat (candidatura_id, remetente_tipo, remetente_id, remetente_nome, mensagem)
+      VALUES ($1, 'empresa', $2, $3, $4)
+      RETURNING id, candidatura_id, remetente_tipo, remetente_nome, mensagem, criado_em
+    `, [id, empresa_id, empresa_nome, mensagem.trim()]);
+    res.json({ ok: true, mensagem: rows[0] });
+  } catch (e) {
+    console.error('[empresa chat enviar]', e);
+    res.status(500).json({ erro: 'Erro ao enviar mensagem' });
+  }
+});
+
 // Detalhe do candidato (com verificação de acesso)
 app.get('/api/empresa/candidatura/:id', authEmpresa, async (req, res) => {
   const { empresa_id } = req.user;
@@ -3083,6 +3198,46 @@ app.post('/api/empresa/candidatura/:id/acao', authEmpresa, async (req, res) => {
   } catch (e) {
     console.error('[empresa acao]', e);
     res.status(500).json({ erro: 'Erro ao processar ação' });
+  }
+});
+
+// ============= CHAT RH <-> EMPRESA (visão do Admin) =============
+app.get('/api/admin/candidatura/:id/chat-empresa', authAdmin, async (req, res) => {
+  const { id } = req.params;
+  try {
+    const { rows } = await pool.query(`
+      SELECT id, candidatura_id, remetente_tipo, remetente_nome, mensagem, criado_em, lida_em
+      FROM empresa_chat
+      WHERE candidatura_id = $1
+      ORDER BY criado_em ASC
+    `, [id]);
+    // Marca mensagens da empresa como lidas
+    await pool.query(
+      `UPDATE empresa_chat SET lida_em = NOW() WHERE candidatura_id = $1 AND remetente_tipo = 'empresa' AND lida_em IS NULL`,
+      [id]
+    );
+    res.json({ mensagens: rows });
+  } catch (e) {
+    console.error('[admin chat empresa listar]', e);
+    res.status(500).json({ erro: 'Erro ao carregar chat' });
+  }
+});
+
+app.post('/api/admin/candidatura/:id/chat-empresa', authAdmin, async (req, res) => {
+  const { id } = req.params;
+  const { mensagem } = req.body;
+  const { id: admin_id, nome: admin_nome } = req.user;
+  if (!mensagem || !mensagem.trim()) return res.status(400).json({ erro: 'Mensagem vazia' });
+  try {
+    const { rows } = await pool.query(`
+      INSERT INTO empresa_chat (candidatura_id, remetente_tipo, remetente_id, remetente_nome, mensagem)
+      VALUES ($1, 'rh', $2, $3, $4)
+      RETURNING id, candidatura_id, remetente_tipo, remetente_nome, mensagem, criado_em
+    `, [id, admin_id, admin_nome || 'RH', mensagem.trim()]);
+    res.json({ ok: true, mensagem: rows[0] });
+  } catch (e) {
+    console.error('[admin chat empresa enviar]', e);
+    res.status(500).json({ erro: 'Erro ao enviar mensagem' });
   }
 });
 
