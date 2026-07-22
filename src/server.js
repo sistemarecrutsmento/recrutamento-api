@@ -2649,13 +2649,21 @@ app.get('/api/admin/equipe', authAdmin, async (req, res) => {
       ORDER BY criado_em DESC
     `);
     const empresas = await pool.query(`
-      SELECT id, nome, email_principal as email, cnpj, ativo, criado_em
-      FROM empresas
+      SELECT e.id, e.nome, e.email_principal as email, e.cnpj, e.ativo, e.criado_em,
+        (SELECT COUNT(*) FROM empresa_vaga_acesso WHERE empresa_id = e.id) as qtd_vagas,
+        (SELECT COUNT(*) FROM empresa_usuarios WHERE empresa_id = e.id) as qtd_usuarios
+      FROM empresas e
+      ORDER BY e.criado_em DESC
+    `);
+    const usuarios = await pool.query(`
+      SELECT id, empresa_id, nome, email, cargo, ativo, primeiro_acesso, criado_em
+      FROM empresa_usuarios
       ORDER BY criado_em DESC
     `);
     res.json({
       recrutadores: recrutadores.rows,
-      empresas: empresas.rows
+      empresas: empresas.rows,
+      empresaUsuarios: usuarios.rows
     });
   } catch (err) {
     console.error('[/api/admin/equipe]', err);
