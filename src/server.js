@@ -1989,6 +1989,20 @@ app.get('/api/chat/:candidatura_id/mensagens', authCandidatoOrAdmin, async (req,
       'SELECT id, autor_tipo, autor_nome, texto, contexto, criado_em FROM mensagens_processo WHERE candidatura_id = $1 ORDER BY criado_em ASC LIMIT 500',
       [cid]
     );
+    // Anexa arquivos a cada mensagem
+    if (msgs.length > 0) {
+      const ids = msgs.map(m => m.id);
+      const { rows: arqs } = await pool.query(
+        'SELECT id, mensagem_id, nome_original, mime_type, tamanho_bytes FROM chat_arquivos WHERE mensagem_id = ANY($1::int[])',
+        [ids]
+      );
+      const porMsg = {};
+      arqs.forEach(a => {
+        if (!porMsg[a.mensagem_id]) porMsg[a.mensagem_id] = [];
+        porMsg[a.mensagem_id].push(a);
+      });
+      msgs.forEach(m => { m.arquivos = porMsg[m.id] || []; });
+    }
     res.json({ mensagens: msgs });
   } catch (e) {
     console.error('[CHAT LISTAR]', e);
@@ -2053,6 +2067,119 @@ app.post('/api/chat/:candidatura_id/mensagens', authCandidatoOrAdmin, async (req
     res.json({ ok: true, mensagem: msg[0] });
   } catch (e) {
     console.error('[CHAT ENVIAR]', e);
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+// Upload de arquivo pra chat (POST /api/chat/:cid/upload)
+// Body JSON: { texto?: string, arquivo: { nome, mime, base64 } }
+app.post('/api/chat/:candidatura_id/upload', authCandidatoOrAdmin, async (req, res) => {
+  try {
+    const cid = parseInt(req.params.candidatura_id);
+    const { texto, arquivo } = req.body;
+    if (!arquivo || !arquivo.nome || !arquivo.mime || !arquivo.base64) {
+      return res.status(400).json({ erro: 'Arquivo inválido' });
+    }
+    // Valida tamanho (base64 fica ~33% maior; 8MB base64 = ~6MB real)
+    if (arquivo.base64.length > 8 * 1024 * 1024) {
+      return res.status(413).json({ erro: 'Arquivo muito grande. Limite: 6MB' });
+    }
+    // Valida tipo (whitelist básico)
+    const mimePermitidos = [
+      'image/jpeg','image/jpg','image/png','image/gif','image/webp',
+      'application/pdf',
+      'application/msword',
+      'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'application/vnd.ms-excel',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      'text/plain','text/csv'
+    ];
+    if (!mimePermitidos.includes(arquivo.mime)) {
+      return res.status(400).json({ erro: 'Tipo de arquivo não permitido' });
+    }
+    // Calcula tamanho real (base64 -> bytes)
+    const tamanhoBytes = Math.floor(arquivo.base64.length * 3 / 4);
+    if (tamanhoBytes > 6 * 1024 * 1024) {
+      return res.status(413).json({ erro: 'Arquivo muito grande. Limite: 6MB' });
+    }
+    // Verifica permissão (igual endpoint de mensagens)
+    const { rows: cand } = await pool.query(`
+      SELECT c.id, c.candidato_id, cd.email, cd.nome as cand_nome, v.titulo
+      FROM candidaturas c
+      JOIN candidatos cd ON cd.id = c.candidato_id
+      JOIN vagas v ON v.id = c.vaga_id
+      WHERE c.id = $1`, [cid]);
+    if (cand.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
+    const c = cand[0];
+    if (req.user.tipo === 'candidato') {
+      if (c.email.toLowerCase() !== (req.user.email || '').toLowerCase()) {
+        return res.status(403).json({ erro: 'Sem permissão' });
+      }
+    } else if (req.user.tipo !== 'admin') {
+      return res.status(403).json({ erro: 'Sem permissão' });
+    }
+    const autorTipo = req.user.tipo === 'admin' ? 'admin' : 'candidato';
+    const autorNome = req.user.tipo === 'admin' ? (req.user.nome || 'Recrutador') : c.cand_nome;
+    // Texto da mensagem (se vazio, usa padrão)
+    const textoFinal = (texto && texto.trim()) || `📎 ${arquivo.nome}`;
+    // 1) Insere a mensagem
+    const { rows: msgRows } = await pool.query(
+      'INSERT INTO mensagens_processo (candidatura_id, autor_tipo, autor_nome, texto, contexto) VALUES ($1,$2,$3,$4,$5) RETURNING *',
+      [cid, autorTipo, autorNome, textoFinal, 'chat']
+    );
+    const msg = msgRows[0];
+    // 2) Insere o arquivo vinculado
+    const { rows: arqRows } = await pool.query(
+      'INSERT INTO chat_arquivos (mensagem_id, candidatura_id, nome_original, mime_type, tamanho_bytes, base64_data) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, nome_original, mime_type, tamanho_bytes',
+      [msg.id, cid, arquivo.nome, arquivo.mime, tamanhoBytes, arquivo.base64]
+    );
+    res.json({ ok: true, mensagem: msg, arquivo: arqRows[0] });
+  } catch (e) {
+    console.error('[CHAT UPLOAD]', e);
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+// Download de arquivo do chat
+app.get('/api/chat/arquivo/:id', authCandidatoOrAdmin, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const { rows } = await pool.query(
+      'SELECT ca.*, c.candidato_id, cd.email FROM chat_arquivos ca JOIN candidaturas c ON c.id = ca.candidatura_id JOIN candidatos cd ON cd.id = c.candidato_id WHERE ca.id = $1',
+      [id]
+    );
+    if (rows.length === 0) return res.status(404).json({ erro: 'Arquivo não encontrado' });
+    const arq = rows[0];
+    // Verifica permissão
+    if (req.user.tipo === 'candidato') {
+      if (arq.email.toLowerCase() !== (req.user.email || '').toLowerCase()) {
+        return res.status(403).json({ erro: 'Sem permissão' });
+      }
+    } else if (req.user.tipo !== 'admin') {
+      return res.status(403).json({ erro: 'Sem permissão' });
+    }
+    // Decodifica base64 e envia
+    const buffer = Buffer.from(arq.base64_data, 'base64');
+    res.setHeader('Content-Type', arq.mime_type);
+    res.setHeader('Content-Disposition', `inline; filename="${arq.nome_original}"`);
+    res.setHeader('Content-Length', arq.tamanho_bytes);
+    res.send(buffer);
+  } catch (e) {
+    console.error('[CHAT ARQUIVO]', e);
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+// Lista arquivos de uma mensagem
+app.get('/api/chat/mensagem/:id/arquivos', authCandidatoOrAdmin, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const { rows } = await pool.query(
+      'SELECT id, nome_original, mime_type, tamanho_bytes FROM chat_arquivos WHERE mensagem_id = $1',
+      [id]
+    );
+    res.json({ arquivos: rows });
+  } catch (e) {
     res.status(500).json({ erro: e.message });
   }
 });
