@@ -235,6 +235,19 @@ async function init() {
         criado_em TIMESTAMP DEFAULT NOW(),
         atualizado_em TIMESTAMP DEFAULT NOW()
       );
+
+      -- Chat Empresa <-> RH/Recrutador (jul/2026)
+      CREATE TABLE IF NOT EXISTS empresa_chat (
+        id SERIAL PRIMARY KEY,
+        candidatura_id INTEGER REFERENCES candidaturas(id) ON DELETE CASCADE,
+        remetente_tipo TEXT NOT NULL, -- 'empresa' | 'rh'
+        remetente_id INTEGER,
+        remetente_nome TEXT,
+        mensagem TEXT NOT NULL,
+        lida_em TIMESTAMP,
+        criado_em TIMESTAMP DEFAULT NOW()
+      );
+      CREATE INDEX IF NOT EXISTS idx_empresa_chat_cand ON empresa_chat(candidatura_id, criado_em);
     `);
 
     // Garantir colunas em tabelas já criadas (idempotente)
