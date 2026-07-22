@@ -1238,9 +1238,9 @@ app.get('/api/admin/candidatura/:id', authAdmin, async (req, res) => {
              cd.areas_interesse, cd.banco_talentos,
              cd.criado_em as candidato_criado_em,
              (SELECT e.nome FROM empresa_vaga_acesso eva JOIN empresas e ON e.id = eva.empresa_id
-                WHERE eva.vaga_id = c.vaga_id ORDER BY eva.criado_em DESC LIMIT 1) as empresa_nome,
+                WHERE eva.vaga_id = c.vaga_id ORDER BY eva.concedido_em DESC LIMIT 1) as empresa_nome,
              (SELECT eva.empresa_id FROM empresa_vaga_acesso eva
-                WHERE eva.vaga_id = c.vaga_id ORDER BY eva.criado_em DESC LIMIT 1) as empresa_id
+                WHERE eva.vaga_id = c.vaga_id ORDER BY eva.concedido_em DESC LIMIT 1) as empresa_id
       FROM candidaturas c
       JOIN vagas v ON v.id = c.vaga_id
       JOIN candidatos cd ON cd.id = c.candidato_id
