@@ -8,6 +8,7 @@ require('dotenv').config();
 
 const { pool, init } = require('./db');
 const { enviarCodigo, enviarNotificacaoStatus, enviarEmailProposta, enviarEmailBg, enviarEmailAtualizacao, enviarEmail, enviarEmailInscricao, getResendKey } = require('./email');
+const meet = require('./meet');
 
 // Email do admin pra receber notificações de ação do candidato
 const ADMIN_NOTIF_EMAIL = process.env.ADMIN_NOTIF_EMAIL || process.env.ADMIN_EMAIL || 'fabio08dejesusjunior@gmail.com';
@@ -1805,9 +1806,18 @@ app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
     if (cand.rows.length === 0) {
       return res.status(404).json({ erro: 'Candidatura não encontrada' });
     }
-    // Gera link da sala Whereby automaticamente (se não veio do frontend)
-    // Sua sala Whereby Embedded: a URL da sala é fixa + um identificador único da entrevista
-    const linkGerado = link_reuniao || `https://whereby.com/vagasio?room=entrevista-${candidatura_id}-${Date.now()}`;
+
+    // Busca dados do candidato e vaga pra montar o título/descrição do Meet
+    const candFull = await pool.query(`
+      SELECT c.id, c.candidato_id, cand.nome AS candidato_nome, cand.email AS candidato_email,
+             v.titulo AS vaga_titulo, v.empresa_id, e.nome AS empresa_nome
+      FROM candidaturas c
+      JOIN candidatos cand ON cand.id = c.candidato_id
+      JOIN vagas v ON v.id = c.vaga_id
+      LEFT JOIN empresas e ON e.id = v.empresa_id
+      WHERE c.id = $1
+    `, [candidatura_id]);
+    const candData = candFull.rows[0];
 
     // Converte data_hora pra timestamp com fuso: o JS manda ISO (ex: 2026-07-25T14:30:00-03:00),
     // o Postgres interpreta corretamente e armazena em UTC internamente
@@ -1821,6 +1831,38 @@ app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
       const d = new Date(data_hora);
       if (isNaN(d.getTime())) return res.status(400).json({ erro: 'data_hora inválida' });
       dataHoraFinal = d.toISOString();
+    }
+
+    // === GERA LINK DO GOOGLE MEET (se não veio do frontend) ===
+    let linkGerado = link_reuniao;
+    let googleEventId = null;
+    let meetHtmlLink = null;
+
+    if (!linkGerado && process.env.GCP_SERVICE_ACCOUNT_JSON) {
+      try {
+        const etapaNome = etapa === 3 ? 'RH' : 'Gestor';
+        const meetResult = await meet.criarEventoMeet({
+          summary: `Entrevista ${etapaNome} - ${candData.candidato_nome} - ${candData.vaga_titulo}`,
+          description: `Entrevista etapa ${etapaNome} da vaga "${candData.vaga_titulo}"${candData.empresa_nome ? ` (${candData.empresa_nome})` : ''}.\n\n${observacoes || ''}\n\nGerado via VagasIO.`,
+          startTime: dataHoraFinal,
+          durationMinutes: duracao_minutos || 60,
+          attendees: [
+            candData.candidato_email,
+            req.admin?.email || process.env.MEET_ADMIN_EMAIL,
+          ].filter(Boolean),
+        });
+        linkGerado = meetResult.meetLink;
+        googleEventId = meetResult.eventId;
+        meetHtmlLink = meetResult.htmlLink;
+        console.log(`[MEET] Evento criado: ${googleEventId} - ${linkGerado}`);
+      } catch (meetErr) {
+        console.error('[MEET ERRO]', meetErr.message);
+        return res.status(500).json({ erro: 'Falha ao criar reunião no Google Meet: ' + meetErr.message });
+      }
+    } else if (!linkGerado) {
+      // Fallback: gera link placeholder se Meet não tá configurado (não deveria acontecer em prod)
+      linkGerado = `https://meet.google.com/pending-${candidatura_id}-${Date.now()}`;
+      console.warn('[MEET] GCP_SERVICE_ACCOUNT_JSON não configurada — usando link placeholder');
     }
 
     // Cria a entrevista
@@ -1845,10 +1887,10 @@ app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
       tipo: 'entrevista',
       data_hora: dataHoraFinal,
       por: req.admin?.nome || 'Recrutador',
-      detalhes: `Data: ${dataFormatada}${link_reuniao ? ` • Link: ${link_reuniao}` : ''}${local ? ` • Local: ${local}` : ''}`
+      detalhes: `Data: ${dataFormatada}${linkGerado ? ` • Meet: ${linkGerado}` : ''}${local ? ` • Local: ${local}` : ''}`
     }]), candidatura_id]);
 
-    res.json({ ok: true, entrevista });
+    res.json({ ok: true, entrevista, googleEventId, meetHtmlLink });
   } catch (e) {
     console.error('[ENTREVISTA CRIAR ERRO]', e);
     res.status(500).json({ erro: e.message });
@@ -1889,6 +1931,36 @@ app.post('/api/_debug/fix-entrevistas', async (req, res) => {
   } catch (e) {
     console.error('[FIX ENTREVISTAS]', e);
     res.status(500).json({ erro: e.message });
+  }
+});
+
+// Testa a conexão com o Google Meet (lê 1 evento futuro do admin)
+app.get('/api/_debug/meet-teste', async (req, res) => {
+  try {
+    const r = await meet.testarConexao();
+    res.json({ ok: true, ...r, admin: process.env.MEET_ADMIN_EMAIL || 'comercial@vagasio.com.br' });
+  } catch (e) {
+    console.error('[MEET TESTE]', e);
+    res.status(500).json({ ok: false, erro: e.message, stack: e.stack });
+  }
+});
+
+// Testa criando um evento Meet descartável (10 min no futuro)
+app.post('/api/_debug/meet-criar-teste', async (req, res) => {
+  try {
+    const start = new Date(Date.now() + 10 * 60 * 1000); // 10 min no futuro
+    const end = new Date(start.getTime() + 30 * 60 * 1000); // +30 min
+    const r = await meet.criarEventoMeet({
+      summary: '🧪 TESTE VagasIO Meet',
+      description: 'Evento de teste criado pela API. Pode ignorar.',
+      startISO: start.toISOString(),
+      endISO: end.toISOString(),
+      attendees: [],
+    });
+    res.json({ ok: true, ...r });
+  } catch (e) {
+    console.error('[MEET CRIAR TESTE]', e);
+    res.status(500).json({ ok: false, erro: e.message, stack: e.stack });
   }
 });
 
