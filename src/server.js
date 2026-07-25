@@ -100,6 +100,17 @@ app.get('/api/_debug/meet-listar-teste', async (req, res) => {
   }
 });
 
+// Deleta um evento do Calendar pelo ID (pra debug/limpeza)
+app.delete('/api/_debug/meet-deletar/:eventId', async (req, res) => {
+  try {
+    await meet.deletarEventoMeet(req.params.eventId);
+    res.json({ ok: true, eventoDeletado: req.params.eventId });
+  } catch (e) {
+    console.error('[MEET DELETAR]', e);
+    res.status(500).json({ ok: false, erro: e.message });
+  }
+});
+
 // ============= DEBUG TEMPORÁRIO (remover depois) =============
 // Tenta enviar e-mail de teste via Resend e mostra erro/sucesso
 // v2 - força redeploy p/ pegar RESEND_API_KEY
