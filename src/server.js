@@ -112,6 +112,28 @@ app.delete('/api/_debug/meet-deletar/:eventId', async (req, res) => {
 });
 
 // ============= DEBUG TEMPORÁRIO (remover depois) =============
+// Tenta enviar e-mail rico de notificação de mudança de etapa (preview)
+app.get('/api/_debug-email-notificacao', async (req, res) => {
+  try {
+    const to = req.query.to || 'fabio08dejesusjunior@gmail.com';
+    const result = await enviarEmailAtualizacao(
+      to,
+      'Fabio Junior',
+      'Auxiliar Administrativo',
+      {
+        etapaNum: 3,
+        etapaNome: 'RH',
+        acao: 'avancar',
+        status: 'em_andamento',
+        mensagemAdmin: 'Você avançou para a etapa de RH. Em breve agendaremos uma entrevista.'
+      }
+    );
+    res.json({ ok: true, result });
+  } catch (e) {
+    res.json({ ok: false, erro: e.message, code: e.code, response: e.response?.data });
+  }
+});
+
 // Tenta enviar e-mail de teste via Resend e mostra erro/sucesso
 // v2 - força redeploy p/ pegar RESEND_API_KEY
 app.get('/api/_debug-email-teste', async (req, res) => {
