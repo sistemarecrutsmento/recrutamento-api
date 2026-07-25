@@ -1934,6 +1934,19 @@ app.post('/api/_debug/fix-entrevistas', async (req, res) => {
   }
 });
 
+// Rota sentinela: confirma se o código novo (com Meet) está rodando
+app.get('/api/_debug/versao', (req, res) => {
+  res.json({
+    ok: true,
+    versao: '2026-07-25-MEET-OK',
+    meet_carregado: typeof meet === 'object' && typeof meet.testarConexao === 'function',
+    porta: process.env.PORT || 10000,
+    hora: new Date().toISOString(),
+    node: process.version,
+    uptime_s: Math.round(process.uptime())
+  });
+});
+
 // Testa a conexão com o Google Meet (lê 1 evento futuro do admin)
 app.get('/api/_debug/meet-teste', async (req, res) => {
   try {
@@ -3804,7 +3817,7 @@ process.on('unhandledRejection', (e) => {
   });
 
   const port = process.env.PORT || 10000;
-    app.listen(port, () => console.log(`API rodando na porta ${port}`));
+  app.listen(port, () => console.log(`API rodando na porta ${port}`));
   } catch (e) {
     console.error('Erro ao iniciar:', e);
     process.exit(1);
