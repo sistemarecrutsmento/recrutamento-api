@@ -117,20 +117,39 @@ const SISTEMA = process.env.SISTEMA_NOME || 'Recrutamento e Seleção';
 // HTTP APIs funcionam onde SMTP tá bloqueado, tipo Render
 // ===== E-mail remetente =====
 // Remetente "amigável" (pode ser contato@vagasio.com.br).
-// Pra Gmail SMTP, o `envelope sender` vai ser o EMAIL_FROM_VAGASIO || EMAIL_FROM
-// (Gmail só permite enviar autenticado com o mesmo user).
 //
-// IMPORTANTE (jul/2026): a API do Render tá bugada e não deixa alterar EMAIL_FROM via PUT.
-// Pra contornar, o remetente amigável tá HARDCODED pra contato@vagasio.com.br aqui.
-// Se precisar mudar de novo, edite essa linha e faça deploy.
+// IMPORTANTE (jul/2026):
+// - A API do Render tá bugada e não deixa alterar EMAIL_FROM via PUT.
+// - Resend exige domínio verificado pra aceitar from: contato@vagasio.com.br
+// - Solução: tentar com REMETENTE_AMIGAVEL primeiro; se der erro 403 (domain not verified),
+//   cai pro fallback FALLBACK_REMETENTE (onboarding@resend.dev) que sempre funciona.
+// - Pra ativar o contato@vagasio.com.br: verifique o domínio em resend.com/domains
 const REMETENTE_AMIGAVEL = process.env.EMAIL_REMETENTE_AMIGAVEL
                             || 'Recrutamento e Seleção <contato@vagasio.com.br>';
+const FALLBACK_REMETENTE = `${SISTEMA} <onboarding@resend.dev>`;
+
+// Wrapper: tenta com REMETENTE_AMIGAVEL; se 403 (domínio não verificado), cai pro fallback
+async function enviarViaResendComFallback(args) {
+  try {
+    return await enviarViaResend({ ...args, from: args.from || REMETENTE_AMIGAVEL });
+  } catch (e) {
+    // Detecta erro de domínio não verificado (Resend retorna 403 com message específico)
+    const isDomainError = e?.response?.status === 403
+                       && /not verified/i.test(e?.response?.data?.message || e?.message || '');
+    if (isDomainError) {
+      console.warn('[email] Domínio vagasio.com.br não verificado no Resend — usando fallback onboarding@resend.dev');
+      console.warn('[email] Pra ativar o remetente amigável, verifique o domínio em https://resend.com/domains');
+      return enviarViaResend({ ...args, from: FALLBACK_REMETENTE });
+    }
+    throw e;
+  }
+}
 
 async function enviarEmail({ to, subject, html, text, from }) {
   // 1ª opção: Resend (se configurado) — permite from customizado
   if (getResendKey()) {
     console.log('[email] Enviando via Resend para:', to, '| subject:', subject);
-    return enviarViaResend({ from: from || REMETENTE_AMIGAVEL, to, subject, html, text });
+    return enviarViaResendComFallback({ from, to, subject, html, text });
   }
   // 2ª opção: Web3Forms (se configurado)
   if (getWeb3FormsKey()) {
