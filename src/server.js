@@ -3156,25 +3156,45 @@ app.get('/api/empresa/vagas-com-candidaturas', authEmpresa, async (req, res) => 
 // Agenda da empresa (entrevistas marcadas nas vagas liberadas)
 app.get('/api/empresa/agenda', authEmpresa, async (req, res) => {
   const { empresa_id } = req.user;
-  const { periodo } = req.query; // 'hoje' | 'proximos' | 'passados' | 'todos'
+  const { periodo } = req.query; // 'hoje' | 'proximos' | 'passados' | 'todos' | 'semana' | '7dias' | '30dias' | 'atrasadas' | 'realizadas' | 'canceladas'
   try {
     let whereExtra = '';
     const params = [empresa_id];
+    const now = new Date();
     if (periodo === 'hoje') {
-      const inicio = new Date(); inicio.setHours(0,0,0,0);
-      const fim = new Date(); fim.setHours(23,59,59,999);
+      const inicio = new Date(now); inicio.setHours(0,0,0,0);
+      const fim = new Date(now); fim.setHours(23,59,59,999);
       whereExtra = `AND e.data_hora BETWEEN $2 AND $3`;
       params.push(inicio.toISOString(), fim.toISOString());
     } else if (periodo === 'proximos') {
       whereExtra = `AND e.data_hora >= NOW()`;
     } else if (periodo === 'passados') {
-      whereExtra = `AND e.data_hora < NOW()`;
+      whereExtra = `AND e.data_hora < NOW() AND e.status NOT IN ('cancelada', 'realizada')`;
+    } else if (periodo === 'semana') {
+      const inicio = new Date(now); inicio.setHours(0,0,0,0);
+      const fim = new Date(now); fim.setDate(fim.getDate() + 7);
+      whereExtra = `AND e.data_hora BETWEEN $2 AND $3`;
+      params.push(inicio.toISOString(), fim.toISOString());
+    } else if (periodo === '7dias') {
+      const fim = new Date(now); fim.setDate(fim.getDate() + 7);
+      whereExtra = `AND e.data_hora BETWEEN NOW() AND $2`;
+      params.push(fim.toISOString());
+    } else if (periodo === '30dias') {
+      const fim = new Date(now); fim.setDate(fim.getDate() + 30);
+      whereExtra = `AND e.data_hora BETWEEN NOW() AND $2`;
+      params.push(fim.toISOString());
+    } else if (periodo === 'atrasadas') {
+      whereExtra = `AND e.data_hora < NOW() AND e.status = 'agendada'`;
+    } else if (periodo === 'realizadas') {
+      whereExtra = `AND e.status = 'realizada'`;
+    } else if (periodo === 'canceladas') {
+      whereExtra = `AND e.status = 'cancelada'`;
     }
     const { rows } = await pool.query(`
       SELECT e.id, e.etapa, e.data_hora, e.duracao_minutos, e.local, e.link_reuniao, e.observacoes, e.status,
         c.id as candidatura_id, c.etapa_atual, c.status as cand_status,
         cd.id as candidato_id, cd.nome as candidato_nome, cd.email as candidato_email, cd.foto_url,
-        v.id as vaga_id, v.titulo as vaga_titulo, v.etapas as vaga_etapas
+        v.id as vaga_id, v.titulo as vaga_titulo, v.empresa as vaga_empresa, v.etapas as vaga_etapas
       FROM entrevistas e
       JOIN candidaturas c ON c.id = e.candidatura_id
       JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.empresa_id = $1
