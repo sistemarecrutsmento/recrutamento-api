@@ -60,6 +60,35 @@ app.get('/api/_debug/versao', (req, res) => {
   });
 });
 
+// ============= TESTE MEET (também no topo, pra forçar carregamento) =============
+app.get('/api/_debug/meet-teste', async (req, res) => {
+  try {
+    const r = await meet.testarConexao();
+    res.json({ ok: true, ...r, admin: process.env.MEET_ADMIN_EMAIL || 'comercial@vagasio.com.br' });
+  } catch (e) {
+    console.error('[MEET TESTE]', e);
+    res.status(500).json({ ok: false, erro: e.message });
+  }
+});
+
+app.post('/api/_debug/meet-criar-teste', async (req, res) => {
+  try {
+    const start = new Date(Date.now() + 10 * 60 * 1000);
+    const end = new Date(start.getTime() + 30 * 60 * 1000);
+    const r = await meet.criarEventoMeet({
+      summary: '🧪 TESTE VagasIO Meet',
+      description: 'Evento de teste criado pela API. Pode ignorar.',
+      startTime: start.toISOString(),
+      durationMinutes: 30,
+      attendees: [],
+    });
+    res.json({ ok: true, ...r });
+  } catch (e) {
+    console.error('[MEET CRIAR TESTE]', e);
+    res.status(500).json({ ok: false, erro: e.message });
+  }
+});
+
 // ============= DEBUG TEMPORÁRIO (remover depois) =============
 // Tenta enviar e-mail de teste via Resend e mostra erro/sucesso
 // v2 - força redeploy p/ pegar RESEND_API_KEY
@@ -1950,35 +1979,7 @@ app.post('/api/_debug/fix-entrevistas', async (req, res) => {
   }
 });
 
-// Testa a conexão com o Google Meet (lê 1 evento futuro do admin)
-app.get('/api/_debug/meet-teste', async (req, res) => {
-  try {
-    const r = await meet.testarConexao();
-    res.json({ ok: true, ...r, admin: process.env.MEET_ADMIN_EMAIL || 'comercial@vagasio.com.br' });
-  } catch (e) {
-    console.error('[MEET TESTE]', e);
-    res.status(500).json({ ok: false, erro: e.message, stack: e.stack });
-  }
-});
-
-// Testa criando um evento Meet descartável (10 min no futuro)
-app.post('/api/_debug/meet-criar-teste', async (req, res) => {
-  try {
-    const start = new Date(Date.now() + 10 * 60 * 1000); // 10 min no futuro
-    const end = new Date(start.getTime() + 30 * 60 * 1000); // +30 min
-    const r = await meet.criarEventoMeet({
-      summary: '🧪 TESTE VagasIO Meet',
-      description: 'Evento de teste criado pela API. Pode ignorar.',
-      startTime: start.toISOString(),
-      durationMinutes: 30,
-      attendees: [],
-    });
-    res.json({ ok: true, ...r });
-  } catch (e) {
-    console.error('[MEET CRIAR TESTE]', e);
-    res.status(500).json({ ok: false, erro: e.message, stack: e.stack });
-  }
-});
+// (rotas _debug/meet-teste e _debug/meet-criar-teste movidas para o topo do arquivo)
 
 // Listar TODAS as entrevistas (pra página Agenda)
 app.get('/api/admin/entrevistas', authAdmin, async (req, res) => {
