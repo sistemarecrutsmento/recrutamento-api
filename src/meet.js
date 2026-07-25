@@ -31,7 +31,33 @@ function getCalendarClient() {
 
   let credentials;
   try {
-    credentials = JSON.parse(serviceAccountJson);
+    // Render às vezes converte \\n escapado pra newlines reais na env var.
+    // Precisamos garantir que o JSON seja parseável.
+    let jsonStr = serviceAccountJson;
+    try {
+      credentials = JSON.parse(jsonStr);
+    } catch (e1) {
+      // Tenta substituir newlines REAIS dentro do private_key por \n escapado
+      try {
+        const beginMarker = '-----BEGIN PRIVATE KEY-----';
+        const endMarker = '-----END PRIVATE KEY-----';
+        const beginIdx = jsonStr.indexOf(beginMarker);
+        const endIdx = jsonStr.indexOf(endMarker);
+        if (beginIdx > -1 && endIdx > -1) {
+          // Pega o private_key completo (BEGIN + conteúdo + END)
+          const endOfEnd = endIdx + endMarker.length;
+          const privateKeyBlock = jsonStr.substring(beginIdx, endOfEnd);
+          // Substitui newlines reais por \\n escapado
+          const fixedBlock = privateKeyBlock.replace(/\n/g, '\\n');
+          jsonStr = jsonStr.substring(0, beginIdx) + fixedBlock + jsonStr.substring(endOfEnd);
+          credentials = JSON.parse(jsonStr);
+        } else {
+          throw e1;
+        }
+      } catch (e2) {
+        throw new Error('GCP_SERVICE_ACCOUNT_JSON inválida (não é JSON parseável): ' + e1.message);
+      }
+    }
   } catch (e) {
     throw new Error('GCP_SERVICE_ACCOUNT_JSON inválida (não é JSON parseável): ' + e.message);
   }
