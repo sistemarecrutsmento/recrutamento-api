@@ -24,19 +24,24 @@ function getTransporter() {
   // o `from:` pode ser outro e-mail (Gmail reescreve o envelope sender pra entregar).
   const smtpUser = process.env.EMAIL_FROM_VAGASIO || process.env.EMAIL_FROM;
   if (!smtpUser || !process.env.EMAIL_APP_PASSWORD) return null;
-  // Usa Gmail SMTP com SSL porta 465 (mais confiável em ambientes como Render)
+  // Usa Gmail SMTP — tenta porta 587 STARTTLS primeiro (mais flexível), fallback 465 SSL
   transporter = nodemailer.createTransport({
     host: 'smtp.gmail.com',
-    port: 465,
-    secure: true, // usa SSL
+    port: 587,
+    secure: false, // usa STARTTLS
+    requireTLS: true,
     auth: {
       user: smtpUser,
       pass: process.env.EMAIL_APP_PASSWORD
     },
-    // Timeout agressivo: não deixa o SMTP pendurar
-    connectionTimeout: 6000,
-    socketTimeout: 6000,
-    greetingTimeout: 4000
+    // Timeout mais generoso pra contornar Render
+    connectionTimeout: 15000,
+    socketTimeout: 15000,
+    greetingTimeout: 8000,
+    tls: {
+      // Não falhar em certificados auto-assigned (Render pode usar MITM)
+      rejectUnauthorized: false
+    }
   });
   return transporter;
 }
@@ -114,7 +119,12 @@ const SISTEMA = process.env.SISTEMA_NOME || 'Recrutamento e Seleção';
 // Remetente "amigável" (pode ser contato@vagasio.com.br).
 // Pra Gmail SMTP, o `envelope sender` vai ser o EMAIL_FROM_VAGASIO || EMAIL_FROM
 // (Gmail só permite enviar autenticado com o mesmo user).
-const REMETENTE_AMIGAVEL = process.env.EMAIL_REMETENTE_AMIGAVEL || `${SISTEMA} <contato@vagasio.com.br>`;
+//
+// IMPORTANTE (jul/2026): a API do Render tá bugada e não deixa alterar EMAIL_FROM via PUT.
+// Pra contornar, o remetente amigável tá HARDCODED pra contato@vagasio.com.br aqui.
+// Se precisar mudar de novo, edite essa linha e faça deploy.
+const REMETENTE_AMIGAVEL = process.env.EMAIL_REMETENTE_AMIGAVEL
+                            || 'Recrutamento e Seleção <contato@vagasio.com.br>';
 
 async function enviarEmail({ to, subject, html, text, from }) {
   // 1ª opção: Resend (se configurado) — permite from customizado
