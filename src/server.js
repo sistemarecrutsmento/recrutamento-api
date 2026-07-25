@@ -1,3 +1,4 @@
+// BUILD_TIMESTAMP: 2026-07-25T21:20-Z — commit forçando redeploy
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
