@@ -6,6 +6,8 @@
  *
  * Autenticação: Service Account (vagasio-meet-bot) com DWD autorizada
  * Escopos: calendar.events, meetings.space.created
+ *
+ * build: 2026-07-25T20:50-forçar-redeploy
  */
 
 const { google } = require('googleapis');
