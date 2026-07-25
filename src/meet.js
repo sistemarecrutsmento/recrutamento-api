@@ -199,10 +199,39 @@ async function testarConexao() {
   return { ok: true, total: r.data.items?.length || 0 };
 }
 
+/**
+ * Lista os próximos N eventos do Calendar (pra debug).
+ */
+async function listarEventosFuturos(maxResults = 5) {
+  const calendar = getCalendarClient();
+  const r = await calendar.events.list({
+    calendarId: 'primary',
+    maxResults,
+    timeMin: new Date().toISOString(),
+    singleEvents: true,
+    orderBy: 'startTime',
+  });
+  const items = r.data.items || [];
+  return {
+    ok: true,
+    total: items.length,
+    eventos: items.map(ev => ({
+      id: ev.id,
+      summary: ev.summary,
+      start: ev.start?.dateTime || ev.start?.date,
+      end: ev.end?.dateTime || ev.end?.date,
+      meetLink: ev.hangoutLink || (ev.conferenceData?.entryPoints?.find(e => e.entryPointType === 'video')?.uri) || null,
+      htmlLink: ev.htmlLink,
+      attendees: ev.attendees?.map(a => a.email) || [],
+    })),
+  };
+}
+
 module.exports = {
   criarEventoMeet,
   atualizarEventoMeet,
   deletarEventoMeet,
   testarConexao,
+  listarEventosFuturos,
   getCalendarClient,
 };
