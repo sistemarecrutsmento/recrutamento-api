@@ -1,14 +1,14 @@
 {
   "name": "recrutamento-api",
   "version": "1.0.0",
-  "description": "API do Recrutamento e Seleção",
+  "description": "API do Recrutamento e Sele\u00e7\u00e3o",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
     "dev": "nodemon src/server.js"
   },
   "engines": {
-    "node": ">=18.0.0"
+    "node": "18.20.4"
   },
   "dependencies": {
     "bcryptjs": "^3.0.2",
@@ -20,6 +20,6 @@
     "pg": "^8.12.0",
     "axios": "^1.7.4",
     "cloudinary": "^2.5.1",
-    "googleapis": "^144.0.0"
+    "googleapis": "^100.0.0"
   }
 }
