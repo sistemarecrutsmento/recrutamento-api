@@ -19,14 +19,18 @@ function getWeb3FormsKey() {
 let transporter = null;
 function getTransporter() {
   if (transporter) return transporter;
-  if (!process.env.EMAIL_FROM || !process.env.EMAIL_APP_PASSWORD) return null;
+  // Resolve o usuário SMTP: prioriza EMAIL_FROM_VAGASIO (fixo do domínio), depois EMAIL_FROM (Gmail)
+  // IMPORTANTE: com Gmail SMTP, o usuário precisa bater com o EMAIL_APP_PASSWORD. Mas pra envio,
+  // o `from:` pode ser outro e-mail (Gmail reescreve o envelope sender pra entregar).
+  const smtpUser = process.env.EMAIL_FROM_VAGASIO || process.env.EMAIL_FROM;
+  if (!smtpUser || !process.env.EMAIL_APP_PASSWORD) return null;
   // Usa Gmail SMTP com SSL porta 465 (mais confiável em ambientes como Render)
   transporter = nodemailer.createTransport({
     host: 'smtp.gmail.com',
     port: 465,
     secure: true, // usa SSL
     auth: {
-      user: process.env.EMAIL_FROM,
+      user: smtpUser,
       pass: process.env.EMAIL_APP_PASSWORD
     },
     // Timeout agressivo: não deixa o SMTP pendurar
@@ -106,11 +110,17 @@ const SISTEMA = process.env.SISTEMA_NOME || 'Recrutamento e Seleção';
 // ===== Estratégia de envio =====
 // Prioridade: Resend (HTTP API) > Web3Forms (HTTP API) > Gmail SMTP
 // HTTP APIs funcionam onde SMTP tá bloqueado, tipo Render
+// ===== E-mail remetente =====
+// Remetente "amigável" (pode ser contato@vagasio.com.br).
+// Pra Gmail SMTP, o `envelope sender` vai ser o EMAIL_FROM_VAGASIO || EMAIL_FROM
+// (Gmail só permite enviar autenticado com o mesmo user).
+const REMETENTE_AMIGAVEL = process.env.EMAIL_REMETENTE_AMIGAVEL || `${SISTEMA} <contato@vagasio.com.br>`;
+
 async function enviarEmail({ to, subject, html, text, from }) {
-  // 1ª opção: Resend (se configurado)
+  // 1ª opção: Resend (se configurado) — permite from customizado
   if (getResendKey()) {
     console.log('[email] Enviando via Resend para:', to, '| subject:', subject);
-    return enviarViaResend({ from, to, subject, html, text });
+    return enviarViaResend({ from: from || REMETENTE_AMIGAVEL, to, subject, html, text });
   }
   // 2ª opção: Web3Forms (se configurado)
   if (getWeb3FormsKey()) {
@@ -121,8 +131,14 @@ async function enviarEmail({ to, subject, html, text, from }) {
   // 3ª opção: Gmail SMTP (fallback final)
   const t = getTransporter();
   if (!t) throw new Error('Nenhum provedor de e-mail configurado (RESEND_API_KEY, WEB3FORMS_ACCESS_KEY ou EMAIL_FROM/EMAIL_APP_PASSWORD)');
+  // Gmail SMTP: usa o e-mail "amigável" como remetente (Gmail substitui o envelope-pelo-do-auth)
+  const smtpUser = process.env.EMAIL_FROM_VAGASIO || process.env.EMAIL_FROM;
   return t.sendMail({
-    from: from || `"${SISTEMA}" <${process.env.EMAIL_FROM}>`,
+    from: from || REMETENTE_AMIGAVEL,
+    envelope: {
+      from: smtpUser,        // envelope sender (autenticado)
+      to: Array.isArray(to) ? to.join(',') : to
+    },
     to,
     subject,
     html,
