@@ -3187,7 +3187,9 @@ app.get('/api/empresa/candidatura/:id', authEmpresa, async (req, res) => {
 app.post('/api/empresa/candidatura/:id/acao', authEmpresa, async (req, res) => {
   const { empresa_id, nome: empresa_nome } = req.user;
   const { id } = req.params;
-  const { acao, motivo } = req.body; // acao: 'avancar' | 'reprovar' | 'comentar'
+  const { acao, motivo, comentario } = req.body; // acao: 'avancar' | 'reprovar' | 'comentar'
+    // 'comentario' tem prioridade sobre 'motivo' (frontend manda ambos pra garantir)
+    const parecer = (comentario || motivo || '').trim();
   if (!['avancar', 'reprovar', 'comentar'].includes(acao)) {
     return res.status(400).json({ erro: 'Ação inválida' });
   }
@@ -3216,12 +3218,12 @@ app.post('/api/empresa/candidatura/:id/acao', authEmpresa, async (req, res) => {
     if (acao === 'avancar') {
       novaEtapa = cand.etapa_atual + 1;
       // Não passa do total de etapas (deixar pro admin finalizar contratação)
-      hist.push({ tipo: 'avancar', por: `empresa:${empresa_nome}`, quando: agora, etapa_de: cand.etapa_atual, etapa_para: novaEtapa });
+      hist.push({ tipo: 'avancar', por: `empresa:${empresa_nome}`, quando: agora, etapa_de: cand.etapa_atual, etapa_para: novaEtapa, motivo: parecer || '' });
     } else if (acao === 'reprovar') {
       novoStatus = 'rejeitado';
-      hist.push({ tipo: 'reprovar', por: `empresa:${empresa_nome}`, quando: agora, motivo: motivo || '' });
+      hist.push({ tipo: 'reprovar', por: `empresa:${empresa_nome}`, quando: agora, motivo: parecer || '' });
     } else if (acao === 'comentar') {
-      hist.push({ tipo: 'comentario', por: `empresa:${empresa_nome}`, quando: agora, texto: motivo || '' });
+      hist.push({ tipo: 'comentario', por: `empresa:${empresa_nome}`, quando: agora, texto: parecer });
     }
 
     await pool.query(
