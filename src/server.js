@@ -3204,9 +3204,9 @@ app.post('/api/empresa/candidatura/:id/acao', authEmpresa, async (req, res) => {
     if (acc.rows.length === 0) return res.status(403).json({ erro: 'Sem acesso a esta candidatura' });
     const cand = acc.rows[0];
 
-    // REGRA: só pode agir na etapa 4 (Entrevista com gestor/empresa)
-    if ((acao === 'avancar' || acao === 'reprovar') && cand.etapa_atual !== 4) {
-      return res.status(403).json({ erro: 'Você só pode agir na etapa de entrevista com a empresa (etapa 4)' });
+    // REGRA: a empresa só pode comentar ou agir na etapa 4 (Entrevista com gestor/empresa)
+    if (['avancar', 'reprovar', 'comentar'].includes(acao) && cand.etapa_atual !== 4) {
+      return res.status(403).json({ erro: 'A empresa só pode comentar, aprovar ou reprovar na etapa de entrevista com a empresa (etapa 4)' });
     }
 
     // Adiciona entrada no histórico
