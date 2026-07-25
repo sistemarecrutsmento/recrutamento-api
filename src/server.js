@@ -1899,12 +1899,15 @@ app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
       dataHoraFinal = d.toISOString();
     }
 
-    // === GERA LINK DO GOOGLE MEET (se não veio do frontend) ===
-    let linkGerado = link_reuniao;
+    // === Decide se gera link do Google Meet ===
+    // Online: gera Meet + envia e-mail
+    // Presencial: NÃO gera Meet, só salva o endereço no `local`
+    const isOnline = !local || /online/i.test(local);
+    let linkGerado = isOnline ? null : null; // começa null
     let googleEventId = null;
     let meetHtmlLink = null;
 
-    if (!linkGerado && process.env.GCP_SERVICE_ACCOUNT_JSON) {
+    if (isOnline && !link_reuniao && process.env.GCP_SERVICE_ACCOUNT_JSON) {
       try {
         const etapaNome = etapa === 3 ? 'RH' : 'Gestor';
         const meetResult = await meet.criarEventoMeet({
@@ -1925,8 +1928,12 @@ app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
         console.error('[MEET ERRO]', meetErr.message);
         return res.status(500).json({ erro: 'Falha ao criar reunião no Google Meet: ' + meetErr.message });
       }
-    } else if (!linkGerado) {
-      // Fallback: gera link placeholder se Meet não tá configurado (não deveria acontecer em prod)
+    } else if (!isOnline) {
+      console.log(`[ENTREVISTA] Presencial — Meet não gerado. Local: ${local}`);
+    }
+
+    // Se for online e NÃO veio link_reuniao do frontend E NÃO conseguiu gerar Meet, usa placeholder
+    if (isOnline && !linkGerado && !link_reuniao && !process.env.GCP_SERVICE_ACCOUNT_JSON) {
       linkGerado = `https://meet.google.com/pending-${candidatura_id}-${Date.now()}`;
       console.warn('[MEET] GCP_SERVICE_ACCOUNT_JSON não configurada — usando link placeholder');
     }
@@ -1953,7 +1960,8 @@ app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
       tipo: 'entrevista',
       data_hora: dataHoraFinal,
       por: req.admin?.nome || 'Recrutador',
-      detalhes: `Data: ${dataFormatada}${linkGerado ? ` • Meet: ${linkGerado}` : ''}${local ? ` • Local: ${local}` : ''}`
+      formato: isOnline ? 'online' : 'presencial',
+      detalhes: `Data: ${dataFormatada}${linkGerado ? ` • Meet: ${linkGerado}` : ''}${local && !isOnline ? ` • ${local}` : ''}`
     }]), candidatura_id]);
 
     res.json({ ok: true, entrevista, googleEventId, meetHtmlLink });
