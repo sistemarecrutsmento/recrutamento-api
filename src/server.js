@@ -89,6 +89,17 @@ app.post('/api/_debug/meet-criar-teste', async (req, res) => {
   }
 });
 
+// Lista os próximos 5 eventos do Calendar (pra debug)
+app.get('/api/_debug/meet-listar-teste', async (req, res) => {
+  try {
+    const r = await meet.listarEventosFuturos(5);
+    res.json({ ok: true, ...r });
+  } catch (e) {
+    console.error('[MEET LISTAR TESTE]', e);
+    res.status(500).json({ ok: false, erro: e.message });
+  }
+});
+
 // ============= DEBUG TEMPORÁRIO (remover depois) =============
 // Tenta enviar e-mail de teste via Resend e mostra erro/sucesso
 // v2 - força redeploy p/ pegar RESEND_API_KEY
