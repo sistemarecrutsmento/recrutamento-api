@@ -3040,6 +3040,7 @@ app.get('/api/empresa/vagas-com-candidaturas', authEmpresa, async (req, res) => 
         COUNT(c.id) FILTER (WHERE c.status = 'em_analise') as em_analise,
         COUNT(c.id) FILTER (WHERE c.status = 'em_andamento') as em_andamento,
         COUNT(c.id) FILTER (WHERE c.status = 'contratado') as contratados,
+        COUNT(c.id) FILTER (WHERE c.status = 'rejeitado') as reprovados,
         COUNT(c.id) FILTER (WHERE c.status IN ('em_analise','em_andamento')) as total_ativas
       FROM empresa_vaga_acesso eva
       JOIN vagas v ON v.id = eva.vaga_id
