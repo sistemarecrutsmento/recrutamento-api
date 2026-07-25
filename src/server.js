@@ -1855,11 +1855,10 @@ app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
     // Busca dados do candidato e vaga pra montar o título/descrição do Meet
     const candFull = await pool.query(`
       SELECT c.id, c.candidato_id, cand.nome AS candidato_nome, cand.email AS candidato_email,
-             v.titulo AS vaga_titulo, v.empresa_id, e.nome AS empresa_nome
+             v.titulo AS vaga_titulo, v.empresa AS empresa_nome
       FROM candidaturas c
       JOIN candidatos cand ON cand.id = c.candidato_id
       JOIN vagas v ON v.id = c.vaga_id
-      LEFT JOIN empresas e ON e.id = v.empresa_id
       WHERE c.id = $1
     `, [candidatura_id]);
     const candData = candFull.rows[0];
