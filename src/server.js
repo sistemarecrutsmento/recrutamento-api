@@ -1444,6 +1444,15 @@ app.get('/api/admin/candidatura/:id', authAdmin, async (req, res) => {
     );
     candidatura.experiencias = exps;
 
+    // Buscar entrevistas (a mais recente ativa vence; canceladas não contam)
+    const { rows: entrevistas } = await pool.query(
+      `SELECT * FROM entrevistas
+       WHERE candidatura_id = $1 AND status != 'cancelada'
+       ORDER BY criado_em DESC`,
+      [req.params.id]
+    );
+    candidatura.entrevistas = entrevistas;
+
     res.json({ candidatura });
   } catch (e) {
     console.error('[GET CANDIDATURA]', e);
@@ -1940,10 +1949,10 @@ app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
 
     // Cria a entrevista
     const r = await pool.query(`
-      INSERT INTO entrevistas (candidatura_id, etapa, data_hora, duracao_minutos, local, link_reuniao, observacoes, criado_por)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      INSERT INTO entrevistas (candidatura_id, etapa, data_hora, duracao_minutos, local, link_reuniao, google_event_id, observacoes, criado_por)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
       RETURNING *
-    `, [candidatura_id, etapa, dataHoraFinal, duracao_minutos || 60, local || null, linkGerado, observacoes || null, req.admin?.id || null]);
+    `, [candidatura_id, etapa, dataHoraFinal, duracao_minutos || 60, local || null, linkGerado, googleEventId, observacoes || null, req.admin?.id || null]);
     const entrevista = r.rows[0];
     // Adiciona no histórico da candidatura
     const etapaNome = etapa === 3 ? 'Entrevista RH' : 'Entrevista Gestor';
@@ -1967,6 +1976,54 @@ app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
     res.json({ ok: true, entrevista, googleEventId, meetHtmlLink });
   } catch (e) {
     console.error('[ENTREVISTA CRIAR ERRO]', e);
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+// Cancela uma entrevista (libera novo agendamento) - chamada pelo botão "❌ Falhou" na agenda
+app.post('/api/admin/entrevista/:id/cancelar', authAdmin, async (req, res) => {
+  try {
+    const id = parseInt(req.params.id);
+    const { motivo } = req.body || {};
+
+    const { rows: eRows } = await pool.query('SELECT * FROM entrevistas WHERE id = $1', [id]);
+    if (eRows.length === 0) return res.status(404).json({ erro: 'Entrevista não encontrada' });
+    const entrevista = eRows[0];
+
+    // Marca como cancelada (libera o slot pro próximo agendamento)
+    await pool.query(
+      `UPDATE entrevistas SET status = 'cancelada', atualizado_em = NOW() WHERE id = $1`,
+      [id]
+    );
+
+    // Tenta deletar o evento no Google Calendar (se houver)
+    if (entrevista.google_event_id) {
+      try {
+        await meet.deletarEventoMeet(entrevista.google_event_id);
+        console.log(`[MEET] Evento ${entrevista.google_event_id} deletado (entrevista cancelada)`);
+      } catch (e) {
+        console.warn('[MEET] Não consegui deletar evento:', e.message);
+      }
+    }
+
+    // Histórico na candidatura
+    await pool.query(`
+      UPDATE candidaturas
+      SET historico = COALESCE(historico, '[]'::jsonb) || $1::jsonb,
+          atualizada_em = NOW()
+      WHERE id = $2
+    `, [JSON.stringify([{
+      acao: `❌ Entrevista cancelada (etapa ${entrevista.etapa})`,
+      etapa: entrevista.etapa,
+      em: new Date().toISOString(),
+      tipo: 'entrevista_cancelada',
+      por: req.admin?.nome || 'Recrutador',
+      detalhes: motivo ? `Motivo: ${motivo}` : 'Candidato/recrutador não compareceu.'
+    }]), entrevista.candidatura_id]);
+
+    res.json({ ok: true, entrevista_id: id, status: 'cancelada' });
+  } catch (e) {
+    console.error('[ENTREVISTA CANCELAR ERRO]', e);
     res.status(500).json({ erro: e.message });
   }
 });
