@@ -45,6 +45,21 @@ app.use((err, req, res, next) => {
 // ============= SAÚDE =============
 app.get('/api/saude', (req, res) => res.json({ ok: true, sistema: process.env.SISTEMA_NOME, hora: new Date().toISOString() }));
 
+// ============= SENTINELA — confirma se código novo (com Meet) está rodando =============
+app.get('/api/_debug/versao', (req, res) => {
+  res.json({
+    ok: true,
+    versao: '2026-07-25-MEET-OK',
+    meet_carregado: typeof require('./meet').criarEventoMeet === 'function',
+    buildCommit: process.env.RENDER_GIT_COMMIT,
+    porta: process.env.PORT || 10000,
+    hora: new Date().toISOString(),
+    node: process.version,
+    uptime_s: Math.round(process.uptime()),
+    envRender: process.env.RENDER === 'true'
+  });
+});
+
 // ============= DEBUG TEMPORÁRIO (remover depois) =============
 // Tenta enviar e-mail de teste via Resend e mostra erro/sucesso
 // v2 - força redeploy p/ pegar RESEND_API_KEY
@@ -1933,19 +1948,6 @@ app.post('/api/_debug/fix-entrevistas', async (req, res) => {
     console.error('[FIX ENTREVISTAS]', e);
     res.status(500).json({ erro: e.message });
   }
-});
-
-// Rota sentinela: confirma se o código novo (com Meet) está rodando
-app.get('/api/_debug/versao', (req, res) => {
-  res.json({
-    ok: true,
-    versao: '2026-07-25-MEET-OK',
-    meet_carregado: typeof meet === 'object' && typeof meet.testarConexao === 'function',
-    porta: process.env.PORT || 10000,
-    hora: new Date().toISOString(),
-    node: process.version,
-    uptime_s: Math.round(process.uptime())
-  });
 });
 
 // Testa a conexão com o Google Meet (lê 1 evento futuro do admin)
