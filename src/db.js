@@ -229,12 +229,14 @@ async function init() {
         duracao_minutos INTEGER DEFAULT 60,
         local TEXT,
         link_reuniao TEXT,
+        google_event_id TEXT,
         observacoes TEXT,
         status TEXT DEFAULT 'agendada',
         criado_por INTEGER REFERENCES admins(id),
         criado_em TIMESTAMP DEFAULT NOW(),
         atualizado_em TIMESTAMP DEFAULT NOW()
       );
+      ALTER TABLE entrevistas ADD COLUMN IF NOT EXISTS google_event_id TEXT;
 
       -- Chat Empresa <-> RH/Recrutador (jul/2026)
       CREATE TABLE IF NOT EXISTS empresa_chat (
