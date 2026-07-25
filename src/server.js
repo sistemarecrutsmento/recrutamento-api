@@ -1966,8 +1966,8 @@ app.post('/api/_debug/meet-criar-teste', async (req, res) => {
     const r = await meet.criarEventoMeet({
       summary: '🧪 TESTE VagasIO Meet',
       description: 'Evento de teste criado pela API. Pode ignorar.',
-      startISO: start.toISOString(),
-      endISO: end.toISOString(),
+      startTime: start.toISOString(),
+      durationMinutes: 30,
       attendees: [],
     });
     res.json({ ok: true, ...r });
