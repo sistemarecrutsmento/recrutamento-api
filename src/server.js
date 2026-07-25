@@ -2964,13 +2964,109 @@ app.get('/api/empresa/dashboard', authEmpresa, async (req, res) => {
       WHERE eva.empresa_id = $1 AND c.etapa_atual >= 4 AND c.status = 'em_andamento'
     `, [empresa_id]);
 
+    // ==== Entrevistas agendadas (próximos + atrasadas recentes, das vagas da empresa) ====
+    const entrevistasAgendadas = await pool.query(`
+      SELECT COUNT(*)::int as total FROM entrevistas e
+      JOIN candidaturas c ON c.id = e.candidatura_id
+      JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id
+      WHERE eva.empresa_id = $1 AND e.status = 'agendada'
+        AND e.data_hora >= NOW() - INTERVAL '3 days'
+        AND e.data_hora < NOW() + INTERVAL '30 days'
+    `, [empresa_id]);
+
+    // ==== Candidatos por etapa do processo (somente vagas da empresa) ====
+    const etapas = await pool.query(`
+      SELECT etapa_atual, COUNT(*)::int as total FROM candidaturas c
+      JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id
+      WHERE eva.empresa_id = $1 AND c.status NOT IN ('reprovado')
+      GROUP BY etapa_atual
+      ORDER BY etapa_atual
+    `, [empresa_id]);
+    const etapasMap = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0 };
+    etapas.rows.forEach(r => { etapasMap[r.etapa_atual] = r.total; });
+
+    // ==== Próximas entrevistas (lista) ====
+    const proximas = await pool.query(`
+      SELECT
+        e.id, e.candidatura_id, e.etapa, e.data_hora, e.duracao_minutos,
+        e.local, e.link_reuniao, e.observacoes, e.status,
+        v.id as vaga_id, v.titulo as vaga_titulo, v.empresa,
+        cd.id as candidato_id, cd.nome as candidato_nome, cd.foto_url, cd.email
+      FROM entrevistas e
+      JOIN candidaturas c ON c.id = e.candidatura_id
+      JOIN vagas v ON v.id = c.vaga_id
+      JOIN empresa_vaga_acesso eva ON eva.vaga_id = v.id
+      JOIN candidatos cd ON cd.id = c.candidato_id
+      WHERE eva.empresa_id = $1
+        AND e.status = 'agendada'
+        AND e.data_hora >= NOW() - INTERVAL '3 days'
+        AND e.data_hora < NOW() + INTERVAL '30 days'
+      ORDER BY e.data_hora ASC
+      LIMIT 10
+    `, [empresa_id]);
+
+    // ==== Atividades recentes (histórico das candidaturas) ====
+    const atividadesRes = await pool.query(`
+      SELECT
+        c.id, c.historico, c.atualizada_em,
+        cd.nome as candidato_nome, v.titulo as vaga_titulo, v.id as vaga_id
+      FROM candidaturas c
+      JOIN vagas v ON v.id = c.vaga_id
+      JOIN empresa_vaga_acesso eva ON eva.vaga_id = v.id
+      JOIN candidatos cd ON cd.id = c.candidato_id
+      WHERE eva.empresa_id = $1 AND c.historico IS NOT NULL AND c.historico != '[]'::jsonb
+      ORDER BY c.atualizada_em DESC NULLS LAST
+      LIMIT 8
+    `, [empresa_id]);
+    const atividadesRecentes = [];
+    atividadesRes.rows.forEach(r => {
+      const hist = typeof r.historico === 'string' ? JSON.parse(r.historico) : (r.historico || []);
+      const ultimo = hist[hist.length - 1];
+      if (ultimo) {
+        atividadesRecentes.push({
+          texto: ultimo.acao || ultimo.evento || 'Atualização',
+          candidato: r.candidato_nome,
+          vaga: r.vaga_titulo,
+          vaga_id: r.vaga_id,
+          candidatura_id: r.id,
+          quando: ultimo.em || r.atualizada_em,
+          tipo: ultimo.tipo || 'sistema'
+        });
+      }
+    });
+    if (atividadesRecentes.length === 0) {
+      const fallback = await pool.query(`
+        SELECT c.id as candidatura_id, c.criada_em as quando,
+          cd.nome as candidato, v.titulo as vaga, v.id as vaga_id
+        FROM candidaturas c
+        JOIN vagas v ON v.id = c.vaga_id
+        JOIN empresa_vaga_acesso eva ON eva.vaga_id = v.id
+        JOIN candidatos cd ON cd.id = c.candidato_id
+        WHERE eva.empresa_id = $1
+        ORDER BY c.criada_em DESC LIMIT 5
+      `, [empresa_id]);
+      fallback.rows.forEach(r => atividadesRecentes.push({
+        texto: 'Inscrição realizada',
+        candidato: r.candidato,
+        vaga: r.vaga,
+        vaga_id: r.vaga_id,
+        candidatura_id: r.candidatura_id,
+        quando: r.quando,
+        tipo: 'inscricao'
+      }));
+    }
+
     res.json({
       kpis: {
         vagas_liberadas: vagas.rows.length,
         total_candidatos: totalCandidatos.rows[0].total,
         contratacoes: contratacoes.rows[0].total,
-        em_etapa_gestor: emEtapa4.rows[0].total
+        em_etapa_gestor: emEtapa4.rows[0].total,
+        entrevistas_agendadas: entrevistasAgendadas.rows[0].total
       },
+      etapas: etapasMap,
+      proximas: proximas.rows,
+      atividades: atividadesRecentes,
       vagas: vagas.rows
     });
   } catch (e) {
