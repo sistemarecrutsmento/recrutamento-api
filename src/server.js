@@ -1574,7 +1574,8 @@ app.get('/api/admin/vagas', authAdmin, async (req, res) => {
   if (area) addWhere('v.area = ?', area);
   if (search) {
     const s = '%' + search.toLowerCase() + '%';
-    addWhere('(LOWER(v.titulo) LIKE ? OR LOWER(v.empresa) LIKE ?)', s, s);
+    // ILIKE é case+accent-insensitive no Postgres
+    addWhere('(v.titulo ILIKE ? OR v.empresa ILIKE ?)', s, s);
   }
   const whereSql = wheres.length ? 'WHERE ' + wheres.join(' AND ') : '';
 
