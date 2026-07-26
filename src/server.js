@@ -1163,14 +1163,17 @@ app.get('/api/admin/dashboard', authAdmin, async (req, res) => {
     const etapasMap = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0, 7: 0 };
     etapas.rows.forEach(r => { etapasMap[r.etapa_atual] = r.total; });
 
-    // ==== Taxa de conversão (contratados / total de candidatos que entraram no processo) ====
+    // ==== Taxa de conversão pós-triagem ====
+    // Numerador: candidatos contratados
+    // Denominador: quem avançou da triagem em diante (etapa_atual >= 3 OU status = contratado)
+    //   - exclui quem foi rejeitado logo na inscrição (etapa 1) e quem ainda tá aguardando triagem
     const conv = await pool.query(`
       SELECT
         (SELECT COUNT(*) FROM candidaturas WHERE status = 'contratado')::int as contratados,
-        (SELECT COUNT(*) FROM candidaturas)::int as total_candidaturas
+        (SELECT COUNT(*) FROM candidaturas WHERE etapa_atual >= 3 OR status = 'contratado')::int as passaram_triagem
     `);
-    const taxaConversao = conv.rows[0].total_candidaturas > 0
-      ? +(conv.rows[0].contratados / conv.rows[0].total_candidaturas * 100).toFixed(1)
+    const taxaConversao = conv.rows[0].passaram_triagem > 0
+      ? +(conv.rows[0].contratados / conv.rows[0].passaram_triagem * 100).toFixed(1)
       : 0;
     // Histórico simulado baseado em meses anteriores (pode ser melhorado com snapshot real depois)
     const historicoConversao = [
