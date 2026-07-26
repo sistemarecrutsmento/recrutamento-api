@@ -1092,7 +1092,7 @@ app.post('/api/admin/login', async (req, res) => {
 app.get('/api/admin/vagas-fechadas-sem-contratacao', authAdmin, async (req, res) => {
   try {
     const { rows } = await pool.query(`
-      SELECT v.id, v.titulo, v.empresa, v.cidade, v.estado, v.status, v.criada_em, v.atualizada_em,
+      SELECT v.id, v.titulo, v.empresa, v.cidade, v.estado, v.status, v.criada_em,
         (SELECT COUNT(*)::int FROM candidaturas c WHERE c.vaga_id = v.id) as total_candidatos,
         (SELECT MAX(c.atualizada_em) FROM candidaturas c WHERE c.vaga_id = v.id) as ultima_mov
       FROM vagas v
@@ -1101,7 +1101,7 @@ app.get('/api/admin/vagas-fechadas-sem-contratacao', authAdmin, async (req, res)
           SELECT 1 FROM candidaturas c
           WHERE c.vaga_id = v.id AND c.status = 'contratado'
         )
-      ORDER BY COALESCE(v.atualizada_em, v.criada_em) DESC
+      ORDER BY v.criada_em DESC
     `);
     res.json({ vagas: rows });
   } catch (e) {
