@@ -1535,13 +1535,12 @@ app.post('/api/admin/vagas', authAdmin, async (req, res) => {
 });
 
 app.get('/api/admin/_debug-busca-vaga', authAdmin, async (req, res) => {
-  // TEMPORÁRIO — testar REGEXP_REPLACE no Postgres
+  // TEMPORÁRIO — testar TRANSLATE no Postgres
   try {
     const r = await pool.query(`
       SELECT id, titulo,
-             REGEXP_REPLACE(LOWER(titulo), '[áàâãäéèêëíìîïóòôõöúùûüç]', '', 'g') AS titulo_sem_acento,
-             CASE WHEN titulo ILIKE '%estagiario%' THEN 'match-original' ELSE 'no-match' END AS ilike_test,
-             CASE WHEN REGEXP_REPLACE(LOWER(titulo), '[áàâãäéèêëíìîïóòôõöúùûüç]', '', 'g') LIKE '%estagiario%' THEN 'match-sem' ELSE 'no-match-sem' END AS sem_acento_test
+             TRANSLATE(LOWER(titulo), 'áàâãäéèêëíìîïóòôõöúùûüç', 'aaaaaeeeeiiiioooouuuucc') AS titulo_sem_acento,
+             CASE WHEN TRANSLATE(LOWER(titulo), 'áàâãäéèêëíìîïóòôõöúùûüç', 'aaaaaeeeeiiiioooouuuucc') LIKE '%estagiario%' THEN 'match' ELSE 'no-match' END AS teste
       FROM vagas
       ORDER BY id DESC LIMIT 10
     `);
@@ -1591,23 +1590,23 @@ app.get('/api/admin/vagas', authAdmin, async (req, res) => {
   if (area) addWhere('v.area = ?', area);
   if (search) {
     // Busca tolerante a acentos e case sem depender de extensão Postgres.
-    // Estratégia: geramos 4 combinações (com/sem acento x termo/coluna) e unificamos com OR.
-    // Isso resolve "Estagiário" / "estagiario" / "ESTAGIARIO" / "ESTAGIÁRIO" todos funcionando.
+    // TRANSLATE substitui cada caractere acentuado pelo seu equivalente sem acento
+    // (á->a, é->e, ç->c, etc). Cobre "Estagiário" vs "estagiario" corretamente.
     const raw = search.toLowerCase();
-    const norm = (str) => str
+    const termo = '%' + raw + '%';
+    const termoSem = '%' + raw
       .replace(/[áàâãä]/g, 'a')
       .replace(/[éèêë]/g, 'e')
       .replace(/[íìîï]/g, 'i')
       .replace(/[óòôõö]/g, 'o')
       .replace(/[úùûü]/g, 'u')
-      .replace(/ç/g, 'c');
-    const termoCom = '%' + raw + '%';
-    const termoSem = '%' + norm(raw) + '%';
+      .replace(/ç/g, 'c') + '%';
     addWhere(
-      `(LOWER(v.titulo) LIKE ? OR LOWER(v.empresa) LIKE ?
-     OR REGEXP_REPLACE(LOWER(v.titulo), '[áàâãäéèêëíìîïóòôõöúùûüç]', '', 'g') LIKE ?
-     OR REGEXP_REPLACE(LOWER(v.empresa), '[áàâãäéèêëíìîïóòôõöúùûüç]', '', 'g') LIKE ?)`,
-      termoCom, termoCom, termoSem, termoSem
+      `(LOWER(v.titulo) LIKE ?
+     OR LOWER(v.empresa) LIKE ?
+     OR TRANSLATE(LOWER(v.titulo),  'áàâãäéèêëíìîïóòôõöúùûüç', 'aaaaaeeeeiiiioooouuuucc') LIKE ?
+     OR TRANSLATE(LOWER(v.empresa), 'áàâãäéèêëíìîïóòôõöúùûüç', 'aaaaaeeeeiiiioooouuuucc') LIKE ?)`,
+      termo, termo, termoSem, termoSem
     );
   }
   const whereSql = wheres.length ? 'WHERE ' + wheres.join(' AND ') : '';
