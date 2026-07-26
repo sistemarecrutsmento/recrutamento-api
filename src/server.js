@@ -1573,23 +1573,24 @@ app.get('/api/admin/vagas', authAdmin, async (req, res) => {
   if (empresa) addWhere('v.empresa = ?', empresa);
   if (area) addWhere('v.area = ?', area);
   if (search) {
-    // Busca case+accent-insensitive sem depender de extensão Postgres.
-    // Estratégia: REGEXP_REPLACE remove acentos comuns de AMBOS os lados (termo e coluna)
-    // no momento da comparação. Cobre o caso de "Estagiário" vs "estagiario".
-    const s = '%' + search.toLowerCase() + '%';
-    const semAcento = (str) => str
+    // Busca tolerante a acentos e case sem depender de extensão Postgres.
+    // Estratégia: geramos 4 combinações (com/sem acento x termo/coluna) e unificamos com OR.
+    // Isso resolve "Estagiário" / "estagiario" / "ESTAGIARIO" / "ESTAGIÁRIO" todos funcionando.
+    const raw = search.toLowerCase();
+    const norm = (str) => str
       .replace(/[áàâãä]/g, 'a')
       .replace(/[éèêë]/g, 'e')
       .replace(/[íìîï]/g, 'i')
       .replace(/[óòôõö]/g, 'o')
       .replace(/[úùûü]/g, 'u')
       .replace(/ç/g, 'c');
-    const sNorm = semAcento(s);
-    // Comparamos a versão normalizada do termo contra a versão normalizada da coluna
+    const termoCom = '%' + raw + '%';
+    const termoSem = '%' + norm(raw) + '%';
     addWhere(
-      `(REGEXP_REPLACE(LOWER(v.titulo),    '[áàâãäéèêëíìîïóòôõöúùûüç]', '', 'g') LIKE ?
-    OR REGEXP_REPLACE(LOWER(v.empresa),   '[áàâãäéèêëíìîïóòôõöúùûüç]', '', 'g') LIKE ?)`,
-      sNorm, sNorm
+      `(LOWER(v.titulo) LIKE ? OR LOWER(v.empresa) LIKE ?
+     OR REGEXP_REPLACE(LOWER(v.titulo), '[áàâãäéèêëíìîïóòôõöúùûüç]', '', 'g') LIKE ?
+     OR REGEXP_REPLACE(LOWER(v.empresa), '[áàâãäéèêëíìîïóòôõöúùûüç]', '', 'g') LIKE ?)`,
+      termoCom, termoCom, termoSem, termoSem
     );
   }
   const whereSql = wheres.length ? 'WHERE ' + wheres.join(' AND ') : '';
