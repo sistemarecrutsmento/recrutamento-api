@@ -1305,7 +1305,16 @@ app.post('/api/admin/vagas', authAdmin, async (req, res) => {
 });
 
 app.get('/api/admin/vagas', authAdmin, async (req, res) => {
-  const { rows } = await pool.query('SELECT * FROM vagas ORDER BY criada_em DESC');
+  // Aceita ?status=publicada (ou 'pausada', 'fechada') — se não vier, traz tudo
+  const status = (req.query.status || '').toString().trim();
+  let rows;
+  if (status) {
+    const r = await pool.query('SELECT * FROM vagas WHERE status = $1 ORDER BY criada_em DESC', [status]);
+    rows = r.rows;
+  } else {
+    const r = await pool.query('SELECT * FROM vagas ORDER BY criada_em DESC');
+    rows = r.rows;
+  }
   res.json({ vagas: rows });
 });
 
