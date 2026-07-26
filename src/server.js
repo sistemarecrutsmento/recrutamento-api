@@ -113,6 +113,37 @@ app.delete('/api/_debug/meet-deletar/:eventId', async (req, res) => {
 
 // ============= DEBUG TEMPORÁRIO (remover depois) =============
 // Tenta enviar e-mail rico de notificação de mudança de etapa (preview)
+// 🔍 DEBUG TEMPORÁRIO: testa query direta na tabela recrutadores
+app.get('/api/_debug-recrutadores', async (req, res) => {
+  try {
+    console.log('[debug-recrutadores] iniciando teste');
+    const t0 = Date.now();
+    const r1 = await pool.query('SELECT COUNT(*) as total FROM recrutadores');
+    console.log(`[debug-recrutadores] COUNT *: ${Date.now()-t0}ms, total=${r1.rows[0].total}`);
+    
+    const t1 = Date.now();
+    const r2 = await pool.query('SELECT id, nome, email FROM recrutadores LIMIT 5');
+    console.log(`[debug-recrutadores] SELECT simples: ${Date.now()-t1}ms, rows=${r2.rows.length}`);
+    
+    const t2 = Date.now();
+    const r3 = await pool.query(
+      'SELECT id, nome, email, senha_hash, ativo, role, primeiro_acesso FROM recrutadores WHERE email = $1',
+      ['joao.again@vagasio.com.br']
+    );
+    console.log(`[debug-recrutadores] SELECT WHERE: ${Date.now()-t2}ms, rows=${r3.rows.length}`);
+    
+    res.json({
+      ok: true,
+      count: r1.rows[0].total,
+      sample: r2.rows,
+      searched: r3.rows
+    });
+  } catch (e) {
+    console.error('[debug-recrutadores] ERRO:', e.message, e.code);
+    res.json({ ok: false, erro: e.message, code: e.code, detail: e.detail });
+  }
+});
+
 app.get('/api/_debug-email-notificacao', async (req, res) => {
   try {
     const to = req.query.to || 'fabio08dejesusjunior@gmail.com';
