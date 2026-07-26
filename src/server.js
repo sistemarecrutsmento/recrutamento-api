@@ -1296,6 +1296,29 @@ app.get('/api/admin/dashboard', authAdmin, async (req, res) => {
     const taxaDocumentacao = s.total_documentos > 0
       ? Math.round(s.documentos_aprovados / s.total_documentos * 100)
       : 0;
+
+    // ==== Vagas que chegaram em Contratação (etapa 7) em até 30 dias ====
+    // Considera a PRIMEIRA candidatura com status='contratado' dessa vaga.
+    // Pra ter uma estimativa confiável usamos o `atualizada_em` da 1ª contratação - criada_em da vaga.
+    const fechadas30Res = await pool.query(`
+      SELECT
+        COUNT(DISTINCT v.id)::int as vagas_fechadas_30d,
+        (SELECT COUNT(*)::int FROM vagas)::int as total_vagas
+      FROM vagas v
+      WHERE EXISTS (
+        SELECT 1 FROM candidaturas c
+        WHERE c.vaga_id = v.id
+          AND c.status = 'contratado'
+          AND c.atualizada_em IS NOT NULL
+          AND c.atualizada_em - v.criada_em <= INTERVAL '30 days'
+      )
+    `);
+    const f30 = fechadas30Res.rows[0];
+    const vagas_fechadas_30d_total = f30.total_vagas;
+    const vagas_fechadas_30d_qtd = f30.vagas_fechadas_30d;
+    const taxa_fechadas_30d = vagas_fechadas_30d_total > 0
+      ? Math.round(vagas_fechadas_30d_qtd / vagas_fechadas_30d_total * 100)
+      : 0;
     // Tempo médio de contratação (em dias) - diferença entre criada_em e a última entrada do histórico
     const tempoMedioRes = await pool.query(`
       SELECT AVG(EXTRACT(DAY FROM (atualizada_em - criada_em)))::int as dias
@@ -1332,7 +1355,9 @@ app.get('/api/admin/dashboard', authAdmin, async (req, res) => {
       atividades_alertas: atividadesRecentes.filter(a => a.alerta_parado).slice(0, 5),
       kpis_secundarios: {
         tempo_medio_contratacao: tempoMedio,
-        taxa_aprovacao: taxaAprovacao,
+        taxa_aprovacao_30d: taxa_fechadas_30d,
+        taxa_aprovacao_30d_qtd: vagas_fechadas_30d_qtd,
+        taxa_aprovacao_30d_total: vagas_fechadas_30d_total,
         taxa_desistencia: taxaDesistencia,
         vagas_encerradas: s.vagas_encerradas,
         vagas_fechadas_sem_contratacao: vagas_fechadas_sem_contratacao,
