@@ -1245,6 +1245,8 @@ app.get('/api/admin/dashboard', authAdmin, async (req, res) => {
         (SELECT COUNT(DISTINCT empresa) FROM vagas)::int as empresas_ativas,
         (SELECT COUNT(*) FROM candidaturas WHERE status = 'reprovado')::int as reprovados,
         (SELECT COUNT(*) FROM candidaturas WHERE status = 'contratado')::int as contratados_total,
+        (SELECT COUNT(*) FROM candidaturas WHERE status = 'cancelado')::int as desistencias,
+        (SELECT COUNT(*) FROM candidaturas)::int as total_candidaturas,
         (SELECT COUNT(*) FROM documentos_candidatura)::int as total_documentos,
         (SELECT COUNT(*) FROM documentos_candidatura WHERE status = 'aprovado')::int as documentos_aprovados
     `);
@@ -1252,7 +1254,20 @@ app.get('/api/admin/dashboard', authAdmin, async (req, res) => {
     const taxaAprovacao = (s.reprovados + s.contratados_total) > 0
       ? Math.round(s.contratados_total / (s.reprovados + s.contratados_total) * 100)
       : 0;
-    const taxaDesligamento = 0; // sem dado de desligamento ainda
+    const taxaDesistencia = s.total_candidaturas > 0
+      ? Math.round(s.desistencias / s.total_candidaturas * 100)
+      : 0;
+    // Vagas fechadas SEM contratação (status=fechada E 0 contratados)
+    const vagasSemContratacaoRes = await pool.query(`
+      SELECT COUNT(*)::int as qtd
+      FROM vagas v
+      WHERE v.status = 'fechada'
+        AND NOT EXISTS (
+          SELECT 1 FROM candidaturas c
+          WHERE c.vaga_id = v.id AND c.status = 'contratado'
+        )
+    `);
+    const vagas_fechadas_sem_contratacao = vagasSemContratacaoRes.rows[0].qtd;
     const taxaDocumentacao = s.total_documentos > 0
       ? Math.round(s.documentos_aprovados / s.total_documentos * 100)
       : 0;
@@ -1293,8 +1308,9 @@ app.get('/api/admin/dashboard', authAdmin, async (req, res) => {
       kpis_secundarios: {
         tempo_medio_contratacao: tempoMedio,
         taxa_aprovacao: taxaAprovacao,
-        taxa_desligamento: taxaDesligamento,
+        taxa_desistencia: taxaDesistencia,
         vagas_encerradas: s.vagas_encerradas,
+        vagas_fechadas_sem_contratacao: vagas_fechadas_sem_contratacao,
         empresas_ativas: s.empresas_ativas,
         taxa_documentacao: taxaDocumentacao
       },
@@ -2984,6 +3000,44 @@ app.post('/api/candidato/aceitar-proposta/:candidaturaId', authCandidato, async 
 });
 
 // ===== Candidato: recusar proposta =====
+// Candidato desiste da vaga a qualquer momento
+app.post('/api/candidatura/:id/desistir', authCandidato, async (req, res) => {
+  const { motivo } = req.body;
+  const { rows: c } = await pool.query(`
+    SELECT c.*, v.titulo, cd.email as cand_email, cd.nome_completo as cand_nome
+    FROM candidaturas c
+    JOIN vagas v ON v.id = c.vaga_id
+    JOIN candidatos cd ON cd.id = c.candidato_id
+    WHERE c.id = $1`, [req.params.id]);
+  if (c.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
+  const cand = c[0];
+
+  if (cand.cand_email !== req.user.email) return res.status(403).json({ erro: 'Acesso negado' });
+  if (['cancelado','rejeitado','contratado'].includes(cand.status)) {
+    return res.status(400).json({ erro: `Não é possível desistir: candidatura já está como '${cand.status}'` });
+  }
+
+  const historico = Array.isArray(cand.historico) ? [...cand.historico] : [];
+  historico.push({
+    etapa: cand.etapa_atual || 0,
+    status: 'cancelado',
+    acao: 'desistir',
+    mensagem: 'Candidato desistiu da vaga' + (motivo ? `: ${motivo}` : ''),
+    data: new Date().toISOString(),
+    por: cand.cand_email
+  });
+
+  await pool.query(
+    `UPDATE candidaturas
+     SET status = 'cancelado',
+         historico = $1
+     WHERE id = $2`,
+    [JSON.stringify(historico), req.params.id]
+  );
+
+  res.json({ ok: true, mensagem: 'Você desistiu da vaga com sucesso.' });
+});
+
 app.post('/api/candidato/recusar-proposta/:candidaturaId', authCandidato, async (req, res) => {
   const { motivo } = req.body;
   const { rows: c } = await pool.query(`
