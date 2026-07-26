@@ -1325,7 +1325,7 @@ app.get('/api/admin/dashboard', authAdmin, async (req, res) => {
         atual: taxaConversao,
         historico: historicoConversao,
         contratados: conv.rows[0].contratados,
-        total: conv.rows[0].total_candidaturas
+        total: conv.rows[0].passaram_triagem
       },
       proximas_entrevistas: proximas.rows,
       atividades_recentes: atividadesRecentesTrim,
