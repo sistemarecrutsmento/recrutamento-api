@@ -1694,7 +1694,7 @@ app.get('/api/admin/candidatos', authAdmin, async (req, res) => {
     // Inclui info da última candidatura (status + id) + vaga + total de candidaturas
     let sql = `
       SELECT c.id, c.nome, c.email, c.cpf, c.celular, c.cidade, c.estado,
-             c.areas_interesse, c.banco_talentos, c.criado_em,
+             c.areas_interesse, c.banco_talentos, c.criado_em, c.foto_url,
              ult.status AS ultimo_status, ult.id AS ultima_candidatura_id,
              ult.etapa_atual AS ultima_etapa,
              v.titulo AS ultima_vaga_titulo,
@@ -1731,7 +1731,7 @@ app.get('/api/admin/candidato/:id', authAdmin, async (req, res) => {
               acessibilidade, cep, estado, cidade, bairro, logradouro, numero, complemento,
               formacao, instituicao, curso, situacao, data_conclusao,
               primeiro_emprego, banco_talentos, areas_interesse, sobre_voce, experiencia,
-              criado_em
+              criado_em, foto_url
        FROM candidatos WHERE id = $1`, [req.params.id]);
     if (rows.length === 0) return res.status(404).json({ erro: 'Candidato não encontrado' });
     res.json({ candidato: rows[0] });
