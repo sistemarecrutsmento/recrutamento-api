@@ -2918,10 +2918,17 @@ app.post('/api/auth/login-recrutador', async (req, res) => {
   const { email, senha } = req.body;
   if (!email || !senha) return res.status(400).json({ erro: 'E-mail e senha obrigatórios' });
   try {
-    const { rows } = await pool.query(
+    // 🔍 Debug: loga a query exata pra investigar erro 500
+    console.log('[login-recrutador] tentando:', email);
+    const result = await pool.query(
       'SELECT id, nome, email, senha_hash, ativo, role, primeiro_acesso FROM recrutadores WHERE email = $1',
       [email.toLowerCase()]
-    );
+    ).catch((err) => {
+      console.error('[login-recrutador] ERRO na query:', err.message, err.code, err.detail);
+      throw err;
+    });
+    const rows = result.rows;
+    console.log('[login-recrutador] rows:', rows.length);
     if (rows.length === 0) return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
     const r = rows[0];
     if (!r.ativo) return res.status(403).json({ erro: 'Conta desativada. Fale com o admin.' });
