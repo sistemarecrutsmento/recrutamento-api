@@ -1535,17 +1535,89 @@ app.post('/api/admin/vagas', authAdmin, async (req, res) => {
 });
 
 app.get('/api/admin/vagas', authAdmin, async (req, res) => {
-  // Aceita ?status=publicada (ou 'pausada', 'fechada') — se não vier, traz tudo
+  // Filtros aceitos:
+  //   ?status=publicada|pausada|fechada
+  //   ?search=texto   (busca em titulo + empresa)
+  //   ?empresa=texto  (filtro exato)
+  //   ?area=texto     (filtro exato)
+  // Ordenação:
+  //   ?ordenar=criada_em|candidatos|titulo
+  //   ?ordem_dir=ASC|DESC (default DESC)
+  // Paginação:
+  //   ?page=1 (default 1) &limit=10 (default 100, max 100)
   const status = (req.query.status || '').toString().trim();
-  let rows;
-  if (status) {
-    const r = await pool.query('SELECT * FROM vagas WHERE status = $1 ORDER BY criada_em DESC', [status]);
-    rows = r.rows;
-  } else {
-    const r = await pool.query('SELECT * FROM vagas ORDER BY criada_em DESC');
-    rows = r.rows;
+  const search = (req.query.search || '').toString().trim();
+  const empresa = (req.query.empresa || '').toString().trim();
+  const area = (req.query.area || '').toString().trim();
+  const ordenar = (req.query.ordenar || 'criada_em').toString().trim();
+  const ordemDir = ((req.query.ordem_dir || 'DESC').toString().toUpperCase() === 'ASC') ? 'ASC' : 'DESC';
+  const page = Math.max(1, parseInt(req.query.page, 10) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt(req.query.limit, 10) || 100));
+  const offset = (page - 1) * limit;
+
+  // Monta WHERE dinâmico
+  const wheres = [];
+  const values = [];
+  // Substitui placeholders ? em ordem, gerando $1, $2, ...
+  const addWhere = (sql, ...vals) => {
+    vals.forEach(v => values.push(v));
+    let out = sql;
+    let i = values.length - vals.length + 1;
+    while (out.indexOf('?') !== -1) {
+      out = out.replace('?', '$' + i);
+      i++;
+    }
+    wheres.push(out);
+  };
+  if (status) addWhere('v.status = ?', status);
+  if (empresa) addWhere('v.empresa = ?', empresa);
+  if (area) addWhere('v.area = ?', area);
+  if (search) {
+    const s = '%' + search.toLowerCase() + '%';
+    addWhere('(LOWER(v.titulo) LIKE ? OR LOWER(v.empresa) LIKE ?)', s, s);
   }
-  res.json({ vagas: rows });
+  const whereSql = wheres.length ? 'WHERE ' + wheres.join(' AND ') : '';
+
+  // Ordenação (só permite colunas válidas — sem SQL injection)
+  let orderCol;
+  if (ordenar === 'candidatos') orderCol = 'candidatos_count';
+  else if (ordenar === 'titulo') orderCol = 'v.titulo';
+  else orderCol = 'v.criada_em';
+
+  // Query: vagas + LEFT JOIN com contagem de candidatos
+  // IMPORTANTE: a contagem usa LEFT JOIN pra incluir vagas com 0 candidatos.
+  // GROUP BY garante que cada vaga aparece uma vez.
+  const sql = `
+    SELECT v.*, COALESCE(c.cnt, 0)::int AS candidatos_count
+    FROM vagas v
+    LEFT JOIN (
+      SELECT vaga_id, COUNT(*)::int AS cnt
+      FROM candidaturas
+      GROUP BY vaga_id
+    ) c ON c.vaga_id = v.id
+    ${whereSql}
+    ORDER BY ${orderCol} ${ordemDir}, v.id DESC
+    LIMIT ${limit} OFFSET ${offset}
+  `;
+
+  // Query de contagem total (pra paginação)
+  const countSql = `SELECT COUNT(*)::int AS total FROM vagas v ${whereSql}`;
+
+  try {
+    const [rVagas, rTotal] = await Promise.all([
+      pool.query(sql, values),
+      pool.query(countSql, values)
+    ]);
+    res.json({
+      vagas: rVagas.rows,
+      total: rTotal.rows[0].total,
+      page,
+      limit
+    });
+  } catch (err) {
+    console.error('[/api/admin/vagas]', err.message);
+    res.status(500).json({ erro: 'Erro ao listar vagas: ' + err.message });
+  }
 });
 
 app.put('/api/admin/vagas/:id', authAdmin, async (req, res) => {
