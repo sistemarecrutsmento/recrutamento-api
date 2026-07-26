@@ -2,7 +2,22 @@ const { Pool } = require('pg');
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
-  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false
+  ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
+  // Limites importantes pra não travar
+  max: 5,                            // max 5 conexões no pool
+  idleTimeoutMillis: 30_000,         // fecha conexões idle após 30s
+  connectionTimeoutMillis: 10_000,   // timeout pra OBTER conexão: 10s
+  statement_timeout: 15_000,         // SQL individual limitado a 15s (evita pendurar)
+  query_timeout: 15_000
+});
+
+// Helper que sempre aplica statement_timeout por query (defesa em profundidade)
+pool.on('connect', (client) => {
+  client.query('SET statement_timeout = 15s').catch(() => {});
+});
+
+pool.on('error', (err) => {
+  console.error('[DB] erro inesperado no pool:', err.message);
 });
 
 async function init() {
