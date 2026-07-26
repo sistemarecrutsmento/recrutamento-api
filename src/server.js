@@ -1372,13 +1372,30 @@ app.get('/api/admin/vagas/:id', authAdmin, async (req, res) => {
 app.get('/api/admin/candidatos', authAdmin, async (req, res) => {
   try {
     const { area } = req.query;
-    let sql = `SELECT id, nome, email, cpf, celular, cidade, estado, areas_interesse, banco_talentos, criado_em FROM candidatos`;
+    // Inclui info da última candidatura (status + id) + vaga + total de candidaturas
+    let sql = `
+      SELECT c.id, c.nome, c.email, c.cpf, c.celular, c.cidade, c.estado,
+             c.areas_interesse, c.banco_talentos, c.criado_em,
+             ult.status AS ultimo_status, ult.id AS ultima_candidatura_id,
+             ult.etapa_atual AS ultima_etapa,
+             v.titulo AS ultima_vaga_titulo,
+             (SELECT COUNT(*) FROM candidaturas cc WHERE cc.candidato_id = c.id) AS total_candidaturas
+      FROM candidatos c
+      LEFT JOIN LATERAL (
+        SELECT cu.id, cu.status, cu.etapa_atual, cu.vaga_id
+        FROM candidaturas cu
+        WHERE cu.candidato_id = c.id
+        ORDER BY cu.criada_em DESC NULLS LAST
+        LIMIT 1
+      ) ult ON true
+      LEFT JOIN vagas v ON v.id = ult.vaga_id
+    `;
     const params = [];
     if (area) {
+      sql += ` WHERE c.areas_interesse @> $${params.length + 1}::jsonb`;
       params.push(JSON.stringify([area]));
-      sql += ` WHERE areas_interesse @> $${params.length}::jsonb`;
     }
-    sql += ' ORDER BY criado_em DESC';
+    sql += ' ORDER BY c.criado_em DESC';
     const { rows } = await pool.query(sql, params);
     res.json({ candidatos: rows });
   } catch (e) {
