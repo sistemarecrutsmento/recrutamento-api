@@ -1534,22 +1534,6 @@ app.post('/api/admin/vagas', authAdmin, async (req, res) => {
   }
 });
 
-app.get('/api/admin/_debug-busca-vaga', authAdmin, async (req, res) => {
-  // TEMPORÁRIO — testar TRANSLATE no Postgres
-  try {
-    const r = await pool.query(`
-      SELECT id, titulo,
-             TRANSLATE(LOWER(titulo), 'áàâãäéèêëíìîïóòôõöúùûüç', 'aaaaaeeeeiiiioooouuuucc') AS titulo_sem_acento,
-             CASE WHEN TRANSLATE(LOWER(titulo), 'áàâãäéèêëíìîïóòôõöúùûüç', 'aaaaaeeeeiiiioooouuuucc') LIKE '%estagiario%' THEN 'match' ELSE 'no-match' END AS teste
-      FROM vagas
-      ORDER BY id DESC LIMIT 10
-    `);
-    res.json({ rows: r.rows });
-  } catch (e) {
-    res.status(500).json({ erro: e.message });
-  }
-});
-
 app.get('/api/admin/vagas', authAdmin, async (req, res) => {
   // Filtros aceitos:
   //   ?status=publicada|pausada|fechada
