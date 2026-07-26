@@ -1573,9 +1573,30 @@ app.get('/api/admin/vagas', authAdmin, async (req, res) => {
   if (empresa) addWhere('v.empresa = ?', empresa);
   if (area) addWhere('v.area = ?', area);
   if (search) {
+    // Busca case+accent-insensitive:
+    // 1. ILIKE no Postgres é só case-insensitive, não trata acento
+    // 2. unaccent() precisa de extensão instalada (não confiável)
+    // 3. Solução pragmática: comparar o termo COM e SEM acento na coluna
+    //    usando uma lista de substituições comuns (a/á/ã/â, e/é/ê, i/í, o/ó/õ/ô, u/ú, c/ç)
     const s = '%' + search.toLowerCase() + '%';
-    // ILIKE é case+accent-insensitive no Postgres
-    addWhere('(v.titulo ILIKE ? OR v.empresa ILIKE ?)', s, s);
+    // Normaliza o termo removendo acentos comuns (cobre o caso português)
+    const sSemAcento = s
+      .replace(/[áàâãä]/g, 'a')
+      .replace(/[éèêë]/g, 'e')
+      .replace(/[íìîï]/g, 'i')
+      .replace(/[óòôõö]/g, 'o')
+      .replace(/[úùûü]/g, 'u')
+      .replace(/ç/g, 'c');
+    if (s === sSemAcento) {
+      // Termo já sem acento — busca simples
+      addWhere('(LOWER(v.titulo) LIKE LOWER(?) OR LOWER(v.empresa) LIKE LOWER(?))', s, s);
+    } else {
+      // Termo com acento — busca nas duas formas
+      addWhere(
+        '(LOWER(v.titulo) LIKE LOWER(?) OR LOWER(v.empresa) LIKE LOWER(?) OR LOWER(v.titulo) LIKE LOWER(?) OR LOWER(v.empresa) LIKE LOWER(?))',
+        s, s, sSemAcento, sSemAcento
+      );
+    }
   }
   const whereSql = wheres.length ? 'WHERE ' + wheres.join(' AND ') : '';
 
