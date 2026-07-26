@@ -1094,6 +1094,7 @@ app.get('/api/admin/dashboard', authAdmin, async (req, res) => {
     const sevenDaysAgo = new Date(now - 7 * 24 * 60 * 60 * 1000);
     const fourteenDaysAgo = new Date(now - 14 * 24 * 60 * 60 * 1000);
     const thirtyDaysAgo = new Date(now - 30 * 24 * 60 * 60 * 1000);
+    const sixtyDaysAgo = new Date(now - 60 * 24 * 60 * 60 * 1000);
 
     // ==== KPIs principais (5) ====
     const kpis = await pool.query(`
@@ -1108,8 +1109,12 @@ app.get('/api/admin/dashboard', authAdmin, async (req, res) => {
         (SELECT COUNT(*) FROM candidaturas WHERE criada_em > $1)::int as processos_novos_7d,
         (SELECT COUNT(*) FROM candidaturas WHERE criada_em > $2)::int as processos_novos_14d,
         (SELECT COUNT(*) FROM entrevistas WHERE data_hora >= NOW() AND status = 'agendada')::int as entrevistas_agendadas,
-        (SELECT COUNT(*) FROM entrevistas WHERE data_hora >= NOW() AND data_hora < NOW() + INTERVAL '7 days' AND status = 'agendada')::int as entrevistas_proximos_7d
-    `, [sevenDaysAgo, fourteenDaysAgo]);
+        (SELECT COUNT(*) FROM entrevistas WHERE data_hora >= NOW() AND data_hora < NOW() + INTERVAL '7 days' AND status = 'agendada')::int as entrevistas_proximos_7d,
+        (SELECT COUNT(*) FROM candidaturas WHERE status = 'contratado' AND atualizada_em > $3)::int as contratacoes_30d,
+        (SELECT COUNT(*) FROM candidaturas WHERE status = 'contratado' AND atualizada_em > $4 AND atualizada_em <= $3)::int as contratacoes_30d_anterior,
+        (SELECT COUNT(*) FROM vagas WHERE status = 'publicada' AND criada_em < $3)::int as vagas_abertas_mais_30d,
+        (SELECT COUNT(*) FROM vagas WHERE status = 'publicada' AND criada_em < $4)::int as vagas_abertas_mais_60d
+    `, [sevenDaysAgo, fourteenDaysAgo, thirtyDaysAgo, sixtyDaysAgo]);
 
     const k = kpis.rows[0];
     // Calcula deltas % (período atual vs anterior)
@@ -1121,7 +1126,8 @@ app.get('/api/admin/dashboard', authAdmin, async (req, res) => {
       vagas: calcDelta(k.vagas_ativas_novas_7d, k.vagas_ativas_novas_14d - k.vagas_ativas_novas_7d),
       candidatos: calcDelta(k.candidatos_novos_7d, k.candidatos_novos_14d - k.candidatos_novos_7d),
       processos: calcDelta(k.processos_novos_7d, k.processos_novos_14d - k.processos_novos_7d),
-      entrevistas: k.entrevistas_agendadas
+      entrevistas: k.entrevistas_agendadas,
+      contratacoes: calcDelta(k.contratacoes_30d, k.contratacoes_30d_anterior)
     };
 
     // ==== Candidatos por etapa do processo (1=Inscrição, 2=Triagem, 3=RH, 4=Gestor, 5=Proposta, 6=Coleta, 7=Contratação) ====
@@ -1276,6 +1282,78 @@ app.get('/api/admin/dashboard', authAdmin, async (req, res) => {
     });
   } catch (e) {
     console.error('[DASHBOARD ERRO]', e);
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+// === KPI "Contratações": lista detalhada + comparação mensal (últimos 6 meses) ===
+app.get('/api/admin/contratacoes', authAdmin, async (req, res) => {
+  try {
+    // Lista detalhada (últimas 200 contratações)
+    const lista = await pool.query(`
+      SELECT
+        cand.id as candidatura_id,
+        cand.atualizada_em as contratada_em,
+        c.id as candidato_id,
+        c.nome as candidato_nome,
+        c.email as candidato_email,
+        v.id as vaga_id,
+        v.titulo as vaga_titulo,
+        v.empresa as vaga_empresa,
+        EXTRACT(DAY FROM (cand.atualizada_em - cand.criada_em))::int as dias_processo
+      FROM candidaturas cand
+      JOIN candidatos c ON c.id = cand.candidato_id
+      JOIN vagas v ON v.id = cand.vaga_id
+      WHERE cand.status = 'contratado'
+      ORDER BY cand.atualizada_em DESC
+      LIMIT 200
+    `);
+
+    // Comparação mensal: contratações agrupadas por mês (últimos 6 meses)
+    const mensal = await pool.query(`
+      SELECT
+        TO_CHAR(date_trunc('month', atualizada_em), 'YYYY-MM') as mes,
+        TO_CHAR(date_trunc('month', atualizada_em), 'MM/YYYY') as mes_label,
+        COUNT(*)::int as total
+      FROM candidaturas
+      WHERE status = 'contratado'
+        AND atualizada_em >= date_trunc('month', NOW()) - INTERVAL '5 months'
+      GROUP BY 1, 2
+      ORDER BY 1 ASC
+    `);
+
+    res.json({
+      total: lista.rows.length,
+      contratacoes: lista.rows,
+      comparacao_mensal: mensal.rows
+    });
+  } catch (e) {
+    console.error('[CONTRATACOES ERRO]', e);
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+// === KPI "Abertas +30d": vagas publicadas há mais de 30 dias sem contratação ===
+app.get('/api/admin/vagas-abertas-antigas', authAdmin, async (req, res) => {
+  try {
+    const rows = await pool.query(`
+      SELECT
+        v.id, v.titulo, v.empresa, v.cidade, v.estado, v.criada_em,
+        EXTRACT(DAY FROM (NOW() - v.criada_em))::int as dias_aberta,
+        (SELECT COUNT(*) FROM candidaturas WHERE vaga_id = v.id)::int as total_candidatos,
+        (SELECT COUNT(*) FROM candidaturas WHERE vaga_id = v.id AND status NOT IN ('reprovado','contratado'))::int as processos_ativos
+      FROM vagas v
+      WHERE v.status = 'publicada'
+        AND v.criada_em < NOW() - INTERVAL '30 days'
+        AND NOT EXISTS (SELECT 1 FROM candidaturas WHERE vaga_id = v.id AND status = 'contratado')
+      ORDER BY v.criada_em ASC
+    `);
+    res.json({
+      total: rows.rows.length,
+      vagas: rows.rows
+    });
+  } catch (e) {
+    console.error('[VAGAS ANTIGAS ERRO]', e);
     res.status(500).json({ erro: e.message });
   }
 });
