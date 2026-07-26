@@ -1187,9 +1187,9 @@ app.get('/api/admin/dashboard', authAdmin, async (req, res) => {
         cd.nome as candidato_nome, v.titulo as vaga_titulo,
         c.etapa_atual, v.etapas,
         (
-          SELECT MAX((h->>'em')::timestamptz)
+          SELECT MAX(COALESCE((h->>'em')::timestamptz, (h->>'data')::timestamptz))
           FROM jsonb_array_elements(c.historico) h
-          WHERE h ? 'em'
+          WHERE h ? 'em' OR h ? 'data'
         ) as ultima_mov
       FROM candidaturas c
       JOIN vagas v ON v.id = c.vaga_id
@@ -1205,7 +1205,7 @@ app.get('/api/admin/dashboard', authAdmin, async (req, res) => {
       if (!ultimo) return;
       // Detecta parado: se status permite progresso e a última mov > 3 dias
       const podeProgredir = r.status !== 'reprovado' && r.status !== 'contratado';
-      const dataRef = r.ultima_mov || r.atualizada_em || ultimo.em;
+      const dataRef = r.ultima_mov || r.atualizada_em || ultimo.em || ultimo.data;
       const diasParado = dataRef ? Math.floor((Date.now() - new Date(dataRef).getTime()) / 86400000) : 0;
       const alerta_parado = podeProgredir && diasParado >= 3;
 
@@ -1400,17 +1400,17 @@ app.get('/api/admin/candidaturas-por-etapa', authAdmin, async (req, res) => {
         v.titulo as vaga_titulo,
         v.empresa as vaga_empresa,
         v.etapas,
-        -- Quando entrou nessa etapa (1ª entrada do histórico com etapa_atual = $1)
+        -- Quando entrou nessa etapa (1ª entrada do histórico onde etapa = $1)
         (
-          SELECT MIN((h->>'em')::timestamptz)
+          SELECT MIN(COALESCE((h->>'em')::timestamptz, (h->>'data')::timestamptz))
           FROM jsonb_array_elements(c.historico) h
-          WHERE (h->>'etapa_atual')::int = $1
+          WHERE (h->>'etapa')::int = $1 OR (h->>'etapa_atual')::int = $1
         ) as entrou_na_etapa_em,
         -- Última movimentação de qualquer tipo
         (
-          SELECT MAX((h->>'em')::timestamptz)
+          SELECT MAX(COALESCE((h->>'em')::timestamptz, (h->>'data')::timestamptz))
           FROM jsonb_array_elements(c.historico) h
-          WHERE h ? 'em'
+          WHERE h ? 'em' OR h ? 'data'
         ) as ultima_mov_em
       FROM candidaturas c
       JOIN candidatos cd ON cd.id = c.candidato_id
