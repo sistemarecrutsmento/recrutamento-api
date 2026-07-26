@@ -49,7 +49,7 @@ app.get('/api/saude', (req, res) => res.json({ ok: true, sistema: process.env.SI
 app.get('/api/_debug/versao', (req, res) => {
   res.json({
     ok: true,
-    versao: '2026-07-26-ETAPAS-NOTIF',
+    versao: '2026-07-26-VAGAS-ATIVAS-RANKING',
     meet_carregado: typeof require('./meet').criarEventoMeet === 'function',
     buildCommit: process.env.RENDER_GIT_COMMIT,
     porta: process.env.PORT || 10000,
@@ -1264,13 +1264,14 @@ app.get('/api/admin/dashboard', authAdmin, async (req, res) => {
     `);
     const tempoMedio = tempoMedioRes.rows[0].dias || 0;
 
-    // ==== Vagas com mais candidatos (top 5) ====
+    // ==== Vagas ATIVAS com mais candidatos (top 5) ====
     const ranking = await pool.query(`
       SELECT v.id, v.titulo, v.empresa, v.status, v.criada_em,
         COUNT(c.id)::int as total_candidatos,
         COUNT(CASE WHEN c.status = 'contratado' THEN 1 END)::int as contratados
       FROM vagas v
       LEFT JOIN candidaturas c ON c.vaga_id = v.id
+      WHERE v.status = 'publicada'
       GROUP BY v.id
       ORDER BY total_candidatos DESC
       LIMIT 5
