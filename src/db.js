@@ -275,6 +275,10 @@ async function init() {
     await client.query(`ALTER TABLE documentos_candidatura ADD COLUMN IF NOT EXISTS arquivo_url TEXT;`);
     await client.query(`ALTER TABLE documentos_candidatura ADD COLUMN IF NOT EXISTS arquivo_public_id TEXT;`);
     await client.query(`ALTER TABLE admins ADD COLUMN IF NOT EXISTS criado_em TIMESTAMP DEFAULT NOW();`);
+    // 🐛 BUG FIX (jul/2026): coluna role faltava em bancos antigos (a rota /auth/login-recrutador dava 500)
+    await client.query(`ALTER TABLE recrutadores ADD COLUMN IF NOT EXISTS role TEXT DEFAULT 'recrutador';`);
+    await client.query(`ALTER TABLE recrutadores ADD COLUMN IF NOT EXISTS ativo BOOLEAN DEFAULT true;`);
+    await client.query(`ALTER TABLE recrutadores ADD COLUMN IF NOT EXISTS primeiro_acesso BOOLEAN DEFAULT true;`);
     await client.query(`ALTER TABLE candidatos ADD COLUMN IF NOT EXISTS senha_hash TEXT;`);
     await client.query(`ALTER TABLE candidatos ADD COLUMN IF NOT EXISTS email_verificado BOOLEAN DEFAULT false;`);
     await client.query(`ALTER TABLE candidatos ADD COLUMN IF NOT EXISTS foto_url TEXT;`);
