@@ -1534,6 +1534,23 @@ app.post('/api/admin/vagas', authAdmin, async (req, res) => {
   }
 });
 
+app.get('/api/_debug/teste-busca-vaga', async (req, res) => {
+  // TEMPORÁRIO — testar REGEXP_REPLACE no Postgres
+  try {
+    const r = await pool.query(`
+      SELECT id, titulo,
+             REGEXP_REPLACE(LOWER(titulo), '[áàâãäéèêëíìîïóòôõöúùûüç]', '', 'g') AS titulo_sem_acento,
+             CASE WHEN titulo ILIKE '%estagiario%' THEN 'match-original' ELSE 'no-match' END AS ilike_test,
+             CASE WHEN REGEXP_REPLACE(LOWER(titulo), '[áàâãäéèêëíìîïóòôõöúùûüç]', '', 'g') LIKE '%estagiario%' THEN 'match-sem' ELSE 'no-match-sem' END AS sem_acento_test
+      FROM vagas
+      ORDER BY id DESC LIMIT 5
+    `);
+    res.json({ rows: r.rows });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
 app.get('/api/admin/vagas', authAdmin, async (req, res) => {
   // Filtros aceitos:
   //   ?status=publicada|pausada|fechada
