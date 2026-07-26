@@ -49,7 +49,7 @@ app.get('/api/saude', (req, res) => res.json({ ok: true, sistema: process.env.SI
 app.get('/api/_debug/versao', (req, res) => {
   res.json({
     ok: true,
-    versao: '2026-07-26-CONTRATACOES',
+    versao: '2026-07-26-ETAPAS-NOTIF',
     meet_carregado: typeof require('./meet').criarEventoMeet === 'function',
     buildCommit: process.env.RENDER_GIT_COMMIT,
     porta: process.env.PORT || 10000,
@@ -1160,7 +1160,7 @@ app.get('/api/admin/dashboard', authAdmin, async (req, res) => {
       taxaConversao
     ];
 
-    // ==== Próximas entrevistas (próximos 30 dias, OU atrasadas até 3 dias) ====
+    // ==== Próximas entrevistas no DASHBOARD: SOMENTE do dia atual (00h → 23h59 de hoje) ====
     const proximas = await pool.query(`
       SELECT
         e.id, e.candidatura_id, e.etapa, e.data_hora, e.duracao_minutos,
@@ -1171,53 +1171,72 @@ app.get('/api/admin/dashboard', authAdmin, async (req, res) => {
       JOIN candidaturas c ON c.id = e.candidatura_id
       JOIN vagas v ON v.id = c.vaga_id
       JOIN candidatos cd ON cd.id = c.candidato_id
-      WHERE e.status = 'agendada'
-        AND e.data_hora >= NOW() - INTERVAL '3 days'
-        AND e.data_hora < NOW() + INTERVAL '30 days'
+      WHERE e.status IN ('agendada','concluida')
+        AND e.data_hora >= date_trunc('day', NOW())
+        AND e.data_hora <  date_trunc('day', NOW()) + INTERVAL '1 day'
       ORDER BY e.data_hora ASC
-      LIMIT 10
+      LIMIT 20
     `);
 
     // ==== Atividades recentes (do histórico das candidaturas) ====
+    // Inclui alerta_parado quando a última entrada do histórico > 3 dias atrás
+    // E status != 'reprovado'/'contratado' (candidatos "travados" no funil)
     const atividades = await pool.query(`
       SELECT
-        c.id, c.historico, c.atualizada_em,
-        cd.nome as candidato_nome, v.titulo as vaga_titulo
+        c.id, c.historico, c.atualizada_em, c.status,
+        cd.nome as candidato_nome, v.titulo as vaga_titulo,
+        c.etapa_atual, v.etapas,
+        (
+          SELECT MAX((h->>'em')::timestamptz)
+          FROM jsonb_array_elements(c.historico) h
+          WHERE h ? 'em'
+        ) as ultima_mov
       FROM candidaturas c
       JOIN vagas v ON v.id = c.vaga_id
       JOIN candidatos cd ON cd.id = c.candidato_id
       WHERE c.historico IS NOT NULL AND c.historico != '[]'::jsonb
       ORDER BY c.atualizada_em DESC NULLS LAST
-      LIMIT 8
+      LIMIT 30
     `);
     const atividadesRecentes = [];
     atividades.rows.forEach(r => {
       const hist = typeof r.historico === 'string' ? JSON.parse(r.historico) : (r.historico || []);
-      // Pega o último item do histórico
       const ultimo = hist[hist.length - 1];
-      if (ultimo) {
-        atividadesRecentes.push({
-          texto: ultimo.acao || ultimo.evento || 'Atualização',
-          candidato: r.candidato_nome,
-          vaga: r.vaga_titulo,
-          quando: ultimo.em || r.atualizada_em,
-          tipo: ultimo.tipo || 'sistema'
-        });
+      if (!ultimo) return;
+      // Detecta parado: se status permite progresso e a última mov > 3 dias
+      const podeProgredir = r.status !== 'reprovado' && r.status !== 'contratado';
+      const dataRef = r.ultima_mov || r.atualizada_em || ultimo.em;
+      const diasParado = dataRef ? Math.floor((Date.now() - new Date(dataRef).getTime()) / 86400000) : 0;
+      const alerta_parado = podeProgredir && diasParado >= 3;
+
+      // Resolve nome da etapa atual (etapas[etapa_atual - 1])
+      let etapaNome = null;
+      if (Array.isArray(r.etapas) && r.etapa_atual) {
+        const etapaObj = r.etapas[r.etapa_atual - 1];
+        etapaNome = (typeof etapaObj === 'string' ? etapaObj : etapaObj?.nome) || null;
       }
+
+      atividadesRecentes.push({
+        texto: ultimo.acao || ultimo.evento || 'Atualização',
+        candidato: r.candidato_nome,
+        vaga: r.vaga_titulo,
+        candidatura_id: r.id,
+        quando: ultimo.em || r.atualizada_em,
+        tipo: ultimo.tipo || 'sistema',
+        status: r.status,
+        etapa: r.etapa_atual,
+        etapa_nome: etapaNome,
+        dias_parado: diasParado,
+        alerta_parado
+      });
     });
-    // Se não tem histórico, usa a data de criação
-    if (atividadesRecentes.length === 0) {
-      const fallback = await pool.query(`
-        SELECT c.criada_em as quando, cd.nome as candidato, v.titulo as vaga
-        FROM candidaturas c
-        JOIN vagas v ON v.id = c.vaga_id
-        JOIN candidatos cd ON cd.id = c.candidato_id
-        ORDER BY c.criada_em DESC LIMIT 5
-      `);
-      fallback.rows.forEach(r => atividadesRecentes.push({
-        texto: 'Inscrição realizada', candidato: r.candidato, vaga: r.vaga, quando: r.quando, tipo: 'inscricao'
-      }));
-    }
+    // Mantém só os 8 mais recentes (mas prioriza os com alerta)
+    atividadesRecentes.sort((a, b) => {
+      if (a.alerta_parado && !b.alerta_parado) return -1;
+      if (!a.alerta_parado && b.alerta_parado) return 1;
+      return new Date(b.quando) - new Date(a.quando);
+    });
+    const atividadesRecentesTrim = atividadesRecentes.slice(0, 8);
 
     // ==== KPIs secundários ====
     const sec = await pool.query(`
@@ -1268,7 +1287,8 @@ app.get('/api/admin/dashboard', authAdmin, async (req, res) => {
         total: conv.rows[0].total_candidaturas
       },
       proximas_entrevistas: proximas.rows,
-      atividades_recentes: atividadesRecentes,
+      atividades_recentes: atividadesRecentesTrim,
+      atividades_alertas: atividadesRecentes.filter(a => a.alerta_parado).slice(0, 5),
       kpis_secundarios: {
         tempo_medio_contratacao: tempoMedio,
         taxa_aprovacao: taxaAprovacao,
@@ -1354,6 +1374,71 @@ app.get('/api/admin/vagas-abertas-antigas', authAdmin, async (req, res) => {
     });
   } catch (e) {
     console.error('[VAGAS ANTIGAS ERRO]', e);
+    res.status(500).json({ erro: e.message });
+  }
+});
+
+// === Candidaturas em uma etapa específica (clicado no gráfico "Candidatos por etapa") ===
+// ?etapa=N onde N é 1-indexed (1=Inscrição, 2=Triagem, ..., 7=Contratação)
+app.get('/api/admin/candidaturas-por-etapa', authAdmin, async (req, res) => {
+  try {
+    const etapa = parseInt(req.query.etapa);
+    if (!etapa || etapa < 1 || etapa > 7) {
+      return res.status(400).json({ erro: 'Etapa inválida (1-7)' });
+    }
+    const rows = await pool.query(`
+      SELECT
+        c.id as candidatura_id,
+        c.criada_em,
+        c.atualizada_em,
+        c.status,
+        c.etapa_atual,
+        cd.id as candidato_id,
+        cd.nome as candidato_nome,
+        cd.email as candidato_email,
+        v.id as vaga_id,
+        v.titulo as vaga_titulo,
+        v.empresa as vaga_empresa,
+        v.etapas,
+        -- Quando entrou nessa etapa (1ª entrada do histórico com etapa_atual = $1)
+        (
+          SELECT MIN((h->>'em')::timestamptz)
+          FROM jsonb_array_elements(c.historico) h
+          WHERE (h->>'etapa_atual')::int = $1
+        ) as entrou_na_etapa_em,
+        -- Última movimentação de qualquer tipo
+        (
+          SELECT MAX((h->>'em')::timestamptz)
+          FROM jsonb_array_elements(c.historico) h
+          WHERE h ? 'em'
+        ) as ultima_mov_em
+      FROM candidaturas c
+      JOIN candidatos cd ON cd.id = c.candidato_id
+      JOIN vagas v ON v.id = c.vaga_id
+      WHERE c.etapa_atual = $1
+        AND c.status NOT IN ('reprovado','contratado')
+      ORDER BY entrou_na_etapa_em ASC NULLS LAST
+    `, [etapa]);
+
+    // Calcula dias parado
+    const items = rows.rows.map(r => {
+      const ref = r.ultima_mov_em || r.atualizada_em || r.entrou_na_etapa_em;
+      const dias_parado = ref ? Math.floor((Date.now() - new Date(ref).getTime()) / 86400000) : 0;
+      return { ...r, dias_parado, alerta_parado: dias_parado >= 3 };
+    });
+
+    // Nome da etapa resolvido a partir do array de etapas da vaga (fallback: rótulo padrão)
+    const etapaNomePadrao = ['', 'Inscrição', 'Triagem', 'RH', 'Gestor', 'Proposta', 'Coleta de Documentos', 'Contratação'];
+    const etapaNome = etapaNomePadrao[etapa];
+
+    res.json({
+      etapa,
+      etapa_nome: etapaNome,
+      total: items.length,
+      candidaturas: items
+    });
+  } catch (e) {
+    console.error('[CAND POR ETAPA ERRO]', e);
     res.status(500).json({ erro: e.message });
   }
 });
