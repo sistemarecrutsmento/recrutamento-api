@@ -49,7 +49,7 @@ app.get('/api/saude', (req, res) => res.json({ ok: true, sistema: process.env.SI
 app.get('/api/_debug/versao', (req, res) => {
   res.json({
     ok: true,
-    versao: '2026-07-25-MEET-OK',
+    versao: '2026-07-26-CONTRATACOES',
     meet_carregado: typeof require('./meet').criarEventoMeet === 'function',
     buildCommit: process.env.RENDER_GIT_COMMIT,
     porta: process.env.PORT || 10000,
