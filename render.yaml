@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: recrutamento-api
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    autoDeploy: true
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: JWT_SECRET
+        generateValue: true
+      # As outras env vars são configuradas manualmente no dashboard (DATABASE_URL,
+      # RESEND_API_KEY, CLOUDINARY_*, GOOGLE_*, etc) — não dá pra commitar segredos
