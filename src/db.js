@@ -265,6 +265,25 @@ async function init() {
         criado_em TIMESTAMP DEFAULT NOW()
       );
       CREATE INDEX IF NOT EXISTS idx_empresa_chat_cand ON empresa_chat(candidatura_id, criado_em);
+
+      -- Tabela de códigos 2FA para admin/recrutador (jul/2026)
+      -- Sem FK constraint porque admin_id pode referenciar admins(id) ou recrutadores(id)
+      -- conforme admin_tipo. A integridade é garantida pela aplicação.
+      CREATE TABLE IF NOT EXISTS admin_2fa_codes (
+        id SERIAL PRIMARY KEY,
+        codigo_id TEXT UNIQUE NOT NULL,
+        admin_id INTEGER NOT NULL,
+        admin_tipo TEXT NOT NULL DEFAULT 'admin',
+        code_hash TEXT NOT NULL,
+        tentativas INTEGER DEFAULT 0,
+        usado_em TIMESTAMP,
+        criado_em TIMESTAMP DEFAULT NOW(),
+        expira_em TIMESTAMP NOT NULL,
+        ip TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_admin_2fa_admin ON admin_2fa_codes(admin_id);
+      CREATE INDEX IF NOT EXISTS idx_admin_2fa_codigo_id ON admin_2fa_codes(codigo_id);
     `);
 
     // Garantir colunas em tabelas já criadas (idempotente)
