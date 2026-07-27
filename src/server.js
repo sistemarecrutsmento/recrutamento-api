@@ -5668,9 +5668,9 @@ process.on('unhandledRejection', (e) => {
       const hash = await bcrypt.hash(senha, 10);
       const { rows } = await pool.query(`
         INSERT INTO empresa_usuarios (empresa_id, nome, email, senha_hash, cargo, criado_por, role, ativo)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, true)
+        VALUES ($1, $2, $3, $4, $5, NULL, $6, true)
         RETURNING id, nome, email, cargo, role, ativo
-      `, [empresa_id, nome, email.toLowerCase(), hash, cargo || 'Recrutador', req.user.id, roleFinal]);
+      `, [empresa_id, nome, email.toLowerCase(), hash, cargo || 'Recrutador', roleFinal]);
       await audit(req, 'empresa.usuario.created', {
         resource_type: 'empresa_usuario',
         resource_id: rows[0].id,
