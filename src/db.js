@@ -265,26 +265,30 @@ async function init() {
         criado_em TIMESTAMP DEFAULT NOW()
       );
       CREATE INDEX IF NOT EXISTS idx_empresa_chat_cand ON empresa_chat(candidatura_id, criado_em);
-
-      -- Tabela de códigos 2FA para admin/recrutador (jul/2026)
-      -- Sem FK constraint porque admin_id pode referenciar admins(id) ou recrutadores(id)
-      -- conforme admin_tipo. A integridade é garantida pela aplicação.
-      CREATE TABLE IF NOT EXISTS admin_2fa_codes (
-        id SERIAL PRIMARY KEY,
-        codigo_id TEXT UNIQUE NOT NULL,
-        admin_id INTEGER NOT NULL,
-        admin_tipo TEXT NOT NULL DEFAULT 'admin',
-        code_hash TEXT NOT NULL,
-        tentativas INTEGER DEFAULT 0,
-        usado_em TIMESTAMP,
-        criado_em TIMESTAMP DEFAULT NOW(),
-        expira_em TIMESTAMP NOT NULL,
-        ip TEXT
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_admin_2fa_admin ON admin_2fa_codes(admin_id);
-      CREATE INDEX IF NOT EXISTS idx_admin_2fa_codigo_id ON admin_2fa_codes(codigo_id);
     `);
+
+    // Tabela de logs de auditoria (jul/2026)
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS audit_logs (
+        id SERIAL PRIMARY KEY,
+        created_at TIMESTAMP DEFAULT NOW(),
+        user_id INTEGER,
+        user_type TEXT,
+        user_email TEXT,
+        action TEXT NOT NULL,
+        resource_type TEXT,
+        resource_id INTEGER,
+        ip TEXT,
+        user_agent TEXT,
+        result TEXT,
+        metadata JSONB DEFAULT '{}'::jsonb
+      );
+    `);
+    // Índices da tabela de auditoria
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_audit_user ON audit_logs(user_id, created_at DESC);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_audit_action ON audit_logs(action, created_at DESC);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_audit_resource ON audit_logs(resource_type, resource_id);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC);`);
 
     // Garantir colunas em tabelas já criadas (idempotente)
     await client.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS criada_em TIMESTAMP DEFAULT NOW();`);
