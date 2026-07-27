@@ -15,7 +15,7 @@ const meet = require('./meet');
 const ADMIN_NOTIF_EMAIL = process.env.ADMIN_NOTIF_EMAIL || process.env.ADMIN_EMAIL || 'fabio08dejesusjunior@gmail.com';
 const { authMiddleware, authCandidato, authAdmin, authEmpresa, authAdminOnly, authCandidatoOrEmpresaOrAdmin, JWT_VERIFY_OPTIONS } = require('./auth');
 const { sanitizeText, sanitizeFilename, escapeContentDispositionFilename } = require('./sanitize');
-const { getBackupMetadata } = require('./backup');
+const { audit } = require('./audit');
 
 // Cloudinary: aceita CLOUDINARY_URL no formato cloudinary://key:secret@cloud_name
 if (process.env.CLOUDINARY_URL) cloudinary.config({ url: process.env.CLOUDINARY_URL, secure: true });
@@ -93,6 +93,7 @@ function rateLimitLogin(req, res, next) {
   const rec = loginRateMap.get(key);
   if (rec && rec.blockedUntil && rec.blockedUntil > now) {
     const waitSec = Math.ceil((rec.blockedUntil - now) / 1000);
+    audit(req, 'security.rate_limited', { result: 'blocked', metadata: { email, waitSec, tipo: 'login' } });
     return res.status(429).json({
       erro: `Muitas tentativas. Tente novamente em ${waitSec}s.`
     });
@@ -148,6 +149,7 @@ function rateLimitByIp(routeName) {
     const rec = ipRateMap.get(key);
     if (rec && rec.blockedUntil && rec.blockedUntil > now) {
       const waitSec = Math.ceil((rec.blockedUntil - now) / 1000);
+      audit(req, 'security.rate_limited', { result: 'blocked', metadata: { rota: routeName, waitSec } });
       return res.status(429).json({ erro: `Muitas requisições. Tente novamente em ${waitSec}s.` });
     }
     if (rec && (now - rec.firstAt) > cfg.windowMs) {
@@ -703,23 +705,27 @@ app.post('/api/candidato/login', rateLimitLogin, async (req, res) => {
   const { rows } = await pool.query('SELECT * FROM candidatos WHERE email = $1', [emailLower]);
   if (rows.length === 0) {
     rateLimitRegisterFail(req);
+    await audit(req, 'login.failure', { resource_type: 'candidato', metadata: { email: emailLower } });
     return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
   }
   const cand = rows[0];
 
   // Se o candidato foi criado pelo fluxo antigo (sem senha), o hash é null
   if (!cand.senha_hash) {
+    await audit(req, 'login.failure', { resource_type: 'candidato', metadata: { email: emailLower, motivo: 'sem_hash' } });
     return res.status(401).json({ erro: 'Sua conta foi criada antes do login com senha. Cadastre-se novamente ou use o código de acesso.' });
   }
 
   const ok = await bcrypt.compare(senha, cand.senha_hash);
   if (!ok) {
     rateLimitRegisterFail(req);
+    await audit(req, 'login.failure', { resource_type: 'candidato', metadata: { email: emailLower } });
     return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
   }
   rateLimitClear(req);
 
   const token = jwt.sign({ email: emailLower, tipo: 'candidato' }, process.env.JWT_SECRET, { expiresIn: '30d' });
+  await audit(req, 'login.success', { resource_type: 'candidato', resource_id: cand.id, user_email: cand.email });
   res.json({
     ok: true,
     token,
@@ -930,9 +936,13 @@ app.post('/api/candidato/trocar-senha', authCandidato, async (req, res) => {
     if (rows.length === 0) return res.status(404).json({ erro: 'Conta não encontrada' });
     if (!rows[0].senha_hash) return res.status(400).json({ erro: 'Conta sem senha definida (legado)' });
     const ok = await bcrypt.compare(senha_atual, rows[0].senha_hash);
-    if (!ok) return res.status(401).json({ erro: 'Senha atual incorreta' });
+    if (!ok) {
+      await audit(req, 'password.changed', { result: 'failure', metadata: { motivo: 'senha_atual_incorreta' } });
+      return res.status(401).json({ erro: 'Senha atual incorreta' });
+    }
     const novoHash = await bcrypt.hash(senha_nova, 10);
     await pool.query('UPDATE candidatos SET senha_hash = $1 WHERE id = $2', [novoHash, rows[0].id]);
+    await audit(req, 'password.changed', { result: 'success', resource_type: 'candidato', resource_id: rows[0].id });
     res.json({ ok: true });
   } catch (e) {
     console.error(e);
@@ -1290,6 +1300,7 @@ app.post('/api/admin/login', rateLimitLogin, async (req, res) => {
     console.log('[LOGIN] rows encontrados:', rows.length);
     if (rows.length === 0) {
       rateLimitRegisterFail(req);
+      await audit(req, 'login.failure', { resource_type: 'admin', metadata: { motivo: 'credenciais', email: email.toLowerCase() } });
       return res.status(401).json({ erro: 'Credenciais inválidas' });
     }
     console.log('[LOGIN] hash começa com:', rows[0].senha_hash?.substring(0, 7));
@@ -1297,6 +1308,7 @@ app.post('/api/admin/login', rateLimitLogin, async (req, res) => {
     console.log('[LOGIN] compare result:', ok);
     if (!ok) {
       rateLimitRegisterFail(req);
+      await audit(req, 'login.failure', { resource_type: 'admin', metadata: { motivo: 'credenciais', email: email.toLowerCase() } });
       return res.status(401).json({ erro: 'Credenciais inválidas' });
     }
     rateLimitClear(req);
@@ -1305,6 +1317,7 @@ app.post('/api/admin/login', rateLimitLogin, async (req, res) => {
       { id: rows[0].id, email: rows[0].email, nome: rows[0].nome, tipo: 'admin' },
       process.env.JWT_SECRET, { expiresIn: '7d' }
     );
+    await audit(req, 'login.success', { resource_type: 'admin', resource_id: rows[0].id, user_email: rows[0].email });
     res.json({ ok: true, token, usuario: { id: rows[0].id, nome: rows[0].nome, email: rows[0].email, role: rows[0].role || 'admin' } });
   } catch (e) {
     console.error('[LOGIN ERRO]', e);
@@ -1753,6 +1766,7 @@ app.post('/api/admin/vagas', authAdmin, async (req, res) => {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
       [v.titulo, v.empresa, v.cidade, v.estado, v.tipo_contrato, v.nivel, v.area, v.salario_min, v.salario_max, v.descricao, v.requisitos, v.beneficios, JSON.stringify(etapas), req.user.id]
     );
+    await audit(req, 'admin.vaga.created', { resource_type: 'vaga', resource_id: rows[0].id, metadata: { titulo: v.titulo, empresa: v.empresa } });
     res.json({ ok: true, vaga: rows[0] });
   } catch (e) {
     console.error('[CRIAR VAGA ERRO]', e);
@@ -1890,12 +1904,14 @@ app.put('/api/admin/vagas/:id', authAdmin, async (req, res) => {
     values
   );
   if (rows.length === 0) return res.status(404).json({ erro: 'Vaga não encontrada' });
+  await audit(req, 'admin.vaga.updated', { resource_type: 'vaga', resource_id: Number(req.params.id), metadata: { campos: updates.map(u => u.split(' ')[0]) } });
   res.json({ ok: true, vaga: rows[0] });
 });
 
 app.delete('/api/admin/vagas/:id', authAdmin, async (req, res) => {
   try {
     await pool.query('DELETE FROM vagas WHERE id = $1', [req.params.id]);
+    await audit(req, 'admin.vaga.deleted', { resource_type: 'vaga', resource_id: Number(req.params.id) });
     res.json({ ok: true });
   } catch (e) {
     console.error('[DELETE VAGA]', e);
@@ -2290,6 +2306,7 @@ app.post('/api/admin/candidato/:id/deletar', authAdmin, async (req, res) => {
 
     // Log de auditoria
     console.log(`[AUDITORIA] Admin ${req.user?.email || '?'} deletou candidato id=${candId} (${cand[0].email})`);
+    await audit(req, 'admin.candidato.deleted', { resource_type: 'candidato', resource_id: candId, user_email: req.user?.email, metadata: { candidato_email: cand[0].email, candidato_nome: cand[0].nome } });
 
     res.json({
       ok: true,
@@ -2304,27 +2321,6 @@ app.post('/api/admin/candidato/:id/deletar', authAdmin, async (req, res) => {
       msg: `Candidato ${cand[0].nome} (${cand[0].email}) removido com sucesso`
     });
   } catch (e) {
-    res.status(500).json({ erro: e.message });
-  }
-});
-
-// ====== Admin RESTORE-TEST (metadados do backup, SEGURO) ======
-// POST /api/admin/restore-test — authAdminOnly
-// NÃO restaura nada. Retorna apenas metadados do último backup.
-app.post('/api/admin/restore-test', authAdminOnly, async (req, res) => {
-  try {
-    const meta = await getBackupMetadata();
-    res.json({
-      ok: true,
-      ...meta.ultimoBackup ? {
-        ultimoBackup: meta.ultimoBackup,
-        msg: 'Use restore.js via código para restaurar (dryRun primeiro)'
-      } : {
-        msg: 'Nenhum backup encontrado'
-      }
-    });
-  } catch (e) {
-    console.error('[RESTORE-TEST ERROR]', e.message);
     res.status(500).json({ erro: e.message });
   }
 });
@@ -2991,6 +2987,22 @@ app.post('/api/admin/candidatura/:id/status', authAdmin, async (req, res) => {
     console.error('Falha ao agendar notificação:', e.message);
   }
 
+  // Log de auditoria
+  const actionName = acao ? `admin.candidatura.stage_changed` : `admin.candidatura.status_changed`;
+  await audit(req, actionName, {
+    resource_type: 'candidatura',
+    resource_id: Number(req.params.id),
+    metadata: {
+      acao: acao || null,
+      de_etapa: cand.etapa_atual,
+      para_etapa: novaEtapa,
+      de_status: cand.status,
+      para_status: novoStatus,
+      vaga_titulo: cand.titulo,
+      candidato_nome: cand.nome
+    }
+  });
+
   res.json({ ok: true });
 });
 
@@ -3586,6 +3598,7 @@ app.post('/api/admin/recrutadores', authAdmin, async (req, res) => {
       'INSERT INTO recrutadores (nome, email, senha_hash, criado_por) VALUES ($1,$2,$3,$4) RETURNING id, nome, email',
       [nome, email.toLowerCase(), hash, req.user.id]
     );
+    await audit(req, 'admin.recrutador.created', { resource_type: 'recrutador', resource_id: rows[0].id, metadata: { email: email.toLowerCase() } });
     res.json({ ok: true, recrutador: rows[0] });
   } catch (e) {
     if (e.code === '23505') return res.status(400).json({ erro: 'E-mail já cadastrado' });
@@ -3655,13 +3668,18 @@ app.post('/api/auth/login-recrutador', rateLimitLogin, async (req, res) => {
     console.log('[login-recrutador] rows:', rows.length);
     if (rows.length === 0) {
       rateLimitRegisterFail(req);
+      await audit(req, 'login.failure', { resource_type: 'recrutador', metadata: { email: email.toLowerCase() } });
       return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
     }
     const r = rows[0];
-    if (!r.ativo) return res.status(403).json({ erro: 'Conta desativada. Fale com o admin.' });
+    if (!r.ativo) {
+      await audit(req, 'login.failure', { resource_type: 'recrutador', metadata: { email: email.toLowerCase(), motivo: 'conta_desativada' } });
+      return res.status(403).json({ erro: 'Conta desativada. Fale com o admin.' });
+    }
     const ok = await bcrypt.compare(senha, r.senha_hash);
     if (!ok) {
       rateLimitRegisterFail(req);
+      await audit(req, 'login.failure', { resource_type: 'recrutador', metadata: { email: email.toLowerCase() } });
       return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
     }
     rateLimitClear(req);
@@ -3670,6 +3688,7 @@ app.post('/api/auth/login-recrutador', rateLimitLogin, async (req, res) => {
       process.env.JWT_SECRET,
       { expiresIn: '30d' }
     );
+    await audit(req, 'login.success', { resource_type: 'recrutador', resource_id: r.id, user_email: r.email });
     res.json({
       ok: true,
       token,
@@ -3689,9 +3708,13 @@ app.post('/api/auth/trocar-senha-recrutador', authAdmin, async (req, res) => {
     const { rows } = await pool.query('SELECT senha_hash FROM recrutadores WHERE id = $1', [req.user.id]);
     if (rows.length === 0) return res.status(404).json({ erro: 'Usuário não encontrado' });
     const ok = await bcrypt.compare(senha_atual, rows[0].senha_hash);
-    if (!ok) return res.status(401).json({ erro: 'Senha atual incorreta' });
+    if (!ok) {
+      await audit(req, 'password.changed', { result: 'failure', metadata: { motivo: 'senha_atual_incorreta' } });
+      return res.status(401).json({ erro: 'Senha atual incorreta' });
+    }
     const hash = await bcrypt.hash(senha_nova, 10);
     await pool.query('UPDATE recrutadores SET senha_hash = $1, primeiro_acesso = false WHERE id = $2', [hash, req.user.id]);
+    await audit(req, 'password.changed', { result: 'success', resource_type: 'recrutador', resource_id: req.user.id });
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ erro: 'Erro ao trocar senha' });
@@ -3780,6 +3803,7 @@ app.post('/api/admin/empresas', authAdminOnly, async (req, res) => {
       }
     }
     res.json({ ok: true, empresa, usuario: usuarioCriado });
+    await audit(req, 'admin.empresa.created', { resource_type: 'empresa', resource_id: empresa.id, metadata: { nome: empresa.nome, cnpj: cnpj || null, usuario_criado: !!usuarioCriado } });
   } catch (e) {
     if (e.code === '23505') return res.status(400).json({ erro: 'E-mail já cadastrado' });
     console.error('[criar empresa]', e);
@@ -3943,13 +3967,18 @@ app.post('/api/auth/login-empresa', rateLimitLogin, async (req, res) => {
     `, [email.toLowerCase()]);
     if (rows.length === 0) {
       rateLimitRegisterFail(req);
+      await audit(req, 'login.failure', { resource_type: 'empresa', metadata: { email: email.toLowerCase() } });
       return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
     }
     const u = rows[0];
-    if (!u.ativo || !u.empresa_ativa) return res.status(403).json({ erro: 'Conta ou empresa desativada' });
+    if (!u.ativo || !u.empresa_ativa) {
+      await audit(req, 'login.failure', { resource_type: 'empresa', metadata: { email: email.toLowerCase(), motivo: 'conta_desativada' } });
+      return res.status(403).json({ erro: 'Conta ou empresa desativada' });
+    }
     const ok = await bcrypt.compare(senha, u.senha_hash);
     if (!ok) {
       rateLimitRegisterFail(req);
+      await audit(req, 'login.failure', { resource_type: 'empresa', metadata: { email: email.toLowerCase() } });
       return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
     }
     rateLimitClear(req);
@@ -3958,6 +3987,7 @@ app.post('/api/auth/login-empresa', rateLimitLogin, async (req, res) => {
       process.env.JWT_SECRET,
       { expiresIn: '30d' }
     );
+    await audit(req, 'login.success', { resource_type: 'empresa', resource_id: u.id, user_email: u.email, metadata: { empresa_id: u.empresa_id } });
     res.json({
       ok: true,
       token,
@@ -3981,9 +4011,13 @@ app.post('/api/auth/trocar-senha-empresa', authEmpresa, async (req, res) => {
     const { rows } = await pool.query('SELECT senha_hash FROM empresa_usuarios WHERE id = $1', [req.user.id]);
     if (rows.length === 0) return res.status(404).json({ erro: 'Usuário não encontrado' });
     const ok = await bcrypt.compare(senha_atual, rows[0].senha_hash);
-    if (!ok) return res.status(401).json({ erro: 'Senha atual incorreta' });
+    if (!ok) {
+      await audit(req, 'password.changed', { result: 'failure', metadata: { motivo: 'senha_atual_incorreta' } });
+      return res.status(401).json({ erro: 'Senha atual incorreta' });
+    }
     const hash = await bcrypt.hash(senha_nova, 10);
     await pool.query('UPDATE empresa_usuarios SET senha_hash = $1, primeiro_acesso = false WHERE id = $2', [hash, req.user.id]);
+    await audit(req, 'password.changed', { result: 'success', resource_type: 'empresa', resource_id: req.user.id });
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ erro: 'Erro ao trocar senha' });
@@ -4465,6 +4499,8 @@ app.get('/api/empresa/candidatura/:id', authEmpresa, async (req, res) => {
     if (!rows[0].tem_acesso) return res.status(403).json({ erro: 'Sem acesso a esta candidatura' });
     const candidatura = rows[0];
 
+    await audit(req, 'empresa.candidatura.viewed', { resource_type: 'candidatura', resource_id: Number(id), metadata: { vaga_titulo: candidatura.vaga_titulo } });
+
     // Buscar experiencias do candidato (mesma tabela usada pelo admin)
     const { rows: exps } = await pool.query(
       'SELECT * FROM experiencias WHERE candidato_id = $1 ORDER BY inicio DESC NULLS LAST, id DESC',
@@ -4505,6 +4541,7 @@ app.get('/api/empresa/candidatura/:id/documentos', authEmpresa, async (req, res)
       [candidaturaId]
     );
     res.json({ documentos: rows, obrigatorios: DOCUMENTOS_OBRIGATORIOS });
+    await audit(req, 'empresa.documento.viewed', { resource_type: 'candidatura', resource_id: candidaturaId, metadata: { qtd_documentos: rows.length } });
   } catch (e) {
     console.error('[empresa docs]', e);
     res.status(500).json({ erro: 'Erro ao carregar documentos' });
@@ -4582,6 +4619,9 @@ app.post('/api/empresa/candidatura/:id/acao', authEmpresa, async (req, res) => {
         [empresa_id, id, acao, `Empresa ${acao} em candidatura #${id}`, `Empresa ${empresa_nome} executou ${acao} na etapa ${cand.etapa_atual}`]
       );
     } catch (_) { /* não bloquear se log falhar */ }
+
+    // Log de auditoria da ação da empresa
+    await audit(req, 'empresa.candidatura.action', { resource_type: 'candidatura', resource_id: Number(id), metadata: { acao, empresa_nome, de_etapa: cand.etapa_atual, para_etapa: novaEtapa, parecer: parecer || null } });
 
     res.json({ ok: true, etapa_atual: novaEtapa, status: novoStatus });
   } catch (e) {
@@ -4837,6 +4877,32 @@ process.on('unhandledRejection', (e) => {
     } catch (e) {
       console.error('[SEED VAGAS DEMO ERRO]', e);
       res.status(500).json({ erro: e.message });
+    }
+  });
+
+  // ============= AUDIT LOGS (admin) =============
+  app.get('/api/admin/audit-logs', authAdmin, async (req, res) => {
+    try {
+      const { user_id, action, resource_id, limit, offset, since } = req.query;
+      const queryLimit = Math.min(500, Math.max(1, parseInt(limit, 10) || 100));
+      const queryOffset = Math.max(0, parseInt(offset, 10) || 0);
+      const wheres = [];
+      const values = [];
+      const add = (sql, val) => { values.push(val); wheres.push(sql.replace('?', `$${values.length}`)); };
+      if (user_id) add('user_id = ?', parseInt(user_id, 10));
+      if (action) add('action = ?', action);
+      if (resource_id) add('resource_id = ?', parseInt(resource_id, 10));
+      if (since) add('created_at >= ?', since);
+      const whereClause = wheres.length > 0 ? 'WHERE ' + wheres.join(' AND ') : '';
+      const count = await pool.query(`SELECT COUNT(*) FROM audit_logs ${whereClause}`, values);
+      const { rows } = await pool.query(
+        `SELECT * FROM audit_logs ${whereClause} ORDER BY created_at DESC LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+        [...values, queryLimit, queryOffset]
+      );
+      res.json({ logs: rows, total: parseInt(count.rows[0].count, 10) });
+    } catch (e) {
+      console.error('[AUDIT LOGS]', e);
+      res.status(500).json({ erro: 'Erro ao consultar logs de auditoria' });
     }
   });
 
