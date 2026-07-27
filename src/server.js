@@ -718,7 +718,7 @@ app.post('/api/candidato/verificar', rateLimitLogin, async (req, res) => {
   // FIX Etapa 2: access token (15m) + refresh (7d, hash no DB)
   const accessToken = criarAccessToken({ email: email.toLowerCase(), tipo: 'candidato' });
   const refresh = criarRefreshToken();
-  await persistirRefresh('candidato', null, email.toLowerCase(), refresh, req);
+  await persistirRefresh('candidato', null, email.toLowerCase(), refresh, req, { user_role: 'candidato' });
   res.json({ ok: true, token: accessToken, refreshToken: refresh, email: email.toLowerCase() });
 });
 
@@ -781,7 +781,7 @@ app.post('/api/candidato/cadastro', rateLimitLogin, async (req, res) => {
     // FIX Etapa 2: access (15m) + refresh (7d, hash no DB)
     const accessToken = criarAccessToken({ email: emailLower, tipo: 'candidato' });
     const refresh = criarRefreshToken();
-    await persistirRefresh('candidato', rows[0].id, emailLower, refresh, req);
+    await persistirRefresh('candidato', rows[0].id, emailLower, refresh, req, { user_role: 'candidato' });
     res.json({ ok: true, token: accessToken, refreshToken: refresh, candidato: rows[0] });
   } catch (e) {
     console.error('[CADASTRO ERRO]', e);
@@ -826,7 +826,7 @@ app.post('/api/candidato/login', rateLimitLogin, async (req, res) => {
   // FIX Etapa 2: access (15m) + refresh (7d, hash no DB)
   const accessToken = criarAccessToken({ email: emailLower, tipo: 'candidato' });
   const refresh = criarRefreshToken();
-  await persistirRefresh('candidato', cand.id, emailLower, refresh, req);
+  await persistirRefresh('candidato', cand.id, emailLower, refresh, req, { user_role: 'candidato' });
   await audit(req, 'login.success', { resource_type: 'candidato', resource_id: cand.id, user_email: cand.email });
   res.json({
     ok: true,
@@ -1492,7 +1492,7 @@ app.post('/api/admin/2fa/verificar', rateLimitByIp('twofa'), async (req, res) =>
       id: admin.id, email: admin.email, nome: admin.nome, tipo: 'admin', role: admin.role || 'admin'
     });
     const refresh = criarRefreshToken();
-    await persistirRefresh('admin', admin.id, admin.email, refresh, req);
+    await persistirRefresh('admin', admin.id, admin.email, refresh, req, { user_role: admin.role || 'admin' });
     await audit(req, 'login.2fa_verified', { resource_type: 'admin', resource_id: admin.id, user_email: admin.email });
     res.json({
       ok: true,
@@ -3934,7 +3934,7 @@ app.post('/api/auth/login-recrutador', rateLimitLogin, async (req, res) => {
       id: r.id, email: r.email, nome: r.nome, tipo: 'recrutador', role: r.role
     });
     const refresh = criarRefreshToken();
-    await persistirRefresh('recrutador', r.id, r.email, refresh, req);
+    await persistirRefresh('recrutador', r.id, r.email, refresh, req, { user_role: r.role || 'recrutador' });
     await audit(req, 'login.success', { resource_type: 'recrutador', resource_id: r.id, user_email: r.email });
     res.json({
       ok: true,
@@ -4162,8 +4162,8 @@ app.post('/api/admin/empresa-vaga', authAdminOnly, async (req, res) => {
   if (!empresa_id || !vaga_id) return res.status(400).json({ erro: 'empresa_id e vaga_id obrigatórios' });
   try {
     const { rows } = await pool.query(
-      `INSERT INTO empresa_vaga_acesso (empresa_id, vaga_id, concedido_por)
-       VALUES ($1,$2,$3)
+      `INSERT INTO empresa_vaga_acesso (empresa_id, vaga_id, concedido_por, tipo)
+       VALUES ($1,$2,$3,'proprietaria')
        ON CONFLICT (empresa_id, vaga_id) DO NOTHING
        RETURNING *`,
       [empresa_id, vaga_id, req.user.id]
@@ -4304,7 +4304,10 @@ app.post('/api/empresa/cadastro', rateLimitByIp('cadastro-empresa'), async (req,
       empresa_id: empresa.id, empresa_nome: empresa.nome
     });
     const refresh = criarRefreshToken();
-    await persistirRefresh('empresa', adminUser.id, adminUser.email, refresh, req);
+    await persistirRefresh('empresa', adminUser.id, adminUser.email, refresh, req, {
+      user_role: adminUser.cargo || 'Administrador',
+      user_empresa_id: empresa.id
+    });
 
     // 6. Audit log
     await audit(req, 'empresa.created', {
@@ -4379,7 +4382,10 @@ app.post('/api/auth/login-empresa', rateLimitLogin, async (req, res) => {
       empresa_id: u.empresa_id, empresa_nome: u.empresa_nome
     });
     const refresh = criarRefreshToken();
-    await persistirRefresh('empresa', u.id, u.email, refresh, req);
+    await persistirRefresh('empresa', u.id, u.email, refresh, req, {
+      user_role: u.cargo || 'Administrador',
+      user_empresa_id: u.empresa_id
+    });
     await audit(req, 'login.success', { resource_type: 'empresa', resource_id: u.id, user_email: u.email, metadata: { empresa_id: u.empresa_id } });
     res.json({
       ok: true,
@@ -4478,8 +4484,8 @@ app.post('/api/empresa/vagas', authEmpresa, async (req, res) => {
     // NOTA: concedido_por é FK pra admins(id). Como o usuário é empresa_usuarios (não admin),
     // passamos NULL pra evitar violação de FK. Auto-criação é da própria empresa.
     await pool.query(
-      `INSERT INTO empresa_vaga_acesso (empresa_id, vaga_id, concedido_por)
-       VALUES ($1, $2, NULL)
+      `INSERT INTO empresa_vaga_acesso (empresa_id, vaga_id, concedido_por, tipo)
+       VALUES ($1, $2, NULL, 'proprietaria')
        ON CONFLICT (empresa_id, vaga_id) DO NOTHING`,
       [empresa_id, vaga.id]
     );
@@ -5498,15 +5504,25 @@ process.on('unhandledRejection', (e) => {
       }
       const t = r.token;
       // Gera novo access (15m) + novo refresh (7d)
+      // Preserva role e empresa_id do refresh anterior (Fase 1, jul/2026)
       const novoAccess = criarAccessToken({
         id: t.user_id || undefined,
         email: t.user_email,
-        tipo: t.user_type
+        tipo: t.user_type,
+        role: t.user_role || undefined,
+        empresa_id: t.user_empresa_id || undefined
       });
       const novoRefresh = criarRefreshToken();
       // Revoga o refresh usado e persiste o novo (ROTAÇÃO)
       await revogarRefresh(refreshToken, 'rotacionado');
-      await persistirRefresh(t.user_type, t.user_id, t.user_email, novoRefresh, req);
+      await persistirRefresh(
+        t.user_type,
+        t.user_id,
+        t.user_email,
+        novoRefresh,
+        req,
+        { user_role: t.user_role, user_empresa_id: t.user_empresa_id }
+      );
       await audit(req, 'security.refresh_rotated', { resource_type: t.user_type, user_email: t.user_email });
       res.json({ ok: true, token: novoAccess, refreshToken: novoRefresh });
     } catch (e) {
