@@ -3950,6 +3950,34 @@ app.get('/api/empresa/vagas/:vaga_id/candidatos', authEmpresa, async (req, res) 
 });
 
 // Vagas com candidatos (espelho de /api/admin/vagas-com-candidaturas, filtrado por empresa)
+// Lista TODAS as vagas liberadas da empresa (independente de ter candidato)
+app.get('/api/empresa/vagas-todas', authEmpresa, async (req, res) => {
+  const { empresa_id } = req.user;
+  try {
+    const { rows } = await pool.query(`
+      SELECT v.id, v.titulo, v.empresa, v.cidade, v.estado, v.status, v.criada_em, v.categoria,
+        COALESCE(c_agg.total, 0) as total_geral,
+        COALESCE(c_agg.em_andamento, 0) as em_andamento,
+        COALESCE(c_agg.contratados, 0) as contratados
+      FROM empresa_vaga_acesso eva
+      JOIN vagas v ON v.id = eva.vaga_id
+      LEFT JOIN (
+        SELECT vaga_id,
+          COUNT(*) as total,
+          COUNT(*) FILTER (WHERE status = 'em_andamento') as em_andamento,
+          COUNT(*) FILTER (WHERE status = 'contratado') as contratados
+        FROM candidaturas GROUP BY vaga_id
+      ) c_agg ON c_agg.vaga_id = v.id
+      WHERE eva.empresa_id = $1
+      ORDER BY v.criada_em DESC
+    `, [empresa_id]);
+    res.json({ vagas: rows });
+  } catch (e) {
+    console.error('[empresa vagas-todas]', e);
+    res.status(500).json({ erro: 'Erro ao listar vagas' });
+  }
+});
+
 app.get('/api/empresa/vagas-com-candidaturas', authEmpresa, async (req, res) => {
   const { empresa_id } = req.user;
   try {
