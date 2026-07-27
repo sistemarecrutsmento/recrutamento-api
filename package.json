@@ -20,7 +20,6 @@
     "pg": "^8.12.0",
     "axios": "^1.7.4",
     "cloudinary": "^2.5.1",
-    "googleapis": "^100.0.0",
-    "helmet": "7.1.0"
+    "googleapis": "^100.0.0"
   }
 }
