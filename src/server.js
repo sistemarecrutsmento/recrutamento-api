@@ -1583,38 +1583,6 @@ app.get('/api/admin/vagas-fechadas-sem-contratacao', authAdmin, async (req, res)
 });
 
 // =========================================================================
-// DIAGNÓSTICO DE RBAC (Fase 1 review — 28/07/2026) — PÚBLICO TEMPORÁRIO
-// Apenas retorna contagens agregadas (sem dados sensíveis). Remover após confirm.
-// =========================================================================
-app.get('/api/_diag/rbac-consistencia', async (req, res) => {
-  try {
-    const result = await pool.query(`
-      SELECT
-        -- Coluna 1: empresa_vaga_acesso.tipo
-        (SELECT array_to_json(array_agg(tipo)) FROM (SELECT DISTINCT tipo FROM empresa_vaga_acesso) s) AS eva_tipos_distintos,
-        (SELECT COUNT(*)::int FROM empresa_vaga_acesso WHERE tipo='propria')        AS eva_propria_qtd,
-        (SELECT COUNT(*)::int FROM empresa_vaga_acesso WHERE tipo='compartilhada')  AS eva_compartilhada_qtd,
-        (SELECT COUNT(*)::int FROM empresa_vaga_acesso WHERE tipo='proprietaria')    AS eva_proprietaria_legacy,
-        (SELECT COUNT(*)::int FROM empresa_vaga_acesso WHERE tipo IS NULL)          AS eva_tipo_null,
-        -- Coluna 2: empresa_usuarios.role
-        (SELECT array_to_json(array_agg(role)) FROM (SELECT DISTINCT role FROM empresa_usuarios WHERE role IS NOT NULL) s) AS eu_roles_distintos,
-        (SELECT COUNT(*)::int FROM empresa_usuarios WHERE role='admin_empresa')     AS eu_admin_qtd,
-        (SELECT COUNT(*)::int FROM empresa_usuarios WHERE role='recrutador')        AS eu_recrutador_qtd,
-        (SELECT COUNT(*)::int FROM empresa_usuarios WHERE role='viewer')            AS eu_viewer_qtd,
-        (SELECT COUNT(*)::int FROM empresa_usuarios WHERE role IS NULL)             AS eu_role_null,
-        -- Refresh tokens
-        (SELECT COUNT(*)::int FROM refresh_tokens WHERE user_role='admin_empresa')  AS rt_admin_qtd,
-        (SELECT COUNT(*)::int FROM refresh_tokens WHERE user_role='Administrador')  AS rt_legacy_administrador,
-        (SELECT COUNT(*)::int FROM refresh_tokens WHERE user_role='candidato')       AS rt_candidato_qtd
-    `);
-    res.json({ ok: true, distribuicao: result.rows[0] });
-  } catch (e) {
-    console.error('[DIAG RBAC]', e);
-    res.status(500).json({ erro: 'Erro no diagnóstico' });
-  }
-});
-
-// =========================================================================
 // DIAGNÓSTICO DE SCHEMA (Fase 1) — admin only
 // Confirma quais colunas da Fase 1 estão presentes + contagens de dados.
 // =========================================================================
