@@ -13,7 +13,8 @@ const meet = require('./meet');
 
 // Email do admin pra receber notificações de ação do candidato
 const ADMIN_NOTIF_EMAIL = process.env.ADMIN_NOTIF_EMAIL || process.env.ADMIN_EMAIL || 'fabio08dejesusjunior@gmail.com';
-const { authMiddleware, authCandidato, authAdmin, authEmpresa, authAdminOnly } = require('./auth');
+const { authMiddleware, authCandidato, authAdmin, authEmpresa, authAdminOnly, authCandidatoOrEmpresaOrAdmin, JWT_VERIFY_OPTIONS } = require('./auth');
+const { sanitizeText, sanitizeFilename, escapeContentDispositionFilename } = require('./sanitize');
 
 // Cloudinary: aceita CLOUDINARY_URL no formato cloudinary://key:secret@cloud_name
 if (process.env.CLOUDINARY_URL) cloudinary.config({ url: process.env.CLOUDINARY_URL, secure: true });
@@ -51,6 +52,28 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json({ limit: '100mb' }));
+
+// =========================================================================
+// HEADERS DE SEGURANÇA (defesa contra clickjacking, MIME sniffing, XSS)
+// =========================================================================
+app.use((req, res, next) => {
+  // Esconde o stack (Express). Não revela o backend.
+  res.removeHeader('X-Powered-By');
+  // Previne MIME sniffing
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  // Política de referer (não vaza URL completa em navegação externa)
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  // Clickjacking: bloqueia embedding em iframe
+  res.setHeader('X-Frame-Options', 'DENY');
+  // Permissões restritas (não precisa de geolocalização, microfone, etc)
+  res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=(), payment=()');
+  // CSP — Backend responde JSON, então CSP é simples
+  // Não precisa permitir scripts inline, imagens externas etc.
+  res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
+  // HSTS — força HTTPS por 1 ano (HTTPS já está ativo via Render + Cloudflare)
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
+  next();
+});
 
 // =========================================================================
 // RATE LIMIT (proteção contra brute force em login)
@@ -100,12 +123,66 @@ function rateLimitClear(req) {
   loginRateMap.delete(`${ip}|${email}`);
 }
 
+// =========================================================================
+// RATE LIMIT GENÉRICO POR IP (para rotas sem e-mail no body)
+// =========================================================================
+// Usado em cadastro, iniciar verificação, esqueci-senha, upload, etc.
+const ipRateMap = new Map(); // key: `${route}|${ip}` -> { count, firstAt, blockedUntil }
+const IP_RATE_LIMITS = {
+  cadastro: { max: 5, windowMs: 60 * 60 * 1000 },        // 5 contas/hora por IP
+  iniciar: { max: 10, windowMs: 60 * 60 * 1000 },       // 10 códigos/hora por IP
+  verificar: { max: 10, windowMs: 60 * 60 * 1000 },     // 10 verificações/hora por IP
+  esqueci: { max: 5, windowMs: 60 * 60 * 1000 },        // 5 resets/hora por IP
+  upload: { max: 30, windowMs: 60 * 60 * 1000 },        // 30 uploads/hora por IP
+  chat: { max: 60, windowMs: 60 * 60 * 1000 }           // 60 msgs/hora por IP
+};
+
+function rateLimitByIp(routeName) {
+  return (req, res, next) => {
+    const cfg = IP_RATE_LIMITS[routeName];
+    if (!cfg) return next();
+    const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+    const key = `${routeName}|${ip}`;
+    const now = Date.now();
+    const rec = ipRateMap.get(key);
+    if (rec && rec.blockedUntil && rec.blockedUntil > now) {
+      const waitSec = Math.ceil((rec.blockedUntil - now) / 1000);
+      return res.status(429).json({ erro: `Muitas requisições. Tente novamente em ${waitSec}s.` });
+    }
+    if (rec && (now - rec.firstAt) > cfg.windowMs) {
+      ipRateMap.delete(key);
+    }
+    next();
+  };
+}
+
+function ipRateRegister(routeName, req) {
+  const cfg = IP_RATE_LIMITS[routeName];
+  if (!cfg) return;
+  const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+  const key = `${routeName}|${ip}`;
+  const now = Date.now();
+  const rec = ipRateMap.get(key) || { count: 0, firstAt: now, blockedUntil: null };
+  rec.count += 1;
+  if (rec.count === 1) rec.firstAt = now;
+  if (rec.count >= cfg.max) {
+    rec.blockedUntil = now + cfg.windowMs;
+  }
+  ipRateMap.set(key, rec);
+}
+
 // Limpa o mapa periodicamente (evita memory leak)
 setInterval(() => {
   const now = Date.now();
   for (const [k, r] of loginRateMap.entries()) {
     if ((now - r.firstAt) > RATE_LIMIT_WINDOW_MS && (!r.blockedUntil || r.blockedUntil < now)) {
       loginRateMap.delete(k);
+    }
+  }
+  for (const [k, r] of ipRateMap.entries()) {
+    // 4h de carência
+    if ((now - r.firstAt) > 4 * 60 * 60 * 1000 && (!r.blockedUntil || r.blockedUntil < now)) {
+      ipRateMap.delete(k);
     }
   }
 }, 60 * 1000).unref();
@@ -441,9 +518,10 @@ async function enviarCodigoSeguro(email, codigo) {
 }
 
 // ============= CANDIDATO - CADASTRO =============
-app.post('/api/candidato/iniciar', async (req, res) => {
+app.post('/api/candidato/iniciar', rateLimitByIp('iniciar'), async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ erro: 'E-mail obrigatório' });
+  ipRateRegister('iniciar', req);
 
   const codigo = String(Math.floor(100000 + Math.random() * 900000));
   const expira = new Date(Date.now() + 10 * 60 * 1000);
@@ -473,7 +551,7 @@ app.post('/api/candidato/iniciar', async (req, res) => {
   res.json(resposta);
 });
 
-app.post('/api/candidato/verificar', async (req, res) => {
+app.post('/api/candidato/verificar', rateLimitLogin, async (req, res) => {
   const { email, codigo } = req.body;
   if (!email || !codigo) return res.status(400).json({ erro: 'E-mail e código obrigatórios' });
 
@@ -487,6 +565,23 @@ app.post('/api/candidato/verificar', async (req, res) => {
 
   await pool.query('UPDATE codigos_verificacao SET usado = true WHERE id = $1', [rows[0].id]);
 
+  // BLOQUEIO DE COLLISION: o e-mail não pode pertencer a admin/recrutador/empresa.
+  // Caso já pertença, invalida o código e bloqueia o login.
+  const tabelasConflito = [
+    { tabela: 'admins' },
+    { tabela: 'recrutadores' },
+    { tabela: 'empresas' }
+  ];
+  for (const t of tabelasConflito) {
+    const { rows: conflito } = await pool.query(
+      `SELECT 1 FROM ${t.tabela} WHERE LOWER(email) = $1 LIMIT 1`,
+      [email.toLowerCase()]
+    );
+    if (conflito.length > 0) {
+      return res.status(400).json({ erro: 'Código inválido ou expirado' });
+    }
+  }
+
   // marca e-mail como verificado se já existir candidato
   await pool.query('UPDATE candidatos SET email_verificado = true WHERE email = $1', [email.toLowerCase()]);
 
@@ -497,7 +592,7 @@ app.post('/api/candidato/verificar', async (req, res) => {
 // ============= CANDIDATO - CADASTRO COM SENHA (NOVO) =============
 // Cria conta nova com email+senha (sem código de verificação).
 // Recebe dados básicos; o resto do perfil (endereço, formação, etc.) pode ser completado depois em /api/candidato/cadastrar.
-app.post('/api/candidato/cadastro', async (req, res) => {
+app.post('/api/candidato/cadastro', rateLimitLogin, async (req, res) => {
   const { email, senha, nome, cpf, celular, data_nascimento, sexo, cidade, estado, formacao } = req.body;
   if (!email || !senha || !nome) {
     return res.status(400).json({ erro: 'E-mail, senha e nome são obrigatórios' });
@@ -512,6 +607,24 @@ app.post('/api/candidato/cadastro', async (req, res) => {
   const { rows: existe } = await pool.query('SELECT id, senha_hash FROM candidatos WHERE email = $1', [emailLower]);
   if (existe.length > 0) {
     return res.status(400).json({ erro: 'Já existe uma conta com esse e-mail. Faça login.' });
+  }
+
+  // BLOQUEIO DE COLLISION: não permite cadastrar candidato com e-mail já usado
+  // em admins, recrutadores ou empresas (defesa contra account-squatting).
+  const tabelasConflito = [
+    { tabela: 'admins', label: 'admin' },
+    { tabela: 'recrutadores', label: 'recrutador' },
+    { tabela: 'empresas', label: 'empresa' }
+  ];
+  for (const t of tabelasConflito) {
+    const { rows: conflito } = await pool.query(
+      `SELECT 1 FROM ${t.tabela} WHERE LOWER(email) = $1 LIMIT 1`,
+      [emailLower]
+    );
+    if (conflito.length > 0) {
+      // Resposta genérica (não revela a qual tabela pertence)
+      return res.status(400).json({ erro: 'Não é possível usar este e-mail para cadastro de candidato. Use outro e-mail.' });
+    }
   }
 
   try {
@@ -683,6 +796,21 @@ app.get('/api/candidato/perfil', authCandidato, async (req, res) => {
 app.put('/api/candidato/perfil', authCandidato, async (req, res) => {
   const d = req.body;
   const areasInteresse = Array.isArray(d.areas_interesse) ? d.areas_interesse.slice(0, 5) : null;
+  // Sanitiza campos textuais contra XSS (defesa em profundidade)
+  const camposTexto = ['nome','sobre_voce','experiencia','complemento','logradouro','bairro'];
+  for (const c of camposTexto) {
+    if (typeof d[c] === 'string') d[c] = sanitizeText(d[c]);
+  }
+  // Limita tamanho dos campos pra evitar abuso
+  const LIMITES = {
+    nome: 200, sobre_voce: 5000, experiencia: 5000, complemento: 200,
+    logradouro: 300, bairro: 200, cpf: 14, celular: 20, cep: 10
+  };
+  for (const [k, max] of Object.entries(LIMITES)) {
+    if (typeof d[k] === 'string' && d[k].length > max) {
+      return res.status(400).json({ erro: `Campo "${k}" muito longo (máx ${max} caracteres)` });
+    }
+  }
   try {
     const { rows } = await pool.query(
       `UPDATE candidatos SET
@@ -1055,9 +1183,9 @@ app.get('/api/vagas/:id', async (req, res) => {
 // ============= RECUPERAÇÃO DE SENHA =============
 const { esqueciSenha, redefinirSenha, validarToken } = require('./passwordReset');
 
-app.post('/api/auth/esqueci-senha', esqueciSenha);
-app.post('/api/auth/redefinir-senha', redefinirSenha);
-app.get('/api/auth/validar-token', validarToken);
+app.post('/api/auth/esqueci-senha', rateLimitByIp('esqueci'), esqueciSenha);
+app.post('/api/auth/redefinir-senha', rateLimitLogin, redefinirSenha);
+app.get('/api/auth/validar-token', rateLimitByIp('esqueci'), validarToken);
 
 // ============= ADMIN/RECRUTADOR =============
 app.post('/api/admin/login', rateLimitLogin, async (req, res) => {
@@ -1905,9 +2033,26 @@ const DOCUMENTOS_OBRIGATORIOS = [
 ];
 
 // Candidato envia documentos da sua candidatura
-app.post('/api/candidatura/:id/documentos', async (req, res) => {
+app.post('/api/candidatura/:id/documentos', authCandidato, async (req, res) => {
   try {
     const candidaturaId = Number(req.params.id);
+    if (!Number.isInteger(candidaturaId) || candidaturaId <= 0) {
+      return res.status(400).json({ erro: 'ID de candidatura inválido' });
+    }
+    // OWNERSHIP: candidato só pode mexer em documentos da PRÓPRIA candidatura
+    const { rows: candRows } = await pool.query(
+      `SELECT c.id, c.candidato_id, cd.email
+       FROM candidaturas c
+       JOIN candidatos cd ON cd.id = c.candidato_id
+       WHERE c.id = $1`,
+      [candidaturaId]
+    );
+    if (candRows.length === 0) {
+      return res.status(404).json({ erro: 'Candidatura não encontrada' });
+    }
+    if (candRows[0].email.toLowerCase() !== (req.user.email || '').toLowerCase()) {
+      return res.status(403).json({ erro: 'Sem permissão para esta candidatura' });
+    }
     const { documentos } = req.body; // [{tipo, valor_texto, arquivo_base64, arquivo_nome, arquivo_tipo}]
     if (!Array.isArray(documentos) || documentos.length === 0) {
       return res.status(400).json({ erro: 'Nenhum documento enviado' });
@@ -1958,7 +2103,7 @@ app.post('/api/candidatura/:id/documentos', async (req, res) => {
         `INSERT INTO documentos_candidatura
          (candidatura_id, tipo, categoria, valor_texto, arquivo_url, arquivo_public_id, arquivo_nome, arquivo_tipo, arquivo_tamanho, status, enviado_em)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pendente', NOW())`,
-        [candidaturaId, d.tipo, d.categoria || 'arquivo', d.valor_texto || null, arquivoUrl, arquivoPublicId, d.arquivo_nome || null, d.arquivo_tipo || null, d.arquivo_tamanho || null]
+        [candidaturaId, d.tipo, d.categoria || 'arquivo', d.valor_texto || null, arquivoUrl, arquivoPublicId, sanitizeFilename(d.arquivo_nome) || null, d.arquivo_tipo || null, d.arquivo_tamanho || null]
       );
       salvos++;
     }
@@ -2002,9 +2147,26 @@ app.post('/api/candidatura/:id/documentos', async (req, res) => {
 });
 
 // Candidato vê seus próprios documentos
-app.get('/api/candidatura/:id/documentos', async (req, res) => {
+app.get('/api/candidatura/:id/documentos', authCandidato, async (req, res) => {
   try {
     const candidaturaId = Number(req.params.id);
+    if (!Number.isInteger(candidaturaId) || candidaturaId <= 0) {
+      return res.status(400).json({ erro: 'ID de candidatura inválido' });
+    }
+    // OWNERSHIP: candidato só vê documentos da PRÓPRIA candidatura
+    const { rows: candRows } = await pool.query(
+      `SELECT c.id, cd.email
+       FROM candidaturas c
+       JOIN candidatos cd ON cd.id = c.candidato_id
+       WHERE c.id = $1`,
+      [candidaturaId]
+    );
+    if (candRows.length === 0) {
+      return res.status(404).json({ erro: 'Candidatura não encontrada' });
+    }
+    if (candRows[0].email.toLowerCase() !== (req.user.email || '').toLowerCase()) {
+      return res.status(403).json({ erro: 'Sem permissão para esta candidatura' });
+    }
     const { rows } = await pool.query(
       `SELECT id, tipo, categoria, valor_texto, arquivo_url, arquivo_nome, arquivo_tipo, arquivo_tamanho, status, justificativa_admin, enviado_em, revisado_em
        FROM documentos_candidatura WHERE candidatura_id = $1
@@ -2077,10 +2239,11 @@ app.post('/api/admin/documento/:id/revisar', authAdmin, async (req, res) => {
 
     // Se for "retornado", adiciona uma mensagem na timeline da candidatura (aparece pro candidato no painel)
     if (status === 'retornado' && justificativa) {
+      const textoMsg = sanitizeText('📄 ' + (docInfo.tipo || 'documento') + ': ' + justificativa);
       await pool.query(
         `INSERT INTO mensagens_processo (candidatura_id, autor_tipo, autor_nome, texto, contexto)
          VALUES ($1, 'admin', $2, $3, $4)`,
-        [docInfo.candidatura_id, req.user.nome, '📄 ' + (docInfo.tipo || 'documento') + ': ' + justificativa, 'documento_retornado']
+        [docInfo.candidatura_id, req.user.nome, textoMsg, 'documento_retornado']
       );
       // Volta a candidatura pra status "em_andamento" na etapa atual (pra liberar reenvio)
       await pool.query(
@@ -2534,7 +2697,10 @@ app.put('/api/admin/entrevista/:id', authAdmin, async (req, res) => {
 });
 
 app.post('/api/admin/candidatura/:id/status', authAdmin, async (req, res) => {
-  const { status, etapa, mensagem, acao, comentario } = req.body;
+  let { status, etapa, mensagem, acao, comentario } = req.body;
+  // Sanitiza textos de admin (defesa em profundidade)
+  if (typeof mensagem === 'string') mensagem = sanitizeText(mensagem);
+  if (typeof comentario === 'string') comentario = sanitizeText(comentario);
   // acao: 'avancar' = incrementa etapa_atual, 'reprovar' = marca rejeitado, 'aprovar' = aprova atual
   // comentario: observação interna do admin sobre a etapa atual (não vai pro candidato, fica em observacoes_etapas[etapa])
   const { rows: c } = await pool.query(`
@@ -2770,6 +2936,8 @@ app.post('/api/chat/:candidatura_id/mensagens', authCandidatoOrAdmin, async (req
     const { texto } = req.body;
     if (!texto || !texto.trim()) return res.status(400).json({ erro: 'Mensagem vazia' });
     if (texto.length > 2000) return res.status(400).json({ erro: 'Mensagem muito longa (máx 2000 caracteres)' });
+    // Sanitização XSS (defesa em profundidade — front também escapa)
+    const textoLimpo = sanitizeText(texto.trim());
 
     const { rows: cand } = await pool.query(`
       SELECT c.id, c.candidato_id, cd.email, cd.nome as cand_nome, v.titulo, v.empresa
@@ -2791,7 +2959,7 @@ app.post('/api/chat/:candidatura_id/mensagens', authCandidatoOrAdmin, async (req
 
     const { rows: msg } = await pool.query(
       'INSERT INTO mensagens_processo (candidatura_id, autor_tipo, autor_nome, texto, contexto) VALUES ($1,$2,$3,$4,$5) RETURNING *',
-      [cid, autorTipo, autorNome, texto.trim(), 'chat']
+      [cid, autorTipo, autorNome, textoLimpo, 'chat']
     );
 
     // Notifica o outro lado por e-mail (em background)
@@ -2826,7 +2994,7 @@ app.post('/api/chat/:candidatura_id/mensagens', authCandidatoOrAdmin, async (req
 
 // Upload de arquivo pra chat (POST /api/chat/:cid/upload)
 // Body JSON: { texto?: string, arquivo: { nome, mime, base64 } }
-app.post('/api/chat/:candidatura_id/upload', authCandidatoOrAdmin, async (req, res) => {
+app.post('/api/chat/:candidatura_id/upload', authCandidatoOrAdmin, rateLimitByIp('upload'), async (req, res) => {
   try {
     const cid = parseInt(req.params.candidatura_id);
     const { texto, arquivo } = req.body;
@@ -2873,8 +3041,10 @@ app.post('/api/chat/:candidatura_id/upload', authCandidatoOrAdmin, async (req, r
     }
     const autorTipo = req.user.tipo === 'admin' ? 'admin' : 'candidato';
     const autorNome = req.user.tipo === 'admin' ? (req.user.nome || 'Recrutador') : c.cand_nome;
+    // Sanitiza nome do arquivo (impede injection no log + no texto)
+    const arquivoNomeSanitizado = sanitizeFilename(arquivo.nome || 'arquivo');
     // Texto da mensagem (se vazio, usa padrão)
-    const textoFinal = (texto && texto.trim()) || `📎 ${arquivo.nome}`;
+    const textoFinal = sanitizeText((texto && texto.trim()) || `📎 ${arquivoNomeSanitizado}`);
     // 1) Insere a mensagem
     const { rows: msgRows } = await pool.query(
       'INSERT INTO mensagens_processo (candidatura_id, autor_tipo, autor_nome, texto, contexto) VALUES ($1,$2,$3,$4,$5) RETURNING *',
@@ -2884,7 +3054,7 @@ app.post('/api/chat/:candidatura_id/upload', authCandidatoOrAdmin, async (req, r
     // 2) Insere o arquivo vinculado
     const { rows: arqRows } = await pool.query(
       'INSERT INTO chat_arquivos (mensagem_id, candidatura_id, nome_original, mime_type, tamanho_bytes, base64_data) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, nome_original, mime_type, tamanho_bytes',
-      [msg.id, cid, arquivo.nome, arquivo.mime, tamanhoBytes, arquivo.base64]
+      [msg.id, cid, arquivoNomeSanitizado, arquivo.mime, tamanhoBytes, arquivo.base64]
     );
     res.json({ ok: true, mensagem: msg, arquivo: arqRows[0] });
   } catch (e) {
@@ -2914,7 +3084,9 @@ app.get('/api/chat/arquivo/:id', authCandidatoOrAdmin, async (req, res) => {
     // Decodifica base64 e envia
     const buffer = Buffer.from(arq.base64_data, 'base64');
     res.setHeader('Content-Type', arq.mime_type);
-    res.setHeader('Content-Disposition', `inline; filename="${arq.nome_original}"`);
+    // Nome seguro no Content-Disposition (impede header injection via nome_original)
+    const nomeSeguro = escapeContentDispositionFilename(arq.nome_original || 'arquivo');
+    res.setHeader('Content-Disposition', `inline; filename="${nomeSeguro}"`);
     res.setHeader('Content-Length', arq.tamanho_bytes);
     res.send(buffer);
   } catch (e) {
@@ -4094,8 +4266,11 @@ app.get('/api/empresa/candidatura/:id/chat', authEmpresa, async (req, res) => {
 app.post('/api/empresa/candidatura/:id/chat', authEmpresa, async (req, res) => {
   const { empresa_id, nome: empresa_nome } = req.user;
   const { id } = req.params;
-  const { mensagem } = req.body;
+  let { mensagem } = req.body;
   if (!mensagem || !mensagem.trim()) return res.status(400).json({ erro: 'Mensagem vazia' });
+  // Sanitiza XSS (defesa em profundidade)
+  mensagem = sanitizeText(mensagem.trim());
+  if (mensagem.length > 2000) return res.status(400).json({ erro: 'Mensagem muito longa (máx 2000 caracteres)' });
   try {
     // Verifica acesso
     const acc = await pool.query(`
@@ -4151,6 +4326,38 @@ app.get('/api/empresa/candidatura/:id', authEmpresa, async (req, res) => {
   } catch (e) {
     console.error('[empresa detalhe candidatura]', e);
     res.status(500).json({ erro: 'Erro ao carregar' });
+  }
+});
+
+// Empresa visualiza documentos de uma candidatura das suas vagas (READ-ONLY)
+app.get('/api/empresa/candidatura/:id/documentos', authEmpresa, async (req, res) => {
+  const { empresa_id } = req.user;
+  const candidaturaId = Number(req.params.id);
+  if (!Number.isInteger(candidaturaId) || candidaturaId <= 0) {
+    return res.status(400).json({ erro: 'ID de candidatura inválido' });
+  }
+  try {
+    // OWNERSHIP: empresa só vê docs de candidaturas de vagas vinculadas à empresa
+    const { rows: cand } = await pool.query(
+      `SELECT c.id, c.vaga_id,
+              (SELECT 1 FROM empresa_vaga_acesso WHERE empresa_id = $1 AND vaga_id = c.vaga_id) as tem_acesso
+       FROM candidaturas c WHERE c.id = $2`,
+      [empresa_id, candidaturaId]
+    );
+    if (cand.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
+    if (!cand[0].tem_acesso) return res.status(403).json({ erro: 'Sem acesso a esta candidatura' });
+
+    const { rows } = await pool.query(
+      `SELECT id, tipo, categoria, valor_texto, arquivo_url, arquivo_nome, arquivo_tipo,
+              arquivo_tamanho, status, justificativa_admin, enviado_em, revisado_em
+       FROM documentos_candidatura WHERE candidatura_id = $1
+       ORDER BY categoria, id`,
+      [candidaturaId]
+    );
+    res.json({ documentos: rows, obrigatorios: DOCUMENTOS_OBRIGATORIOS });
+  } catch (e) {
+    console.error('[empresa docs]', e);
+    res.status(500).json({ erro: 'Erro ao carregar documentos' });
   }
 });
 
@@ -4257,9 +4464,10 @@ app.get('/api/admin/candidatura/:id/chat-empresa', authAdmin, async (req, res) =
 
 app.post('/api/admin/candidatura/:id/chat-empresa', authAdmin, async (req, res) => {
   const { id } = req.params;
-  const { mensagem } = req.body;
+  let { mensagem } = req.body;
   const { id: admin_id, nome: admin_nome } = req.user;
   if (!mensagem || !mensagem.trim()) return res.status(400).json({ erro: 'Mensagem vazia' });
+  mensagem = sanitizeText(mensagem.trim());
   try {
     const { rows } = await pool.query(`
       INSERT INTO empresa_chat (candidatura_id, remetente_tipo, remetente_id, remetente_nome, mensagem)
