@@ -1,6 +1,6 @@
 {
   "name": "recrutamento-api",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "API do Recrutamento e Sele\u00e7\u00e3o",
   "main": "src/server.js",
   "scripts": {
