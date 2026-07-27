@@ -3907,8 +3907,8 @@ app.get('/api/empresa/dashboard', authEmpresa, async (req, res) => {
       empresa: { id: empresa_id, nome: req.user?.nome || req.user?.email || 'Empresa' }
     });
   } catch (e) {
-    console.error('[empresa dashboard]', e);
-    res.status(500).json({ erro: 'Erro ao carregar dashboard' });
+    console.error('[empresa dashboard] ERRO:', e.message, e.code, e.detail);
+    res.status(500).json({ erro: 'Erro ao carregar dashboard', debug: e.message });
   }
 });
 
