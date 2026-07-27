@@ -113,6 +113,21 @@ app.delete('/api/_debug/meet-deletar/:eventId', async (req, res) => {
 
 // ============= DEBUG TEMPORÁRIO (remover depois) =============
 // Tenta enviar e-mail rico de notificação de mudança de etapa (preview)
+// 🔍 DEBUG TEMPORÁRIO: restaura etapa_atual de uma candidatura (limpeza pós-teste)
+app.post('/api/_debug-restaurar-etapa', async (req, res) => {
+  try {
+    const { candidatura_id, etapa } = req.body;
+    if (!candidatura_id || !etapa) return res.status(400).json({ erro: 'candidatura_id e etapa obrigatórios' });
+    const { rows } = await pool.query(
+      'UPDATE candidaturas SET etapa_atual = $1, atualizada_em = NOW() WHERE id = $2 RETURNING id, etapa_atual',
+      [etapa, candidatura_id]
+    );
+    res.json({ ok: true, atualizado: rows.length, candidatura: rows[0] });
+  } catch (e) {
+    res.status(500).json({ ok: false, erro: e.message });
+  }
+});
+
 // 🔍 DEBUG TEMPORÁRIO: testa query direta na tabela recrutadores
 app.get('/api/_debug-recrutadores', async (req, res) => {
   try {
