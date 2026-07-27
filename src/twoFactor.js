@@ -76,6 +76,10 @@ async function create2faCode(adminId, adminTipo = 'admin', ip = '') {
     [codigoId, adminId, adminTipo, codeHash, expiraEm, ip]
   );
 
+  // ⚠️ INTERNO: guarda código PURO em memória por 60s APENAS pra envio de e-mail
+  // Depois disso, só o hash existe — código puro some da memória
+  _pendingCodes.set(codigoId, { code, expires: Date.now() + 60_000 });
+
   return { codigo_id: codigoId, code };
 }
 
@@ -86,11 +90,11 @@ async function create2faCode(adminId, adminTipo = 'admin', ip = '') {
  * 
  * @param {string} codigoId - Token público do código
  * @param {string} code - Código de 6 dígitos fornecido pelo usuário
- * @returns {Promise<{valido: boolean, admin_id?: number, admin_tipo?: string, motivo?: string}>}
+ * @returns {Promise<{ok: boolean, admin?: object, motivo?: string}>}
  */
 async function verify2faCode(codigoId, code) {
   if (!codigoId || !code) {
-    return { valido: false, motivo: 'Código e ID são obrigatórios' };
+    return { ok: false, motivo: 'Código e ID são obrigatórios' };
   }
 
   // Busca o registro pelo codigo_id
@@ -102,19 +106,19 @@ async function verify2faCode(codigoId, code) {
   );
 
   if (rows.length === 0) {
-    return { valido: false, motivo: 'Código inválido' };
+    return { ok: false, motivo: 'Código inválido' };
   }
 
   const record = rows[0];
 
   // Verifica se já foi usado
   if (record.usado_em) {
-    return { valido: false, motivo: 'Código já utilizado' };
+    return { ok: false, motivo: 'Código já utilizado' };
   }
 
   // Verifica se expirou
   if (new Date() > new Date(record.expira_em)) {
-    return { valido: false, motivo: 'Código expirado' };
+    return { ok: false, motivo: 'Código expirado' };
   }
 
   // Verifica limite de tentativas
@@ -124,7 +128,7 @@ async function verify2faCode(codigoId, code) {
       `UPDATE admin_2fa_codes SET usado_em = NOW() WHERE id = $1`,
       [record.id]
     );
-    return { valido: false, motivo: 'Muitas tentativas. Solicite um novo código.' };
+    return { ok: false, motivo: 'Muitas tentativas. Solicite um novo código.' };
   }
 
   // Incrementa tentativas
@@ -136,7 +140,7 @@ async function verify2faCode(codigoId, code) {
   // Verifica o hash
   const ok = await bcrypt.compare(code, record.code_hash);
   if (!ok) {
-    return { valido: false, motivo: 'Código inválido' };
+    return { ok: false, motivo: 'Código inválido' };
   }
 
   // Marca como usado
@@ -145,7 +149,20 @@ async function verify2faCode(codigoId, code) {
     [record.id]
   );
 
-  return { valido: true, admin_id: record.admin_id, admin_tipo: record.admin_tipo };
+  // Buscar dados do admin pra emitir JWT
+  let admin;
+  if (record.admin_tipo === 'admin') {
+    const r = await pool.query('SELECT id, nome, email, role FROM admins WHERE id = $1', [record.admin_id]);
+    admin = r.rows[0];
+  } else if (record.admin_tipo === 'recrutador') {
+    const r = await pool.query('SELECT id, nome, email, role FROM recrutadores WHERE id = $1', [record.admin_id]);
+    admin = r.rows[0];
+  }
+  if (!admin) {
+    return { ok: false, motivo: 'Admin não encontrado' };
+  }
+
+  return { ok: true, admin };
 }
 
 // ===== Reenvio de código 2FA =====
@@ -197,7 +214,29 @@ async function resend2faCode(codigoId, ip = '') {
   }
 
   // Gera novo código
-  return create2faCode(record.admin_id, record.admin_tipo, ip);
+  const novo = await create2faCode(record.admin_id, record.admin_tipo, ip);
+  return { ok: true, codigo_id: novo.codigo_id, admin_id: record.admin_id };
+}
+
+/**
+ * ⚠️ INTERNO — Recupera código PURO (sem hash) de um codigo_id recém-criado.
+ * Usado APENAS pelo próprio login para enviar por e-mail IMEDIATAMENTE após criação.
+ * Retorna null se código já passou da janela de criação (>60s).
+ * NUNCA expor este método por rota HTTP.
+ *
+ * Implementação: armazenamos temporariamente em memória (Map) o código puro
+ * na criação, por 60 segundos, para permitir envio de e-mail sem persistir em DB.
+ */
+const _pendingCodes = new Map(); // codigo_id → { code, expires }
+
+async function getCodePuro(codigoId) {
+  const entry = _pendingCodes.get(codigoId);
+  if (!entry) return null;
+  if (Date.now() > entry.expires) {
+    _pendingCodes.delete(codigoId);
+    return null;
+  }
+  return entry.code;
 }
 
 module.exports = {
@@ -205,5 +244,7 @@ module.exports = {
   generateCodigoId,
   create2faCode,
   verify2faCode,
-  resend2faCode
+  resend2faCode,
+  getCodePuro,
+  _pendingCodes
 };
