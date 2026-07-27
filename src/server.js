@@ -1608,7 +1608,9 @@ app.get('/api/admin/_diag-schema-fase1', authAdmin, async (req, res) => {
         (SELECT COUNT(*) FROM empresa_vaga_acesso WHERE tipo='propria')::int AS eva_propria,
         (SELECT COUNT(*) FROM empresa_vaga_acesso WHERE tipo='compartilhada')::int AS eva_compartilhada,
         (SELECT COUNT(*) FROM empresa_vaga_acesso WHERE revogado_em IS NOT NULL)::int AS eva_revogadas,
-        (SELECT COUNT(*) FROM empresa_usuarios WHERE role='membro')::int AS eu_membros,
+        (SELECT COUNT(*) FROM empresa_usuarios WHERE role='recrutador')::int AS eu_recrutadores,
+        (SELECT COUNT(*) FROM empresa_usuarios WHERE role='admin_empresa')::int AS eu_admins,
+        (SELECT COUNT(*) FROM empresa_usuarios WHERE role='viewer')::int AS eu_viewers,
         (SELECT COUNT(*) FROM refresh_tokens WHERE user_role IS NOT NULL)::int AS rt_com_role,
         (SELECT COUNT(*) FROM refresh_tokens WHERE user_empresa_id IS NOT NULL)::int AS rt_com_empresa
     `);
@@ -4096,9 +4098,9 @@ app.post('/api/admin/empresas', authAdminOnly, async (req, res) => {
       try {
         const hash = await bcrypt.hash(usuario.senha, 10);
         const ur = await pool.query(
-          `INSERT INTO empresa_usuarios (empresa_id, nome, email, senha_hash, cargo, criado_por)
-           VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, nome, email, cargo, ativo`,
-          [empresa.id, usuario.nome, usuario.email.toLowerCase(), hash, usuario.cargo || 'admin', req.user.id]
+          `INSERT INTO empresa_usuarios (empresa_id, nome, email, senha_hash, cargo, criado_por, role)
+           VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id, nome, email, cargo, role, ativo`,
+          [empresa.id, usuario.nome, usuario.email.toLowerCase(), hash, usuario.cargo || 'Recrutador', req.user.id, usuario.role || 'recrutador']
         );
         usuarioCriado = ur.rows[0];
       } catch (e) {
@@ -4219,7 +4221,7 @@ app.post('/api/admin/empresa-vaga', authAdminOnly, async (req, res) => {
   try {
     const { rows } = await pool.query(
       `INSERT INTO empresa_vaga_acesso (empresa_id, vaga_id, concedido_por, tipo)
-       VALUES ($1,$2,$3,'proprietaria')
+       VALUES ($1,$2,$3,'propria')
        ON CONFLICT (empresa_id, vaga_id) DO NOTHING
        RETURNING *`,
       [empresa_id, vaga_id, req.user.id]
@@ -4345,23 +4347,23 @@ app.post('/api/empresa/cadastro', rateLimitByIp('cadastro-empresa'), async (req,
     `, [empresa_nome.trim(), cnpjClean, email_principal?.toLowerCase() || null, telefone || null, plano || 'essencial', slugFinal]);
     const empresa = empRes.rows[0];
 
-    // 4. Cria o admin master (empresa_usuarios)
+    // 4. Cria o admin master (empresa_usuarios) — primeiro usuário = admin_empresa
     const senhaHash = await bcrypt.hash(admin_senha, 10);
     const userRes = await pool.query(`
-      INSERT INTO empresa_usuarios (empresa_id, nome, email, senha_hash, cargo, ativo, primeiro_acesso)
-      VALUES ($1, $2, $3, $4, $5, true, false)
-      RETURNING id, nome, email, cargo, empresa_id
+      INSERT INTO empresa_usuarios (empresa_id, nome, email, senha_hash, cargo, ativo, primeiro_acesso, role)
+      VALUES ($1, $2, $3, $4, $5, true, false, 'admin_empresa')
+      RETURNING id, nome, email, cargo, role, empresa_id
     `, [empresa.id, admin_nome.trim(), emailLower, senhaHash, admin_cargo || 'Administrador']);
     const adminUser = userRes.rows[0];
 
     // 5. Gera tokens (já loga o admin master)
     const accessToken = criarAccessToken({
       id: adminUser.id, email: adminUser.email, nome: adminUser.nome, tipo: 'empresa',
-      empresa_id: empresa.id, empresa_nome: empresa.nome
+      empresa_id: empresa.id, empresa_nome: empresa.nome, role: adminUser.role
     });
     const refresh = criarRefreshToken();
     await persistirRefresh('empresa', adminUser.id, adminUser.email, refresh, req, {
-      user_role: adminUser.cargo || 'Administrador',
+      user_role: adminUser.role, // 'admin_empresa' — RBAC canônico
       user_empresa_id: empresa.id
     });
 
@@ -4409,7 +4411,7 @@ app.post('/api/auth/login-empresa', rateLimitLogin, async (req, res) => {
   if (!email || !senha) return res.status(400).json({ erro: 'E-mail e senha obrigatórios' });
   try {
     const { rows } = await pool.query(`
-      SELECT u.id, u.nome, u.email, u.senha_hash, u.ativo, u.primeiro_acesso, u.cargo,
+      SELECT u.id, u.nome, u.email, u.senha_hash, u.ativo, u.primeiro_acesso, u.cargo, u.role,
         u.empresa_id, e.nome as empresa_nome, e.ativo as empresa_ativa
       FROM empresa_usuarios u
       JOIN empresas e ON e.id = u.empresa_id
@@ -4435,11 +4437,12 @@ app.post('/api/auth/login-empresa', rateLimitLogin, async (req, res) => {
     // FIX Etapa 2: access (30m) + refresh (7d, hash no DB)
     const accessToken = criarAccessToken({
       id: u.id, email: u.email, nome: u.nome, tipo: 'empresa',
+      role: u.role || 'recrutador',
       empresa_id: u.empresa_id, empresa_nome: u.empresa_nome
     });
     const refresh = criarRefreshToken();
     await persistirRefresh('empresa', u.id, u.email, refresh, req, {
-      user_role: u.cargo || 'Administrador',
+      user_role: u.role || 'recrutador',
       user_empresa_id: u.empresa_id
     });
     await audit(req, 'login.success', { resource_type: 'empresa', resource_id: u.id, user_email: u.email, metadata: { empresa_id: u.empresa_id } });
@@ -4541,7 +4544,7 @@ app.post('/api/empresa/vagas', authEmpresa, async (req, res) => {
     // passamos NULL pra evitar violação de FK. Auto-criação é da própria empresa.
     await pool.query(
       `INSERT INTO empresa_vaga_acesso (empresa_id, vaga_id, concedido_por, tipo)
-       VALUES ($1, $2, NULL, 'proprietaria')
+       VALUES ($1, $2, NULL, 'propria')
        ON CONFLICT (empresa_id, vaga_id) DO NOTHING`,
       [empresa_id, vaga.id]
     );
