@@ -113,6 +113,24 @@ app.delete('/api/_debug/meet-deletar/:eventId', async (req, res) => {
 
 // ============= DEBUG TEMPORÁRIO (remover depois) =============
 // Tenta enviar e-mail rico de notificação de mudança de etapa (preview)
+// 🔍 DEBUG TEMPORÁRIO: lista usuários de empresa (com senha_hash mascarado)
+app.get('/api/_debug-empresas-usuarios', async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT u.id, u.empresa_id, u.nome, u.email, u.cargo, u.ativo,
+        e.nome as empresa_nome, e.ativo as empresa_ativa,
+        SUBSTRING(u.senha_hash, 1, 7) as hash_inicio
+      FROM empresa_usuarios u
+      JOIN empresas e ON e.id = u.empresa_id
+      ORDER BY u.criado_em DESC
+      LIMIT 20
+    `);
+    res.json({ ok: true, total: rows.length, usuarios: rows });
+  } catch (e) {
+    res.status(500).json({ ok: false, erro: e.message });
+  }
+});
+
 // 🔍 DEBUG TEMPORÁRIO: testa query direta na tabela recrutadores
 app.get('/api/_debug-recrutadores', async (req, res) => {
   try {
