@@ -3778,6 +3778,7 @@ app.get('/api/empresa/dashboard', authEmpresa, async (req, res) => {
     const tempoMedio = tempoMedioQ.rows[0]?.dias || 0;
 
     // taxa_aprovacao_30d: % de vagas fechadas nos últimos 30d que geraram contratação
+    // (vagas usa criada_em; atualizada_em não existe)
     const taxa30Q = await pool.query(`
       SELECT
         COUNT(*) FILTER (WHERE c.status IN ('contratado'))::int as com_contratacao,
@@ -3785,7 +3786,7 @@ app.get('/api/empresa/dashboard', authEmpresa, async (req, res) => {
       FROM vagas v
       JOIN empresa_vaga_acesso eva ON eva.vaga_id = v.id
       LEFT JOIN candidaturas c ON c.vaga_id = v.id AND c.status IN ('contratado','rejeitado','reprovado')
-      WHERE eva.empresa_id = $1 AND v.status = 'fechada' AND v.atualizada_em > $2
+      WHERE eva.empresa_id = $1 AND v.status = 'fechada' AND v.criada_em > $2
     `, [empresa_id, thirtyDaysAgo]);
     const total_fechadas_30d = taxa30Q.rows[0]?.total_fechadas || 0;
     const com_contratacao_30d = taxa30Q.rows[0]?.com_contratacao || 0;
