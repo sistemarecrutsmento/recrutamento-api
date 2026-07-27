@@ -350,12 +350,18 @@ async function init() {
     //   • empresa_usuarios.role
     //   • empresa_vaga_acesso.tipo + revogado_em + revogado_motivo
     //   • refresh_tokens.user_role + user_empresa_id
+    // Importante: se a migration falhar, REGISTRAMOS e seguimos.
+    // O boot do container NÃO deve abortar por causa de migration —
+    // caso contrário o app fica indisponível até o dev corrigir manualmente.
     // ──────────────────────────────────────────────────────────────────
-    const { aplicar: aplicarMigracoesFase1 } = require('./migrations/001_multi_tenant_fase1');
-    const r = await aplicarMigracoesFase1();
-    if (!r.ok) {
-      console.error('[MIGRATION FASE 1] Falha:', r.erro);
-      throw new Error('Falha nas migrations da Fase 1 — abortando boot');
+    try {
+      const { aplicar: aplicarMigracoesFase1 } = require('./migrations/001_multi_tenant_fase1');
+      const r = await aplicarMigracoesFase1();
+      if (!r.ok) {
+        console.error('[MIGRATION FASE 1] Falha (mas segui):', r.erro);
+      }
+    } catch (migrationErr) {
+      console.error('[MIGRATION FASE 1] Erro não tratado (mas segui):', migrationErr.message);
     }
 
     console.log('Tabelas criadas/verificadas + colunas garantidas + migrations Fase 1 aplicadas');
