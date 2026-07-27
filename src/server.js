@@ -786,8 +786,7 @@ app.post('/api/candidato/cadastro', rateLimitLogin, async (req, res) => {
   } catch (e) {
     console.error('[CADASTRO ERRO]', e);
     if (e.code === '23505') return res.status(400).json({ erro: 'CPF ou e-mail já cadastrado' });
-    // DEBUG FASE 1: retorna o erro real pra investigar migration
-    res.status(500).json({ erro: 'Erro ao criar conta', debug: { code: e.code, msg: e.message, hint: e.hint } });
+    res.status(500).json({ erro: 'Erro ao criar conta' });
   }
 });
 
