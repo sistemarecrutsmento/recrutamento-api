@@ -57,6 +57,13 @@ async function init() {
         criado_em TIMESTAMP DEFAULT NOW()
       );
 
+      -- ETAPA 3 (2026-07-27): colunas do multi-tenant / SaaS B2B.
+      -- Idempotente (IF NOT EXISTS) — funciona em banco novo e em produção.
+      ALTER TABLE empresas ADD COLUMN IF NOT EXISTS plano TEXT DEFAULT 'essencial';
+      ALTER TABLE empresas ADD COLUMN IF NOT EXISTS slug TEXT UNIQUE;
+      ALTER TABLE empresas ADD COLUMN IF NOT EXISTS cor_destaque TEXT DEFAULT '#722F37';
+      ALTER TABLE empresas ADD COLUMN IF NOT EXISTS logo_url TEXT;
+
       -- Usuários que acessam o sistema como empresa (múltiplos por empresa)
       CREATE TABLE IF NOT EXISTS empresa_usuarios (
         id SERIAL PRIMARY KEY,
