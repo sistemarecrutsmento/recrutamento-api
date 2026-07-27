@@ -44,8 +44,10 @@ async function m001_vagas_empresa_id(client, log) {
 // Migration 002 — empresa_usuarios.role
 // ──────────────────────────────────────────────────────────────────────
 async function m002_empresa_usuarios_role(client, log) {
+  // Default atualizado para 'recrutador' em 28/07/2026 (Fase 1, review RBAC)
+  // Valores permitidos serão reforçados por CHECK constraint na Migration 002
   const r = await ensureColumn(client, 'empresa_usuarios', 'role',
-    "TEXT DEFAULT 'membro'");
+    "TEXT DEFAULT 'recrutador'");
   log(`  empresa_usuarios.role: ${r.criada ? 'criada' : 'já existia'}`);
   return { criadas: [r] };
 }
