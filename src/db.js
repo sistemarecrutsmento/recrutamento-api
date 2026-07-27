@@ -290,6 +290,27 @@ async function init() {
     await client.query(`CREATE INDEX IF NOT EXISTS idx_audit_resource ON audit_logs(resource_type, resource_id);`);
     await client.query(`CREATE INDEX IF NOT EXISTS idx_audit_created ON audit_logs(created_at DESC);`);
 
+    // Tabela de refresh tokens (Etapa 2, 2026-07-27)
+    // Token armazenado como hash (sha256) — nunca em texto puro.
+    // Suporta revogação individual (revoked_at) e por usuário (revoked_all).
+    await client.query(`
+      CREATE TABLE IF NOT EXISTS refresh_tokens (
+        id SERIAL PRIMARY KEY,
+        user_type TEXT NOT NULL,
+        user_id INTEGER,
+        user_email TEXT NOT NULL,
+        token_hash TEXT UNIQUE NOT NULL,
+        criado_em TIMESTAMP DEFAULT NOW(),
+        expira_em TIMESTAMP NOT NULL,
+        revogado_em TIMESTAMP,
+        revogado_motivo TEXT,
+        ip_criacao TEXT,
+        user_agent_criacao TEXT
+      );
+    `);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_refresh_user ON refresh_tokens(user_email, expira_em DESC);`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_refresh_token ON refresh_tokens(token_hash);`);
+
     // Garantir colunas em tabelas já criadas (idempotente)
     await client.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS criada_em TIMESTAMP DEFAULT NOW();`);
     await client.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS atualizada_em TIMESTAMP DEFAULT NOW();`);
