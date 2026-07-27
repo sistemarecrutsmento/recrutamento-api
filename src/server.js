@@ -633,7 +633,7 @@ if (DEBUG) {
   });
 } else {
   // Em produção, todas as rotas /api/_debug* retornam 404 sem executar
-  app.all('/api/_debug/*', (req, res) => res.status(404).json({ erro: 'Not found' }));
+  app.all('/api/_debug*', (req, res) => res.status(404).json({ erro: 'Not found' }));
   app.all('/api/_debug*', (req, res) => res.status(404).json({ erro: 'Not found' }));
 }
 
@@ -5673,7 +5673,7 @@ process.on('unhandledRejection', (e) => {
   // =========================================================================
 
   // Lista usuarios da empresa logada (read-only, qualquer role)
-  app.get('/api/empresa/usuarios', requireEmpresaViewer, async (req, res) => {
+  app.get('/api/empresa/membros', requireEmpresaViewer, async (req, res) => {
     const { empresa_id } = req.user;
     try {
       const { rows } = await pool.query(`
