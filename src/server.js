@@ -1162,20 +1162,35 @@ app.delete('/api/candidato/foto', authCandidato, async (req, res) => {
 // ============= VAGAS (PÚBLICO) =============
 app.get('/api/vagas', async (req, res) => {
   const { cidade, area, tipo, nivel, busca } = req.query;
-  let sql = `SELECT * FROM vagas WHERE status = 'publicada'`;
+  // Whitelist explícita (não usa SELECT *) — evita leak de colunas internas
+  let sql = `SELECT id, titulo, empresa, descricao, requisitos, beneficios, salario_min, salario_max,
+                    tipo_contrato, nivel, area, cidade, estado, modelo, publicada_em, etapas
+             FROM vagas WHERE publicada = true`;
   const params = [];
   if (cidade) { params.push(`%${cidade}%`); sql += ` AND cidade ILIKE $${params.length}`; }
   if (area) { params.push(area); sql += ` AND area = $${params.length}`; }
-  if (tipo) { params.push(tipo); sql += ` AND tipo_contrato = $${params.length}`; }
-  if (nivel) { params.push(nivel); sql += ` AND nivel = $${params.length}`; }
+  if (tipo) { params.push(`%${tipo}%`); sql += ` AND tipo_contrato ILIKE $${params.length}`; }
+  if (nivel) { params.push(`%${nivel}%`); sql += ` AND nivel ILIKE $${params.length}`; }
   if (busca) { params.push(`%${busca}%`); sql += ` AND (titulo ILIKE $${params.length} OR empresa ILIKE $${params.length})`; }
-  sql += ' ORDER BY criada_em DESC';
+  sql += ' ORDER BY publicada_em DESC NULLS LAST, id DESC';
   const { rows } = await pool.query(sql, params);
   res.json({ vagas: rows });
 });
 
 app.get('/api/vagas/:id', async (req, res) => {
-  const { rows } = await pool.query('SELECT * FROM vagas WHERE id = $1', [req.params.id]);
+  // Retorna apenas vagas PUBLICADAS e sem expor metadados internos
+  // (criada_por, updated_by, status bruto, etc)
+  const id = parseInt(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    return res.status(400).json({ erro: 'ID de vaga inválido' });
+  }
+  const { rows } = await pool.query(
+    `SELECT id, titulo, empresa, descricao, requisitos, beneficios, salario_min, salario_max,
+            tipo_contrato, nivel, area, cidade, estado, modelo, publicada_em, etapas,
+            CASE WHEN publicada = true THEN 'publicada' ELSE NULL END as status
+     FROM vagas WHERE id = $1 AND publicada = true`,
+    [id]
+  );
   if (rows.length === 0) return res.status(404).json({ erro: 'Vaga não encontrada' });
   res.json({ vaga: rows[0] });
 });
