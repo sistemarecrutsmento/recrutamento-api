@@ -27,8 +27,109 @@ else if (process.env.CLOUDINARY_CLOUD_NAME) {
 }
 
 const app = express();
-app.use(cors({ origin: process.env.CORS_ORIGIN || '*' }));
+
+// CORS whitelist — origens oficiais do sistema
+const ALLOWED_ORIGINS = [
+  'https://vagasio.com.br',
+  'https://www.vagasio.com.br',
+  'https://sistemarecrutsmento.github.io',  // GitHub Pages (frontend)
+  'https://sistemarecrutsmento.github.io/vagas',           // GitHub Pages (candidato)
+  'https://sistemarecrutsmento.github.io/vagas/admin',     // GitHub Pages (admin)
+  'https://sistemarecrutsmento.github.io/vagas/empresa',   // GitHub Pages (empresa)
+  'capacitor://localhost',                                  // app iOS/Android via Capacitor
+  'ionic://localhost'
+];
+app.use(cors({
+  origin: (origin, cb) => {
+    // requests sem Origin (curl, server-to-server) passam
+    if (!origin) return cb(null, true);
+    if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
+    // Permite também subpath do GitHub Pages
+    if (/^https:\/\/[a-z0-9-]+\.github\.io$/i.test(origin)) return cb(null, true);
+    return cb(new Error(`CORS: origem não autorizada (${origin})`));
+  },
+  credentials: true
+}));
 app.use(express.json({ limit: '100mb' }));
+
+// =========================================================================
+// RATE LIMIT (proteção contra brute force em login)
+// =========================================================================
+// In-memory por IP+chave. Limite: 5 tentativas / 15 min, genérico pra falhas.
+// Não distingue "e-mail existe" vs "senha errada" (sempre 401 genérico).
+const loginRateMap = new Map(); // key: `${ip}|${lowercase-email}` -> { count, firstAt, blockedUntil }
+const RATE_LIMIT_MAX = 5;
+const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
+
+function rateLimitLogin(req, res, next) {
+  const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+  const email = (req.body?.email || '').toLowerCase().trim() || '_noemail';
+  const key = `${ip}|${email}`;
+  const now = Date.now();
+  const rec = loginRateMap.get(key);
+  if (rec && rec.blockedUntil && rec.blockedUntil > now) {
+    const waitSec = Math.ceil((rec.blockedUntil - now) / 1000);
+    return res.status(429).json({
+      erro: `Muitas tentativas. Tente novamente em ${waitSec}s.`
+    });
+  }
+  // Limpa registro antigo
+  if (rec && (now - rec.firstAt) > RATE_LIMIT_WINDOW_MS) {
+    loginRateMap.delete(key);
+  }
+  next();
+}
+
+function rateLimitRegisterFail(req) {
+  const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+  const email = (req.body?.email || '').toLowerCase().trim() || '_noemail';
+  const key = `${ip}|${email}`;
+  const now = Date.now();
+  const rec = loginRateMap.get(key) || { count: 0, firstAt: now, blockedUntil: null };
+  rec.count += 1;
+  if (rec.count === 1) rec.firstAt = now;
+  if (rec.count >= RATE_LIMIT_MAX) {
+    rec.blockedUntil = now + RATE_LIMIT_WINDOW_MS;
+  }
+  loginRateMap.set(key, rec);
+}
+
+function rateLimitClear(req) {
+  const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+  const email = (req.body?.email || '').toLowerCase().trim() || '_noemail';
+  loginRateMap.delete(`${ip}|${email}`);
+}
+
+// Limpa o mapa periodicamente (evita memory leak)
+setInterval(() => {
+  const now = Date.now();
+  for (const [k, r] of loginRateMap.entries()) {
+    if ((now - r.firstAt) > RATE_LIMIT_WINDOW_MS && (!r.blockedUntil || r.blockedUntil < now)) {
+      loginRateMap.delete(k);
+    }
+  }
+}, 60 * 1000).unref();
+
+// =========================================================================
+// AUTH DEBUG (proteção adicional pras rotas de debug em prod)
+// =========================================================================
+// Em prod, exige 2 coisas: DEBUG_API=1 NO ENV e header `x-debug-key` igual a DEBUG_API_KEY.
+const DEBUG_API_ENABLED = process.env.DEBUG_API === '1';
+const DEBUG_API_KEY = process.env.DEBUG_API_KEY || '';
+
+function authDebug(req, res, next) {
+  if (!DEBUG_API_ENABLED) {
+    return res.status(404).json({ erro: 'Not found' });
+  }
+  // Se DEBUG_API_KEY estiver setada, exige o header. Senão só o flag basta.
+  if (DEBUG_API_KEY) {
+    const k = req.headers['x-debug-key'];
+    if (k !== DEBUG_API_KEY) {
+      return res.status(403).json({ erro: 'debug key inválida' });
+    }
+  }
+  next();
+}
 
 // log toda requisição
 app.use((req, res, next) => {
@@ -45,236 +146,144 @@ app.use((err, req, res, next) => {
 // ============= SAÚDE =============
 app.get('/api/saude', (req, res) => res.json({ ok: true, sistema: process.env.SISTEMA_NOME, hora: new Date().toISOString() }));
 
-// ============= SENTINELA — confirma se código novo (com Meet) está rodando =============
-app.get('/api/_debug/versao', (req, res) => {
-  res.json({
-    ok: true,
-    versao: '2026-07-26-VAGAS-ATIVAS-RANKING',
-    meet_carregado: typeof require('./meet').criarEventoMeet === 'function',
-    buildCommit: process.env.RENDER_GIT_COMMIT,
-    porta: process.env.PORT || 10000,
-    hora: new Date().toISOString(),
-    node: process.version,
-    uptime_s: Math.round(process.uptime()),
-    envRender: process.env.RENDER === 'true'
-  });
-});
-
-// ============= TESTE MEET (também no topo, pra forçar carregamento) =============
-app.get('/api/_debug/meet-teste', async (req, res) => {
-  try {
-    const r = await meet.testarConexao();
-    res.json({ ok: true, ...r, admin: process.env.MEET_ADMIN_EMAIL || 'comercial@vagasio.com.br' });
-  } catch (e) {
-    console.error('[MEET TESTE]', e);
-    res.status(500).json({ ok: false, erro: e.message });
-  }
-});
-
-app.post('/api/_debug/meet-criar-teste', async (req, res) => {
-  try {
-    const start = new Date(Date.now() + 10 * 60 * 1000);
-    const end = new Date(start.getTime() + 30 * 60 * 1000);
-    const r = await meet.criarEventoMeet({
-      summary: '🧪 TESTE VagasIO Meet',
-      description: 'Evento de teste criado pela API. Pode ignorar.',
-      startTime: start.toISOString(),
-      durationMinutes: 30,
-      attendees: [],
-    });
-    res.json({ ok: true, ...r });
-  } catch (e) {
-    console.error('[MEET CRIAR TESTE]', e);
-    res.status(500).json({ ok: false, erro: e.message });
-  }
-});
-
-// Lista os próximos 5 eventos do Calendar (pra debug)
-app.get('/api/_debug/meet-listar-teste', async (req, res) => {
-  try {
-    const r = await meet.listarEventosFuturos(5);
-    res.json({ ok: true, ...r });
-  } catch (e) {
-    console.error('[MEET LISTAR TESTE]', e);
-    res.status(500).json({ ok: false, erro: e.message });
-  }
-});
-
-// Deleta um evento do Calendar pelo ID (pra debug/limpeza)
-app.delete('/api/_debug/meet-deletar/:eventId', async (req, res) => {
-  try {
-    await meet.deletarEventoMeet(req.params.eventId);
-    res.json({ ok: true, eventoDeletado: req.params.eventId });
-  } catch (e) {
-    console.error('[MEET DELETAR]', e);
-    res.status(500).json({ ok: false, erro: e.message });
-  }
-});
-
-// ============= DEBUG TEMPORÁRIO (remover depois) =============
-// Tenta enviar e-mail rico de notificação de mudança de etapa (preview)
-// 🔍 DEBUG TEMPORÁRIO: testa query direta na tabela recrutadores
-app.get('/api/_debug-recrutadores', async (req, res) => {
-  try {
-    console.log('[debug-recrutadores] iniciando teste');
-    const t0 = Date.now();
-    const r1 = await pool.query('SELECT COUNT(*) as total FROM recrutadores');
-    console.log(`[debug-recrutadores] COUNT *: ${Date.now()-t0}ms, total=${r1.rows[0].total}`);
-    
-    const t1 = Date.now();
-    const r2 = await pool.query('SELECT id, nome, email FROM recrutadores LIMIT 5');
-    console.log(`[debug-recrutadores] SELECT simples: ${Date.now()-t1}ms, rows=${r2.rows.length}`);
-    
-    const t2 = Date.now();
-    const r3 = await pool.query(
-      'SELECT id, nome, email, senha_hash, ativo, role, primeiro_acesso FROM recrutadores WHERE email = $1',
-      ['joao.again@vagasio.com.br']
-    );
-    console.log(`[debug-recrutadores] SELECT WHERE: ${Date.now()-t2}ms, rows=${r3.rows.length}`);
-    
-    res.json({
-      ok: true,
-      count: r1.rows[0].total,
-      sample: r2.rows,
-      searched: r3.rows
-    });
-  } catch (e) {
-    console.error('[debug-recrutadores] ERRO:', e.message, e.code);
-    res.json({ ok: false, erro: e.message, code: e.code, detail: e.detail });
-  }
-});
-
-app.get('/api/_debug-email-notificacao', async (req, res) => {
-  try {
-    const to = req.query.to || 'fabio08dejesusjunior@gmail.com';
-    const result = await enviarEmailAtualizacao(
-      to,
-      'Fabio Junior',
-      'Auxiliar Administrativo',
-      {
-        etapaNum: 3,
-        etapaNome: 'RH',
-        acao: 'avancar',
-        status: 'em_andamento',
-        mensagemAdmin: 'Você avançou para a etapa de RH. Em breve agendaremos uma entrevista.'
-      }
-    );
-    res.json({ ok: true, result });
-  } catch (e) {
-    res.json({ ok: false, erro: e.message, code: e.code, response: e.response?.data });
-  }
-});
-
-// Tenta enviar e-mail de teste via Resend e mostra erro/sucesso
-// v2 - força redeploy p/ pegar RESEND_API_KEY
-app.get('/api/_debug-email-teste', async (req, res) => {
-  const to = req.query.to || 'fabio08dejesusjunior@gmail.com';
-  const hasResend = !!process.env.RESEND_API_KEY;
-  const hasFrom = !!process.env.EMAIL_FROM;
-  // Lista todas as env vars relacionadas (mascaradas)
-  const envRelacionadas = {};
-  for (const k of Object.keys(process.env)) {
-    if (/RESEND|EMAIL|SISTEMA|MAIL|SMTP|NODE_ENV|DEBUG|RENDER/i.test(k)) {
-      const v = process.env[k];
-      envRelacionadas[k] = v && v.length > 12 ? v.substring(0, 6) + '...' + v.substring(v.length - 4) : v;
-    }
-  }
-  const info = {
-    hasResendApiKey: hasResend,
-    hasEmailFrom: hasFrom,
-    emailFrom: process.env.EMAIL_FROM || null,
-    resendKeyPreview: hasResend ? process.env.RESEND_API_KEY.substring(0, 8) + '...' : null,
-    nodeEnv: process.env.NODE_ENV || 'sem',
-    sistemaUrl: process.env.SISTEMA_URL || 'default',
-    envRelacionadas,
-    processUptimeSeg: Math.round(process.uptime())
-  };
-  try {
-    const result = await enviarEmail({
-      to,
-      subject: 'Teste de e-mail - Vagas.io',
-      html: '<p>Se você está lendo isso, o sistema de e-mail tá funcionando! ✅</p>'
-    });
-    res.json({ ok: true, info, result });
-  } catch (e) {
-    res.json({ ok: false, info, erro: e.message, code: e.code, response: e.response?.data });
-  }
-});
-
-// MARKER-DEBUG-ENV: mostra tudo sobre o processo
-app.get('/api/_debug-processo', (req, res) => {
-  // Lista TODAS as env vars com "RESEND" no nome (independente de case)
-  const resendEnvVars = {};
-  Object.keys(process.env).forEach(k => {
-    if (k.toUpperCase().includes('RESEND')) {
-      const v = process.env[k];
-      resendEnvVars[k] = {
-        len: v ? v.length : 0,
-        preview: v ? v.substring(0, 8) + '...' : null,
-        starts: v ? v.substring(0, 4) : null
-      };
-    }
-  });
-
-  res.json({
-    pid: process.pid,
-    uptimeSeg: Math.round(process.uptime()),
-    startedAt: new Date(Date.now() - process.uptime() * 1000).toISOString(),
-    nodeVersion: process.version,
-    platform: process.platform,
-    memoryMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
-    env: {
-      hasResendApiKey: !!process.env.RESEND_API_KEY,
-      resendKeyLen: (process.env.RESEND_API_KEY || '').length,
-      resendKeyPreview: process.env.RESEND_API_KEY ? process.env.RESEND_API_KEY.substring(0, 8) + '...' : null,
-      hasDatabaseUrl: !!process.env.DATABASE_URL,
-      databaseUrlPreview: process.env.DATABASE_URL ? process.env.DATABASE_URL.substring(0, 25) + '...' : null,
-      hasJwtSecret: !!process.env.JWT_SECRET,
-      hasEmailFrom: !!process.env.EMAIL_FROM,
-      hasEmailAppPassword: !!process.env.EMAIL_APP_PASSWORD,
-      hasAdminNotifEmail: !!process.env.ADMIN_NOTIF_EMAIL
-    },
-    resendEnvVars,         // ← NOVO: lista TODAS as env vars com "RESEND" no nome
-    resendCount: Object.keys(resendEnvVars).length,
-    gitCommit: process.env.RENDER_GIT_COMMIT || 'n/a'
-  });
-});
-
-// Log no startup: mostra TODAS env vars que contenham "RESEND" no nome
-console.log('[STARTUP] Variáveis de ambiente com "RESEND" no nome:');
-const foundResend = Object.keys(process.env).filter(k => k.toUpperCase().includes('RESEND'));
-if (foundResend.length === 0) {
-  console.log('  ❌ NENHUMA encontrada');
-} else {
-  foundResend.forEach(k => {
-    const v = process.env[k];
-    console.log(`  ✅ ${k} = ${v ? v.substring(0, 8) + '... (len=' + v.length + ')' : 'VAZIA'}`);
-  });
-}
-console.log('[STARTUP] getResendKey() retorna:', getResendKey() ? getResendKey().substring(0, 8) + '... (len=' + getResendKey().length + ')' : 'null');
-
-// Debug: testa bcrypt isolado
 // =========================================================================
-// ROTAS DE DEBUG (APENAS DESENVOLVIMENTO)
+// ROTAS DE DEBUG (APENAS DESENVOLVIMENTO / DEBUG EXPLÍCITO)
 // =========================================================================
-// Em produção, só funciona se DEBUG_API=1 estiver setado no env
-const DEBUG = process.env.DEBUG_API === '1';
+// Em produção, todas exigem:
+//   1. DEBUG_API=1 no env
+//   2. Header x-debug-key igual a DEBUG_API_KEY (se DEBUG_API_KEY estiver setada)
+// As rotas que operam Calendar (Google Meet) também exigem authAdmin.
+const DEBUG = DEBUG_API_ENABLED;  // reusa a var do topo
 
 if (DEBUG) {
-  // Teste de bcrypt
-  app.get('/api/_debug/bcrypt', async (req, res) => {
+  // ====== Apenas metadados de versão (não vaza nada sensível) ======
+  app.get('/api/_debug/versao', authDebug, (req, res) => {
+    res.json({
+      ok: true,
+      versao: '2026-07-26-VAGAS-ATIVAS-RANKING',
+      meet_carregado: typeof require('./meet').criarEventoMeet === 'function',
+      gitCommit: (process.env.RENDER_GIT_COMMIT || '').substring(0, 7),
+      node: process.version,
+      uptimeSeg: Math.round(process.uptime()),
+      envRender: process.env.RENDER === 'true'
+    });
+  });
+
+  // ====== Process: só metadados públicos, SEM env vars cruas ======
+  app.get('/api/_debug-processo', authDebug, (req, res) => {
+    res.json({
+      pid: process.pid,
+      uptimeSeg: Math.round(process.uptime()),
+      nodeVersion: process.version,
+      platform: process.platform,
+      memoryMB: Math.round(process.memoryUsage().rss / 1024 / 1024),
+      // só booleanos — NUNCA a chave real
+      hasResendApiKey: !!process.env.RESEND_API_KEY,
+      hasDatabaseUrl: !!process.env.DATABASE_URL,
+      hasJwtSecret: !!process.env.JWT_SECRET,
+      hasEmailFrom: !!process.env.EMAIL_FROM,
+      hasAdminNotifEmail: !!process.env.ADMIN_NOTIF_EMAIL
+    });
+  });
+
+  // ====== Email: testa Resend, SEM listar env vars ======
+  app.get('/api/_debug-email-teste', authDebug, async (req, res) => {
+    const to = req.query.to || 'fabio08dejesusjunior@gmail.com';
+    try {
+      const result = await enviarEmail({
+        to,
+        subject: 'Teste de e-mail - Vagas.io',
+        html: '<p>Se você está lendo isso, o sistema de e-mail tá funcionando! ✅</p>'
+      });
+      res.json({ ok: true, hasResendApiKey: !!process.env.RESEND_API_KEY, result });
+    } catch (e) {
+      res.status(500).json({ ok: false, hasResendApiKey: !!process.env.RESEND_API_KEY, erro: e.message });
+    }
+  });
+
+  // ====== Email de notificação (preview) ======
+  app.get('/api/_debug-email-notificacao', authDebug, async (req, res) => {
+    try {
+      const to = req.query.to || 'fabio08dejesusjunior@gmail.com';
+      const result = await enviarEmailAtualizacao(
+        to,
+        'Fabio Junior',
+        'Auxiliar Administrativo',
+        {
+          etapaNum: 3,
+          etapaNome: 'RH',
+          acao: 'avancar',
+          status: 'em_andamento',
+          mensagemAdmin: 'Você avançou para a etapa de RH. Em breve agendaremos uma entrevista.'
+        }
+      );
+      res.json({ ok: true, result });
+    } catch (e) {
+      res.status(500).json({ ok: false, erro: e.message });
+    }
+  });
+
+  // ====== Meet: testar conexão (read-only) ======
+  app.get('/api/_debug/meet-teste', authDebug, async (req, res) => {
+    try {
+      const r = await meet.testarConexao();
+      res.json({ ok: true, ...r });
+    } catch (e) {
+      res.status(500).json({ ok: false, erro: e.message });
+    }
+  });
+
+  // ====== Meet: listar eventos futuros (read-only) ======
+  app.get('/api/_debug/meet-listar-teste', authDebug, async (req, res) => {
+    try {
+      const r = await meet.listarEventosFuturos(5);
+      res.json({ ok: true, ...r });
+    } catch (e) {
+      res.status(500).json({ ok: false, erro: e.message });
+    }
+  });
+
+  // ====== Meet: criar/deletar — exige authAdmin ADICIONAL (operam Calendar real) ======
+  app.post('/api/_debug/meet-criar-teste', authDebug, authAdmin, async (req, res) => {
+    try {
+      const start = new Date(Date.now() + 10 * 60 * 1000);
+      const end = new Date(start.getTime() + 30 * 60 * 1000);
+      const r = await meet.criarEventoMeet({
+        summary: '🧪 TESTE VagasIO Meet',
+        description: 'Evento de teste criado pela API. Pode ignorar.',
+        startTime: start.toISOString(),
+        durationMinutes: 30,
+        attendees: [],
+      });
+      res.json({ ok: true, ...r });
+    } catch (e) {
+      res.status(500).json({ ok: false, erro: e.message });
+    }
+  });
+
+  app.delete('/api/_debug/meet-deletar/:eventId', authDebug, authAdmin, async (req, res) => {
+    try {
+      await meet.deletarEventoMeet(req.params.eventId);
+      res.json({ ok: true, eventoDeletado: req.params.eventId });
+    } catch (e) {
+      res.status(500).json({ ok: false, erro: e.message });
+    }
+  });
+
+  // ====== Bcrypt: teste isolado ======
+  app.get('/api/_debug/bcrypt', authDebug, async (req, res) => {
     try {
       const hash = await bcrypt.hash('089339', 10);
       const ok = await bcrypt.compare('089339', hash);
       const ok2 = await bcrypt.compare('errado', hash);
       res.json({ ok, ok2, hashInicio: hash.substring(0, 7), node: process.version });
     } catch (e) {
-      res.status(500).json({ erro: e.message, stack: e.stack?.substring(0, 500) });
+      res.status(500).json({ erro: e.message });
     }
   });
 
-  // Resetar senha do admin
-  app.post('/api/_debug/reset-admin', async (req, res) => {
+  // ====== Resetar senha do admin (CRÍTICO) — exige authAdmin ======
+  app.post('/api/_debug/reset-admin', authDebug, authAdmin, async (req, res) => {
     try {
       const email = (req.body.email || process.env.EMAIL_FROM || '').toLowerCase();
       const senha = req.body.senha || process.env.ADMIN_SENHA || '089339';
@@ -290,31 +299,29 @@ if (DEBUG) {
     }
   });
 
-  // Estado do admin (SEM hash da senha — só id/nome/email)
-  app.get('/api/_debug/admin-info', async (req, res) => {
+  // ====== Info admin (SEM hash) ======
+  app.get('/api/_debug/admin-info', authDebug, async (req, res) => {
     try {
-      const { rows } = await pool.query(
-        `SELECT id, nome, email, criado_em FROM admins`
-      );
+      const { rows } = await pool.query(`SELECT id, nome, email, criado_em FROM admins`);
       res.json({ admins: rows });
     } catch (e) {
       res.status(500).json({ erro: e.message });
     }
   });
 
-  app.get('/api/_debug/config', async (req, res) => {
+  // ====== Config: só booleanos, NUNCA chaves ======
+  app.get('/api/_debug/config', authDebug, (req, res) => {
     res.json({
       hasDb: !!process.env.DATABASE_URL,
       hasEmail: !!process.env.EMAIL_FROM,
       hasEmailPwd: !!process.env.EMAIL_APP_PASSWORD,
       hasJwt: !!process.env.JWT_SECRET,
-      smtpDebug: process.env.SMTP_DEBUG || '0',
       nodeEnv: process.env.NODE_ENV || 'sem'
     });
   });
 
-  // Teste dashboard SEM auth (público)
-  app.get('/api/_debug/dashboard', async (req, res) => {
+  // ====== Dashboard bruto (contadores públicos) ======
+  app.get('/api/_debug/dashboard', authDebug, async (req, res) => {
     try {
       const stats = await pool.query(`
         SELECT
@@ -325,11 +332,12 @@ if (DEBUG) {
       `);
       res.json({ stats: stats.rows[0] });
     } catch (e) {
-      res.status(500).json({ erro: e.message, stack: e.stack?.substring(0, 300) });
+      res.status(500).json({ erro: e.message });
     }
   });
 
-  app.get('/api/_debug/ultimo-codigo/:email', async (req, res) => {
+  // ====== Último código de verificação (CRÍTICO — exige authAdmin) ======
+  app.get('/api/_debug/ultimo-codigo/:email', authDebug, authAdmin, async (req, res) => {
     try {
       const { rows } = await pool.query(
         `SELECT codigo, expira_em, usado FROM codigos_verificacao
@@ -343,8 +351,8 @@ if (DEBUG) {
     }
   });
 
-  // Migração manual via API
-  app.post('/api/_debug/migrar', async (req, res) => {
+  // ====== Migração manual (DDL/DML) — exige authAdmin ======
+  app.post('/api/_debug/migrar', authDebug, authAdmin, async (req, res) => {
     try {
       const cols = await pool.query(`
         SELECT table_schema, table_name, column_name
@@ -358,8 +366,8 @@ if (DEBUG) {
     }
   });
 
-  // ===== Debug: ajustar etapas de uma vaga =====
-  app.post('/api/_debug/vaga-etapas', async (req, res) => {
+  // ====== Ajustar etapas de uma vaga — exige authAdmin ======
+  app.post('/api/_debug/vaga-etapas', authDebug, authAdmin, async (req, res) => {
     try {
       const { vaga_id, substituir } = req.body;
       if (!vaga_id || !Array.isArray(substituir)) {
@@ -391,13 +399,17 @@ if (DEBUG) {
       );
       res.json({ ok: true, etapas: upd.rows[0].etapas });
     } catch (e) {
-      console.error(e);
       res.status(500).json({ erro: e.message });
     }
   });
+
+  // NOTA: /api/_debug-recrutadores e /api/_debug/fix-entrevistas foram REMOVIDAS.
+  // A primeira vazava senha_hash bcrypt; a segunda permitia migração sem auth.
+  // Foram removidas por segurança (2026-07-26). Ver RULES.md.
 } else {
-  // Em produção, todas as rotas de debug retornam 404
+  // Em produção, todas as rotas /api/_debug* retornam 404 sem executar
   app.all('/api/_debug/*', (req, res) => res.status(404).json({ erro: 'Not found' }));
+  app.all('/api/_debug*', (req, res) => res.status(404).json({ erro: 'Not found' }));
 }
 
 // ============= CEP (ViaCEP) =============
@@ -521,13 +533,14 @@ app.post('/api/candidato/cadastro', async (req, res) => {
 });
 
 // ============= CANDIDATO - LOGIN COM SENHA (NOVO) =============
-app.post('/api/candidato/login', async (req, res) => {
+app.post('/api/candidato/login', rateLimitLogin, async (req, res) => {
   const { email, senha } = req.body;
   if (!email || !senha) return res.status(400).json({ erro: 'E-mail e senha obrigatórios' });
 
   const emailLower = email.toLowerCase();
   const { rows } = await pool.query('SELECT * FROM candidatos WHERE email = $1', [emailLower]);
   if (rows.length === 0) {
+    rateLimitRegisterFail(req);
     return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
   }
   const cand = rows[0];
@@ -539,8 +552,10 @@ app.post('/api/candidato/login', async (req, res) => {
 
   const ok = await bcrypt.compare(senha, cand.senha_hash);
   if (!ok) {
+    rateLimitRegisterFail(req);
     return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
   }
+  rateLimitClear(req);
 
   const token = jwt.sign({ email: emailLower, tipo: 'candidato' }, process.env.JWT_SECRET, { expiresIn: '30d' });
   res.json({
@@ -1045,7 +1060,7 @@ app.post('/api/auth/redefinir-senha', redefinirSenha);
 app.get('/api/auth/validar-token', validarToken);
 
 // ============= ADMIN/RECRUTADOR =============
-app.post('/api/admin/login', async (req, res) => {
+app.post('/api/admin/login', rateLimitLogin, async (req, res) => {
   try {
     console.log('[LOGIN] body recebido:', JSON.stringify(req.body));
     const { email, senha } = req.body;
@@ -1069,11 +1084,18 @@ app.post('/api/admin/login', async (req, res) => {
       rows = r.rows.map(x => ({ ...x, role: 'admin' }));
     }
     console.log('[LOGIN] rows encontrados:', rows.length);
-    if (rows.length === 0) return res.status(401).json({ erro: 'Credenciais inválidas' });
+    if (rows.length === 0) {
+      rateLimitRegisterFail(req);
+      return res.status(401).json({ erro: 'Credenciais inválidas' });
+    }
     console.log('[LOGIN] hash começa com:', rows[0].senha_hash?.substring(0, 7));
     const ok = await bcrypt.compare(senha, rows[0].senha_hash);
     console.log('[LOGIN] compare result:', ok);
-    if (!ok) return res.status(401).json({ erro: 'Credenciais inválidas' });
+    if (!ok) {
+      rateLimitRegisterFail(req);
+      return res.status(401).json({ erro: 'Credenciais inválidas' });
+    }
+    rateLimitClear(req);
 
     const token = jwt.sign(
       { id: rows[0].id, email: rows[0].email, nome: rows[0].nome, tipo: 'admin' },
@@ -1082,7 +1104,7 @@ app.post('/api/admin/login', async (req, res) => {
     res.json({ ok: true, token, usuario: { id: rows[0].id, nome: rows[0].nome, email: rows[0].email, role: rows[0].role || 'admin' } });
   } catch (e) {
     console.error('[LOGIN ERRO]', e);
-    res.status(500).json({ erro: e.message });
+    res.status(500).json({ erro: 'Erro interno' });
   }
 });
 
@@ -2426,44 +2448,10 @@ app.post('/api/admin/entrevista/:id/cancelar', authAdmin, async (req, res) => {
   }
 });
 
-// Migração: corrige entrevistas quebradas (status 'pendente' -> 'agendada', link null -> gerado, data sem fuso -> +3h)
-app.post('/api/_debug/fix-entrevistas', async (req, res) => {
-  try {
-    // 1) Status 'pendente' -> 'agendada'
-    const r1 = await pool.query(`UPDATE entrevistas SET status = 'agendada' WHERE status = 'pendente' RETURNING id`);
-    // 2) Link null -> gera link
-    const semLink = await pool.query(`SELECT id, candidatura_id FROM entrevistas WHERE link_reuniao IS NULL`);
-    let linksFix = 0;
-    for (const row of semLink.rows) {
-      const link = `https://whereby.com/vagasio?room=entrevista-${row.candidatura_id}-${Date.now()}-${row.id}`;
-      await pool.query(`UPDATE entrevistas SET link_reuniao = $1 WHERE id = $2`, [link, row.id]);
-      linksFix++;
-    }
-    // 3) Data quebrada (string sem fuso armazenada como UTC): procura entrevistas em que data_hora < NOW() - 1 dia e link_reuniao não é null
-    //    mas foram criadas após 2026-07-21 (período dos testes)
-    //    Estratégia simples: pra todas entrevistas com data_hora < 2026-07-23, soma 3h
-    const r3 = await pool.query(`
-      UPDATE entrevistas
-      SET data_hora = data_hora + INTERVAL '3 hours',
-          atualizado_em = NOW()
-      WHERE criado_em > '2026-07-21'
-        AND data_hora < '2026-07-23'
-      RETURNING id, candidatura_id
-    `);
-    res.json({
-      ok: true,
-      status_corrigidos: r1.rowCount,
-      links_gerados: linksFix,
-      datas_corrigidas: r3.rowCount,
-      ids_corrigidos: r3.rows.map(r => r.id)
-    });
-  } catch (e) {
-    console.error('[FIX ENTREVISTAS]', e);
-    res.status(500).json({ erro: e.message });
-  }
-});
-
-// (rotas _debug/meet-teste e _debug/meet-criar-teste movidas para o topo do arquivo)
+// NOTA: /api/_debug/fix-entrevistas REMOVIDA em 2026-07-26 (permitia migração sem auth).
+// A migração que ela fazia (status 'pendente' -> 'agendada', links null, +3h em entrevistas)
+// já foi aplicada nos dados. Se for preciso migrar de novo, escrever uma migration no DB
+// (NÃO expor como endpoint público). Ver RULES.md.
 
 // Listar TODAS as entrevistas (pra página Agenda)
 app.get('/api/admin/entrevistas', authAdmin, async (req, res) => {
@@ -3328,7 +3316,7 @@ app.delete('/api/admin/recrutadores/:id', authAdminOnly, async (req, res) => {
 });
 
 // ========== LOGIN RECRUTADOR ==========
-app.post('/api/auth/login-recrutador', async (req, res) => {
+app.post('/api/auth/login-recrutador', rateLimitLogin, async (req, res) => {
   const { email, senha } = req.body;
   if (!email || !senha) return res.status(400).json({ erro: 'E-mail e senha obrigatórios' });
   try {
@@ -3343,11 +3331,18 @@ app.post('/api/auth/login-recrutador', async (req, res) => {
     });
     const rows = result.rows;
     console.log('[login-recrutador] rows:', rows.length);
-    if (rows.length === 0) return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
+    if (rows.length === 0) {
+      rateLimitRegisterFail(req);
+      return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
+    }
     const r = rows[0];
     if (!r.ativo) return res.status(403).json({ erro: 'Conta desativada. Fale com o admin.' });
     const ok = await bcrypt.compare(senha, r.senha_hash);
-    if (!ok) return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
+    if (!ok) {
+      rateLimitRegisterFail(req);
+      return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
+    }
+    rateLimitClear(req);
     const token = jwt.sign(
       { id: r.id, email: r.email, nome: r.nome, tipo: 'recrutador', role: r.role },
       process.env.JWT_SECRET,
@@ -3613,7 +3608,7 @@ app.get('/api/admin/empresa-vaga/:empresa_id', authAdmin, async (req, res) => {
 });
 
 // ========== LOGIN EMPRESA ==========
-app.post('/api/auth/login-empresa', async (req, res) => {
+app.post('/api/auth/login-empresa', rateLimitLogin, async (req, res) => {
   const { email, senha } = req.body;
   if (!email || !senha) return res.status(400).json({ erro: 'E-mail e senha obrigatórios' });
   try {
@@ -3624,11 +3619,18 @@ app.post('/api/auth/login-empresa', async (req, res) => {
       JOIN empresas e ON e.id = u.empresa_id
       WHERE u.email = $1
     `, [email.toLowerCase()]);
-    if (rows.length === 0) return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
+    if (rows.length === 0) {
+      rateLimitRegisterFail(req);
+      return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
+    }
     const u = rows[0];
     if (!u.ativo || !u.empresa_ativa) return res.status(403).json({ erro: 'Conta ou empresa desativada' });
     const ok = await bcrypt.compare(senha, u.senha_hash);
-    if (!ok) return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
+    if (!ok) {
+      rateLimitRegisterFail(req);
+      return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
+    }
+    rateLimitClear(req);
     const token = jwt.sign(
       { id: u.id, email: u.email, nome: u.nome, tipo: 'empresa', empresa_id: u.empresa_id, empresa_nome: u.empresa_nome },
       process.env.JWT_SECRET,
@@ -4176,14 +4178,15 @@ app.post('/api/empresa/candidatura/:id/acao', authEmpresa, async (req, res) => {
 
     // REGRA: a empresa só pode comentar/avançar/reprovar quando a etapa ATUAL da vaga
     // tiver nome contendo "gestor" ou "empresa" (case-insensitive).
-    // etapas[etapa_atual - 1] porque etapa_atual é 1-indexed e etapas[] é 0-indexed.
+    // etapa_atual é 0-indexed e aponta a etapa em que o candidato está.
+    // Ex: etapa_atual=3 → etapas[3] = "Entrevista Gestor" → empresa PODE agir.
     let etapasArr = cand.etapas;
     if (typeof etapasArr === 'string') { try { etapasArr = JSON.parse(etapasArr); } catch (_) { etapasArr = []; } }
-    const etapaNomeAtual = Array.isArray(etapasArr)
-      ? (typeof etapasArr[cand.etapa_atual - 1] === 'string'
-          ? etapasArr[cand.etapa_atual - 1]
-          : (etapasArr[cand.etapa_atual - 1]?.nome || ''))
-      : '';
+    const etapaIdx = cand.etapa_atual;
+    const etapaObj = Array.isArray(etapasArr) ? etapasArr[etapaIdx] : null;
+    const etapaNomeAtual = etapaObj == null
+      ? ''
+      : (typeof etapaObj === 'string' ? etapaObj : (etapaObj.nome || etapaObj.titulo || ''));
     const ehEtapaEmpresa = /gestor|empresa/i.test(etapaNomeAtual || '');
 
     if (['avancar', 'reprovar', 'comentar'].includes(acao) && !ehEtapaEmpresa) {
