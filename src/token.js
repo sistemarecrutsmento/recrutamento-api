@@ -38,15 +38,19 @@ function hashRefresh(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
-async function persistirRefresh(user_type, user_id, user_email, token, req) {
+async function persistirRefresh(user_type, user_id, user_email, token, req, opts = {}) {
   const tokenHash = hashRefresh(token);
   const expiraEm = new Date(Date.now() + REFRESH_TTL_MS);
   const ip = (req && (req.ip || req.headers['x-forwarded-for'])) || null;
   const ua = (req && req.headers['user-agent']) || null;
+  // user_role e user_empresa_id são OPÇÕES (default null)
+  // Se não vierem, ficam null e a migração preenche quando aplicável.
+  const userRole = opts.user_role || null;
+  const userEmpresaId = opts.user_empresa_id || null;
   await pool.query(
-    `INSERT INTO refresh_tokens (user_type, user_id, user_email, token_hash, expira_em, ip_criacao, user_agent_criacao)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
-    [user_type, user_id || null, user_email, tokenHash, expiraEm, ip, (ua || '').slice(0, 250)]
+    `INSERT INTO refresh_tokens (user_type, user_id, user_email, token_hash, expira_em, ip_criacao, user_agent_criacao, user_role, user_empresa_id)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    [user_type, user_id || null, user_email, tokenHash, expiraEm, ip, (ua || '').slice(0, 250), userRole, userEmpresaId]
   );
 }
 
@@ -54,7 +58,7 @@ async function persistirRefresh(user_type, user_id, user_email, token, req) {
 async function consumirRefresh(token) {
   const tokenHash = hashRefresh(token);
   const { rows } = await pool.query(
-    `SELECT id, user_type, user_id, user_email, expira_em, revogado_em
+    `SELECT id, user_type, user_id, user_email, expira_em, revogado_em, user_role, user_empresa_id
      FROM refresh_tokens WHERE token_hash = $1`,
     [tokenHash]
   );
