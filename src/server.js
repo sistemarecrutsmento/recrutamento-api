@@ -4420,6 +4420,177 @@ app.post('/api/auth/trocar-senha-empresa', authEmpresa, async (req, res) => {
 
 // ========== ROTAS DA EMPRESA (acesso às vagas liberadas) ==========
 
+// ========== EMPRESA CRIAR VAGA (Etapa 3 — SaaS B2B) ==========
+// 2026-07-27: Empresas agora podem criar suas próprias vagas.
+// Fluxo: cria a vaga + vincula automaticamente no empresa_vaga_acesso.
+// A vaga começa com status='rascunho' e a empresa precisa publicar depois
+// (futuro: publicar imediato pra planos pagos; moderação pra free beta).
+app.post('/api/empresa/vagas', authEmpresa, async (req, res) => {
+  try {
+    const v = req.body || {};
+    if (!v.titulo || String(v.titulo).trim().length < 2) {
+      return res.status(400).json({ erro: 'Título é obrigatório (mínimo 2 caracteres)' });
+    }
+    const { empresa_id, empresa_nome } = req.user;
+
+    // Etapas padrão (mesmas do admin). Empresa pode customizar enviando array.
+    const etapas = (Array.isArray(v.etapas) && v.etapas.length > 0)
+      ? v.etapas
+      : [
+          { nome: 'Inscrição' },
+          { nome: 'Triagem curricular' },
+          { nome: 'Entrevista RH' },
+          { nome: 'Entrevista gestor' },
+          { nome: 'Proposta' },
+          { nome: 'Coleta de documentos' },
+          { nome: 'Contratação' }
+        ];
+
+    // INSERT vaga (empresa = nome da empresa do usuário logado)
+    const { rows: vagaRows } = await pool.query(
+      `INSERT INTO vagas (
+        titulo, empresa, cidade, estado, tipo_contrato, nivel, area,
+        salario_min, salario_max, descricao, requisitos, beneficios,
+        etapas, status, criada_por
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+      RETURNING *`,
+      [
+        v.titulo,
+        empresa_nome,         // TEXT, não precisa do ID aqui
+        v.cidade || null,
+        v.estado || null,
+        v.tipo_contrato || null,
+        v.nivel || null,
+        v.area || null,
+        v.salario_min || null,
+        v.salario_max || null,
+        v.descricao || null,
+        v.requisitos || null,
+        v.beneficios || null,
+        JSON.stringify(etapas),
+        'rascunho',           // empresa cria em rascunho; admin pode aprovar depois
+        req.user.id
+      ]
+    );
+    const vaga = vagaRows[0];
+
+    // Vincula automaticamente a vaga à empresa (pra ela ver no dashboard)
+    await pool.query(
+      `INSERT INTO empresa_vaga_acesso (empresa_id, vaga_id, concedido_por)
+       VALUES ($1, $2, $3)
+       ON CONFLICT (empresa_id, vaga_id) DO NOTHING`,
+      [empresa_id, vaga.id, req.user.id]
+    );
+
+    await audit(req, 'empresa.vaga.created', {
+      resource_type: 'vaga',
+      resource_id: vaga.id,
+      metadata: { titulo: v.titulo, empresa_id }
+    });
+
+    res.status(201).json({ ok: true, vaga });
+  } catch (e) {
+    console.error('[EMPRESA CRIAR VAGA ERRO]', e.message, e.stack);
+    res.status(500).json({ erro: 'Erro ao criar vaga: ' + e.message });
+  }
+});
+
+// ========== EMPRESA LISTAR/EDITAR/PUBLICAR VAGA ==========
+
+// Lista vagas da empresa (criadas por ela + liberadas pelo admin)
+app.get('/api/empresa/vagas', authEmpresa, async (req, res) => {
+  try {
+    const { empresa_id } = req.user;
+    const { rows } = await pool.query(`
+      SELECT
+        v.*,
+        eva.concedido_em AS vinculado_em,
+        CASE
+          WHEN v.criada_por = $1 THEN 'criada'
+          ELSE 'compartilhada'
+        END AS origem
+      FROM empresa_vaga_acesso eva
+      JOIN vagas v ON v.id = eva.vaga_id
+      WHERE eva.empresa_id = $2
+      ORDER BY eva.concedido_em DESC
+    `, [req.user.id, empresa_id]);
+    res.json({ vagas: rows });
+  } catch (e) {
+    console.error('[EMPRESA LISTAR VAGAS ERRO]', e.message);
+    res.status(500).json({ erro: 'Erro ao listar vagas' });
+  }
+});
+
+// Atualizar vaga (empresa só pode editar vagas criadas por ela)
+app.put('/api/empresa/vagas/:id', authEmpresa, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { empresa_id } = req.user;
+    // Garante que a vaga é da empresa
+    const check = await pool.query(
+      `SELECT criada_por FROM vagas WHERE id = $1`,
+      [id]
+    );
+    if (check.rows.length === 0) return res.status(404).json({ erro: 'Vaga não encontrada' });
+    if (check.rows[0].criada_por !== req.user.id) {
+      return res.status(403).json({ erro: 'Você só pode editar vagas criadas pela sua empresa' });
+    }
+
+    const v = req.body || {};
+    const updates = [];
+    const values = [];
+    const push = (col, val) => { values.push(val); updates.push(`${col} = $${values.length}`); };
+    if (v.titulo !== undefined) push('titulo', v.titulo);
+    if (v.cidade !== undefined) push('cidade', v.cidade);
+    if (v.estado !== undefined) push('estado', v.estado);
+    if (v.tipo_contrato !== undefined) push('tipo_contrato', v.tipo_contrato);
+    if (v.nivel !== undefined) push('nivel', v.nivel);
+    if (v.area !== undefined) push('area', v.area);
+    if (v.salario_min !== undefined) push('salario_min', v.salario_min);
+    if (v.salario_max !== undefined) push('salario_max', v.salario_max);
+    if (v.descricao !== undefined) push('descricao', v.descricao);
+    if (v.requisitos !== undefined) push('requisitos', v.requisitos);
+    if (v.beneficios !== undefined) push('beneficios', v.beneficios);
+    if (v.etapas !== undefined && Array.isArray(v.etapas)) push('etapas', JSON.stringify(v.etapas));
+    if (updates.length === 0) return res.status(400).json({ erro: 'Nenhum campo para atualizar' });
+    values.push(id);
+    const { rows } = await pool.query(
+      `UPDATE vagas SET ${updates.join(', ')} WHERE id = $${values.length} RETURNING *`,
+      values
+    );
+    await audit(req, 'empresa.vaga.updated', { resource_type: 'vaga', resource_id: id, metadata: { campos: Object.keys(v) } });
+    res.json({ ok: true, vaga: rows[0] });
+  } catch (e) {
+    console.error('[EMPRESA EDITAR VAGA ERRO]', e.message);
+    res.status(500).json({ erro: 'Erro ao atualizar vaga' });
+  }
+});
+
+// Publicar/despublicar vaga (empresa)
+app.patch('/api/empresa/vagas/:id/status', authEmpresa, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { status } = req.body || {};
+    if (!['publicada', 'pausada', 'rascunho'].includes(status)) {
+      return res.status(400).json({ erro: 'Status inválido. Use: publicada, pausada ou rascunho' });
+    }
+    const check = await pool.query(`SELECT criada_por FROM vagas WHERE id = $1`, [id]);
+    if (check.rows.length === 0) return res.status(404).json({ erro: 'Vaga não encontrada' });
+    if (check.rows[0].criada_por !== req.user.id) {
+      return res.status(403).json({ erro: 'Você só pode alterar vagas criadas pela sua empresa' });
+    }
+    const { rows } = await pool.query(
+      `UPDATE vagas SET status = $1 WHERE id = $2 RETURNING *`,
+      [status, id]
+    );
+    await audit(req, 'empresa.vaga.status_changed', { resource_type: 'vaga', resource_id: id, metadata: { status } });
+    res.json({ ok: true, vaga: rows[0] });
+  } catch (e) {
+    console.error('[EMPRESA STATUS VAGA ERRO]', e.message);
+    res.status(500).json({ erro: 'Erro ao alterar status' });
+  }
+});
+
 // Dashboard da empresa
 app.get('/api/empresa/dashboard', authEmpresa, async (req, res) => {
   const { empresa_id } = req.user;
