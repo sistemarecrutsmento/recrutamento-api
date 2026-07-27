@@ -4528,14 +4528,13 @@ app.put('/api/empresa/vagas/:id', authEmpresa, async (req, res) => {
   try {
     const { id } = req.params;
     const { empresa_id } = req.user;
-    // Garante que a vaga é da empresa
+    // Garante que a vaga pertence à empresa (via empresa_vaga_acesso)
     const check = await pool.query(
-      `SELECT criada_por FROM vagas WHERE id = $1`,
-      [id]
+      `SELECT 1 FROM empresa_vaga_acesso WHERE vaga_id = $1 AND empresa_id = $2`,
+      [id, empresa_id]
     );
-    if (check.rows.length === 0) return res.status(404).json({ erro: 'Vaga não encontrada' });
-    if (check.rows[0].criada_por !== req.user.id) {
-      return res.status(403).json({ erro: 'Você só pode editar vagas criadas pela sua empresa' });
+    if (check.rows.length === 0) {
+      return res.status(403).json({ erro: 'Vaga não pertence à sua empresa' });
     }
 
     const v = req.body || {};
@@ -4576,10 +4575,9 @@ app.patch('/api/empresa/vagas/:id/status', authEmpresa, async (req, res) => {
     if (!['publicada', 'pausada', 'rascunho'].includes(status)) {
       return res.status(400).json({ erro: 'Status inválido. Use: publicada, pausada ou rascunho' });
     }
-    const check = await pool.query(`SELECT criada_por FROM vagas WHERE id = $1`, [id]);
-    if (check.rows.length === 0) return res.status(404).json({ erro: 'Vaga não encontrada' });
-    if (check.rows[0].criada_por !== req.user.id) {
-      return res.status(403).json({ erro: 'Você só pode alterar vagas criadas pela sua empresa' });
+    const check = await pool.query(`SELECT 1 FROM empresa_vaga_acesso WHERE vaga_id = $1 AND empresa_id = $2`, [id, req.user.empresa_id]);
+    if (check.rows.length === 0) {
+      return res.status(403).json({ erro: 'Vaga não pertence à sua empresa' });
     }
     const { rows } = await pool.query(
       `UPDATE vagas SET status = $1 WHERE id = $2 RETURNING *`,
