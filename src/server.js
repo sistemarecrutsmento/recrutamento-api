@@ -5637,7 +5637,7 @@ process.on('unhandledRejection', (e) => {
   // =========================================================================
 
   // Lista usuarios da empresa logada (read-only, qualquer role)
-  app.get('/api/empresa/membros', requireEmpresaViewer, async (req, res) => {
+  app.get('/api/empresa/usuarios', requireEmpresaViewer, async (req, res) => {
     const { empresa_id } = req.user;
     try {
       const { rows } = await pool.query(`
