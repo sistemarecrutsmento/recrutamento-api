@@ -344,7 +344,21 @@ async function init() {
   // Estrutura: { "1": "obs etapa 1", "2": "obs etapa 2", ... }
   await client.query(`ALTER TABLE candidaturas ADD COLUMN IF NOT EXISTS observacoes_etapas JSONB DEFAULT '{}'::jsonb;`);
 
-    console.log('Tabelas criadas/verificadas + colunas garantidas');
+    // ──────────────────────────────────────────────────────────────────
+    // Migrations Fase 1 (multi-tenant, jul/2026) — idempotente
+    //   • vagas.empresa_id
+    //   • empresa_usuarios.role
+    //   • empresa_vaga_acesso.tipo + revogado_em + revogado_motivo
+    //   • refresh_tokens.user_role + user_empresa_id
+    // ──────────────────────────────────────────────────────────────────
+    const { aplicar: aplicarMigracoesFase1 } = require('./migrations/001_multi_tenant_fase1');
+    const r = await aplicarMigracoesFase1();
+    if (!r.ok) {
+      console.error('[MIGRATION FASE 1] Falha:', r.erro);
+      throw new Error('Falha nas migrations da Fase 1 — abortando boot');
+    }
+
+    console.log('Tabelas criadas/verificadas + colunas garantidas + migrations Fase 1 aplicadas');
   } finally {
     client.release();
   }
