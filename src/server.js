@@ -5017,6 +5017,42 @@ process.on('unhandledRejection', (e) => {
     }
   });
 
+  // =========================================================================
+  // METADADOS DE BACKUP (sem restaurar nada — apenas consulta)
+  // =========================================================================
+  app.post('/api/admin/restore-test', authAdminOnly, async (req, res) => {
+    try {
+      const meta = await getBackupMetadata();
+      if (!meta) {
+        return res.json({ ok: true, msg: 'Nenhum backup encontrado no Cloudinary ainda. Use a rota /api/admin/backup para criar o primeiro.' });
+      }
+      res.json({
+        ok: true,
+        msg: 'Metadados do último backup (NÃO foi restaurado nada)',
+        backup: meta,
+        aviso: 'Esta rota NÃO restaura dados. Para restaurar, siga o procedimento em recrutamento-api/_auditoria/restore-teste.md'
+      });
+    } catch (e) {
+      console.error('[BACKUP META]', e);
+      res.status(500).json({ erro: 'Erro ao consultar metadados de backup', detalhes: e.message });
+    }
+  });
+
+  // =========================================================================
+  // CRIAR BACKUP MANUAL (admin only — sob demanda)
+  // =========================================================================
+  app.post('/api/admin/backup', authAdminOnly, async (req, res) => {
+    try {
+      const { performBackup } = require('./backup');
+      const result = await performBackup();
+      await audit(req, 'admin.backup.created', { resource_type: 'backup', metadata: { public_id: result.public_id, size: result.size_compressed } });
+      res.json({ ok: true, msg: 'Backup criado com sucesso', ...result });
+    } catch (e) {
+      console.error('[BACKUP CREATE]', e);
+      res.status(500).json({ erro: 'Erro ao criar backup', detalhes: e.message });
+    }
+  });
+
   const port = process.env.PORT || 10000;
   app.listen(port, () => console.log(`API rodando na porta ${port}`));
   } catch (e) {
