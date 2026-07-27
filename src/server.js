@@ -568,13 +568,14 @@ app.post('/api/candidato/verificar', rateLimitLogin, async (req, res) => {
   // BLOQUEIO DE COLLISION: o e-mail não pode pertencer a admin/recrutador/empresa.
   // Caso já pertença, invalida o código e bloqueia o login.
   const tabelasConflito = [
-    { tabela: 'admins' },
-    { tabela: 'recrutadores' },
-    { tabela: 'empresas' }
+    { tabela: 'admins', coluna: 'email' },
+    { tabela: 'recrutadores', coluna: 'email' },
+    { tabela: 'empresas', coluna: 'email_principal' },
+    { tabela: 'empresa_usuarios', coluna: 'email' }
   ];
   for (const t of tabelasConflito) {
     const { rows: conflito } = await pool.query(
-      `SELECT 1 FROM ${t.tabela} WHERE LOWER(email) = $1 LIMIT 1`,
+      `SELECT 1 FROM ${t.tabela} WHERE LOWER(${t.coluna}) = $1 LIMIT 1`,
       [email.toLowerCase()]
     );
     if (conflito.length > 0) {
@@ -610,15 +611,16 @@ app.post('/api/candidato/cadastro', rateLimitLogin, async (req, res) => {
   }
 
   // BLOQUEIO DE COLLISION: não permite cadastrar candidato com e-mail já usado
-  // em admins, recrutadores ou empresas (defesa contra account-squatting).
+  // em admins, recrutadores, empresas (email_principal) ou empresa_usuarios (defesa contra account-squatting).
   const tabelasConflito = [
-    { tabela: 'admins', label: 'admin' },
-    { tabela: 'recrutadores', label: 'recrutador' },
-    { tabela: 'empresas', label: 'empresa' }
+    { tabela: 'admins', coluna: 'email' },
+    { tabela: 'recrutadores', coluna: 'email' },
+    { tabela: 'empresas', coluna: 'email_principal' },
+    { tabela: 'empresa_usuarios', coluna: 'email' }
   ];
   for (const t of tabelasConflito) {
     const { rows: conflito } = await pool.query(
-      `SELECT 1 FROM ${t.tabela} WHERE LOWER(email) = $1 LIMIT 1`,
+      `SELECT 1 FROM ${t.tabela} WHERE LOWER(${t.coluna}) = $1 LIMIT 1`,
       [emailLower]
     );
     if (conflito.length > 0) {
