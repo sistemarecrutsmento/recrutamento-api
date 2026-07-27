@@ -81,6 +81,14 @@ else if (process.env.CLOUDINARY_CLOUD_NAME) {
 
 const app = express();
 
+// =========================================================================
+// DIAGNOSTICO - SUPERMERCURADO: TESTA QUE ESTE ARQUIVO ESTA SENDO USADO
+// =========================================================================
+app.get('/api/_diag/raw-id', (req, res) => {
+  res.json({ raw_id: 'DIAG_' + Date.now(), port: process.env.PORT || 10000, ts: new Date().toISOString() });
+});
+
+
 // FIX Etapa 2 (2026-07-27): hardening de headers + Express.
 // disable() remove o header de TODAS as respostas, incluindo OPTIONS e 404/500.
 app.disable('x-powered-by');
