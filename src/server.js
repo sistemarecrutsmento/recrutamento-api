@@ -653,6 +653,14 @@ app.post('/api/candidato/cadastro', rateLimitLogin, async (req, res) => {
     return res.status(400).json({ erro: 'A senha deve ter no mínimo 6 caracteres' });
   }
 
+  // Validação de formato de email (RFC 5322 simplificado)
+  // Bloqueia: emails com aspas, espaços, caracteres de controle ou sem @
+  // Não é SQL injection — a query é parametrizada — mas evita lixo no DB.
+  const emailRegex = /^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$/;
+  if (!emailRegex.test(email) || email.length > 254) {
+    return res.status(400).json({ erro: 'E-mail inválido' });
+  }
+
   const emailLower = email.toLowerCase();
 
   // Verifica se já existe candidato com esse e-mail
