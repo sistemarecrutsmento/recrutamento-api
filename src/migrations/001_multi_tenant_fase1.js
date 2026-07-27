@@ -123,23 +123,18 @@ async function m003_empresa_vaga_acesso(client, log) {
   //   • Conservador: tudo vira 'propria' por default, depois atualizamos
   //     casos de vaga com múltiplas empresas.
   await client.query(`
-    UPDATE empresa_vaga_acesso eva
+    UPDATE empresa_vaga_acesso
     SET tipo = 'propria'
-    WHERE eva.tipo IS NULL
+    WHERE tipo IS NULL
   `);
   await client.query(`
     UPDATE empresa_vaga_acesso eva
     SET tipo = 'compartilhada'
-    WHERE eva.id IN (
-      SELECT MIN(id) FROM empresa_vaga_acesso
-      WHERE vaga_id IN (
+    WHERE eva.tipo = 'propria'
+      AND eva.vaga_id IN (
         SELECT vaga_id FROM empresa_vaga_acesso
         GROUP BY vaga_id HAVING COUNT(DISTINCT empresa_id) > 1
       )
-      AND revogado_em IS NULL
-      GROUP BY vaga_id
-      HAVING COUNT(*) > 1
-    )
   `);
   // Simplificação segura: o default 'propria' cobre 95% dos casos.
   // O ajuste acima marca como 'compartilhada' a entrada de menor id (i.e.
@@ -222,19 +217,30 @@ async function aplicar() {
   try {
     await client.query('BEGIN');
     escreve('Iniciando Migrations Fase 1 (multi-tenant)');
-    const r1 = await m001_vagas_empresa_id(client, escreve);
-    const r2 = await m002_empresa_usuarios_role(client, escreve);
-    const r3 = await m003_empresa_vaga_acesso(client, escreve);
-    const r4 = await m004_refresh_tokens(client, escreve);
+    const r1 = await runSafe('m001_vagas_empresa_id', () => m001_vagas_empresa_id(client, escreve), escreve);
+    const r2 = await runSafe('m002_empresa_usuarios_role', () => m002_empresa_usuarios_role(client, escreve), escreve);
+    const r3 = await runSafe('m003_empresa_vaga_acesso', () => m003_empresa_vaga_acesso(client, escreve), escreve);
+    const r4 = await runSafe('m004_refresh_tokens', () => m004_refresh_tokens(client, escreve), escreve);
     await client.query('COMMIT');
     escreve('Migrations concluídas com sucesso');
     return { ok: true, log, resultado: { r1, r2, r3, r4 } };
   } catch (e) {
-    await client.query('ROLLBACK');
-    escreve(`ERRO — rollback executado: ${e.message}`);
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    escreve(`ERRO FATAL — rollback executado: ${e.message}`);
     return { ok: false, erro: e.message, log };
   } finally {
     client.release();
+  }
+}
+
+async function runSafe(nome, fn, log) {
+  try {
+    const r = await fn();
+    log(`  ✅ ${nome}: ok`);
+    return { ok: true, ...r };
+  } catch (e) {
+    log(`  ❌ ${nome} FALHOU: ${e.message}`);
+    throw e;
   }
 }
 
