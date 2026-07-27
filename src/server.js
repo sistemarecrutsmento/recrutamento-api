@@ -1582,6 +1582,62 @@ app.get('/api/admin/vagas-fechadas-sem-contratacao', authAdmin, async (req, res)
   }
 });
 
+// =========================================================================
+// DIAGNÓSTICO DE SCHEMA (Fase 1) — admin only
+// Confirma quais colunas da Fase 1 estão presentes + contagens de dados.
+// =========================================================================
+app.get('/api/admin/_diag-schema-fase1', authAdmin, async (req, res) => {
+  try {
+    const cols = (tabela) => pool.query(
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_schema='public' AND table_name=$1
+       ORDER BY ordinal_position`, [tabela]
+    ).then(r => r.rows.map(x => x.column_name));
+
+    const [vagasCol, evaCol, euCol, rtCol] = await Promise.all([
+      cols('vagas'),
+      cols('empresa_vaga_acesso'),
+      cols('empresa_usuarios'),
+      cols('refresh_tokens')
+    ]);
+
+    const counts = await pool.query(`
+      SELECT
+        (SELECT COUNT(*) FROM vagas WHERE empresa_id IS NOT NULL)::int AS vagas_com_empresa_id,
+        (SELECT COUNT(*) FROM vagas WHERE empresa_id IS NULL)::int AS vagas_sem_empresa_id,
+        (SELECT COUNT(*) FROM empresa_vaga_acesso WHERE tipo='propria')::int AS eva_propria,
+        (SELECT COUNT(*) FROM empresa_vaga_acesso WHERE tipo='compartilhada')::int AS eva_compartilhada,
+        (SELECT COUNT(*) FROM empresa_vaga_acesso WHERE revogado_em IS NOT NULL)::int AS eva_revogadas,
+        (SELECT COUNT(*) FROM empresa_usuarios WHERE role='membro')::int AS eu_membros,
+        (SELECT COUNT(*) FROM refresh_tokens WHERE user_role IS NOT NULL)::int AS rt_com_role,
+        (SELECT COUNT(*) FROM refresh_tokens WHERE user_empresa_id IS NOT NULL)::int AS rt_com_empresa
+    `);
+
+    res.json({
+      ok: true,
+      schema: {
+        vagas: vagasCol,
+        empresa_vaga_acesso: evaCol,
+        empresa_usuarios: euCol,
+        refresh_tokens: rtCol
+      },
+      migrations: {
+        'vagas.empresa_id': vagasCol.includes('empresa_id'),
+        'empresa_usuarios.role': euCol.includes('role'),
+        'empresa_vaga_acesso.tipo': evaCol.includes('tipo'),
+        'empresa_vaga_acesso.revogado_em': evaCol.includes('revogado_em'),
+        'empresa_vaga_acesso.revogado_motivo': evaCol.includes('revogado_motivo'),
+        'refresh_tokens.user_role': rtCol.includes('user_role'),
+        'refresh_tokens.user_empresa_id': rtCol.includes('user_empresa_id')
+      },
+      counts: counts.rows[0]
+    });
+  } catch (e) {
+    console.error('[DIAG SCHEMA]', e);
+    res.status(500).json({ erro: 'Erro no diagnóstico', detalhes: e.message });
+  }
+});
+
 app.get('/api/admin/dashboard', authAdmin, async (req, res) => {
   try {
     const now = new Date();
