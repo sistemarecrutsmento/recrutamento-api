@@ -5800,6 +5800,25 @@ process.on('unhandledRejection', (e) => {
   });
 
   const port = process.env.PORT || 10000;
+
+  // =========================================================================
+  // DIAG_ROUTES — APAGAR ASSIM QUE POSSIVEL (debug continuo)
+  // =========================================================================
+  app.get('/api/_diag/routes', (req, res) => {
+    const list = [];
+    app._router.stack.forEach(l => {
+      if (l.name === 'router' && l.handle && l.handle.stack) {
+        l.handle.stack.forEach(r => {
+          const method = r.method && r.method.toUpperCase();
+          if (method && method !== 'M') {
+            r.route.path && list.push(method + ' ' + r.route.path);
+          }
+        });
+      }
+    });
+    res.json({ rotas: list.length, amostra: list.slice(0,200) });
+  });
+
   app.listen(port, () => console.log(`API rodando na porta ${port}`));
   } catch (e) {
     console.error('Erro ao iniciar:', e);
