@@ -96,6 +96,9 @@ app.use(express.json({ limit: '100mb' }));
 app.use((req, res, next) => {
   // Esconde o stack (Express). Não revela o backend. (FIX Etapa 2: redundância removida
   // — app.disable('x-powered-by') já cuida disso em TODAS as respostas, inclusive OPTIONS.)
+  // FIX Etapa 2 (2026-07-27): remove também o 'Server' header que o Render injeta por padrão.
+  res.removeHeader('Server');
+  res.removeHeader('X-Powered-By');
   // Previne MIME sniffing
   res.setHeader('X-Content-Type-Options', 'nosniff');
   // Política de referer (não vaza URL completa em navegação externa)
