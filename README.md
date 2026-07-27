@@ -45,3 +45,5 @@ API em Node.js + Express + PostgreSQL.
  
 ---
 Updated: Fri Jul 17 03:37:39 UTC 2026
+
+<!-- rebuild trigger -->
