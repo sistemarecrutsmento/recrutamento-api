@@ -264,7 +264,10 @@ if (DEBUG) {
       hasDatabaseUrl: !!process.env.DATABASE_URL,
       hasJwtSecret: !!process.env.JWT_SECRET,
       hasEmailFrom: !!process.env.EMAIL_FROM,
-      hasAdminNotifEmail: !!process.env.ADMIN_NOTIF_EMAIL
+      hasAdminNotifEmail: !!process.env.ADMIN_NOTIF_EMAIL,
+      hasCloudinaryName: !!process.env.CLOUDINARY_CLOUD_NAME,
+      hasCloudinaryKey: !!process.env.CLOUDINARY_API_KEY,
+      hasCloudinarySecret: !!process.env.CLOUDINARY_API_SECRET
     });
   });
 
