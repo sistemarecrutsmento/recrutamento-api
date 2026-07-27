@@ -115,28 +115,37 @@ app.use(express.json({ limit: '100mb' }));
 // =========================================================================
 // HEADERS DE SEGURANÇA (defesa contra clickjacking, MIME sniffing, XSS)
 // =========================================================================
-// FIX J4 (2026-07-27): Headers consolidados em middleware único.
-// TODO Etapa 3: instalar `helmet` quando o Fabio estiver pronto.
-// npm install helmet (no diretório recrutamento-api)
-app.use((req, res, next) => {
-  // Esconde o stack (Express). Não revela o backend. (FIX Etapa 2: redundância removida
-  // — app.disable('x-powered-by') já cuida disso em TODAS as respostas, inclusive OPTIONS.)
-  // FIX Etapa 2 (2026-07-27): remove também o 'Server' header que o Render injeta por padrão.
-  res.removeHeader('Server');
-  res.removeHeader('X-Powered-By');
-  // Previne MIME sniffing
-  res.setHeader('X-Content-Type-Options', 'nosniff');
-  // Política de referer (não vaza URL completa em navegação externa)
-  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+// ETAPA 3 (2026-07-27): helmet instalado — headers padronizados pela OWASP.
+// Helmet cuida de: X-Content-Type-Options, X-Frame-Options, X-DNS-Prefetch-Control,
+// Strict-Transport-Security, Cross-Origin-Resource-Policy, Referrer-Policy, etc.
+// CSP continua manual pq backend responde JSON puro.
+const helmet = require('helmet');
+app.use(helmet({
+  // CSP: backend responde JSON, então CSP é bem restritiva
+  contentSecurityPolicy: {
+    useDefaults: false,
+    directives: {
+      defaultSrc: ["'none'"],
+      frameAncestors: ["'none'"]
+    }
+  },
+  // HSTS: força HTTPS por 1 ano (HTTPS já está ativo via Render + Cloudflare)
+  strictTransportSecurity: { maxAge: 31536000, includeSubDomains: true },
   // Clickjacking: bloqueia embedding em iframe
-  res.setHeader('X-Frame-Options', 'DENY');
+  frameguard: { action: 'deny' },
+  // Política de referer (não vaza URL completa em navegação externa)
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
   // Permissões restritas (não precisa de geolocalização, microfone, etc)
+  permittedCrossDomainPolicies: false,
+  // Esconde o stack (Express). Helmet já remove via xPoweredBy.
+  // FIX Etapa 2 (2026-07-27): remove também o 'Server' header que o Render injeta por padrão.
+  hidePoweredBy: true
+}));
+
+// Remove header "Server" injetado pelo Render (helmet só cuida do X-Powered-By)
+app.use((req, res, next) => {
+  res.removeHeader('Server');
   res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=(), payment=()');
-  // CSP — Backend responde JSON, então CSP é simples
-  // Não precisa permitir scripts inline, imagens externas etc.
-  res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
-  // HSTS — força HTTPS por 1 ano (HTTPS já está ativo via Render + Cloudflare)
-  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   next();
 });
 
@@ -732,8 +741,8 @@ app.post('/api/candidato/cadastro', rateLimitLogin, async (req, res) => {
   if (!email || !senha || !nome) {
     return res.status(400).json({ erro: 'E-mail, senha e nome são obrigatórios' });
   }
-  if (senha.length < 6) {
-    return res.status(400).json({ erro: 'A senha deve ter no mínimo 6 caracteres' });
+  if (senha.length < 8) {
+    return res.status(400).json({ erro: 'A senha deve ter no mínimo 8 caracteres' });
   }
 
   // Validação de formato de email (RFC 5322 simplificado)
@@ -1049,8 +1058,8 @@ app.post('/api/candidato/trocar-senha', authCandidato, async (req, res) => {
   if (!senha_atual || !senha_nova) {
     return res.status(400).json({ erro: 'Informe a senha atual e a nova senha' });
   }
-  if (senha_nova.length < 6) {
-    return res.status(400).json({ erro: 'A nova senha deve ter no mínimo 6 caracteres' });
+  if (senha_nova.length < 8) {
+    return res.status(400).json({ erro: 'A nova senha deve ter no mínimo 8 caracteres' });
   }
   try {
     const { rows } = await pool.query('SELECT id, senha_hash FROM candidatos WHERE email = $1', [req.user.email]);
