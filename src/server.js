@@ -4212,6 +4212,149 @@ app.get('/api/admin/empresa-vaga/:empresa_id', authAdmin, async (req, res) => {
   }
 });
 
+// ========== CADASTRO DE EMPRESA (Caminho A — free beta) ==========
+// ETAPA 3 (2026-07-27): signup B2B.
+// Recebe dados da empresa + admin master, cria as duas entidades em transação,
+// e já autentica (access + refresh) pra redirecionar direto pro painel.
+//
+// Validações:
+// - Empresa: nome (obrigatório), cnpj (opcional mas validado se preenchido)
+// - Admin master: nome, email (único), senha (≥8 chars)
+// - Slug da empresa: gerado a partir do nome (lowercase, sem acentos)
+//   pra futura URL amigável (empresa.vagasio.com.br/<slug>).
+//
+// NOTA: não usa transação explícita pq o pg.Pool faz auto-commit por statement.
+// Se empresa_insert falhar, empresa_usuario_insert NÃO roda (erro retorna antes).
+app.post('/api/empresa/cadastro', rateLimitByIp('cadastro-empresa'), async (req, res) => {
+  const {
+    empresa_nome,
+    cnpj,
+    telefone,
+    email_principal,
+    plano,                  // 'essencial' | 'profissional' | 'enterprise' (cosmético nesta fase)
+    admin_nome,
+    admin_email,
+    admin_senha,
+    admin_cargo
+  } = req.body || {};
+
+  // Validação básica
+  if (!empresa_nome || empresa_nome.trim().length < 2) {
+    return res.status(400).json({ erro: 'Nome da empresa é obrigatório (mínimo 2 caracteres)' });
+  }
+  if (!admin_nome || !admin_email || !admin_senha) {
+    return res.status(400).json({ erro: 'Nome, e-mail e senha do administrador são obrigatórios' });
+  }
+  if (admin_senha.length < 8) {
+    return res.status(400).json({ erro: 'A senha deve ter no mínimo 8 caracteres' });
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(admin_email)) {
+    return res.status(400).json({ erro: 'E-mail do administrador inválido' });
+  }
+  // CNPJ: se preenchido, valida formato básico (14 dígitos)
+  if (cnpj && cnpj.replace(/\D/g, '').length !== 14) {
+    return res.status(400).json({ erro: 'CNPJ deve ter 14 dígitos (com ou sem pontuação)' });
+  }
+
+  const emailLower = admin_email.toLowerCase().trim();
+  const cnpjClean = cnpj ? cnpj.replace(/\D/g, '') : null;
+
+  // Gera slug a partir do nome (lowercase, sem acentos, sem caracteres especiais).
+  // Se já existir, anexa sufixo numérico.
+  function slugify(txt) {
+    return txt
+      .toString().toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+      .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').substring(0, 60) || 'empresa';
+  }
+  let slugBase = slugify(empresa_nome);
+  let slugFinal = slugBase;
+  let slugSufixo = 1;
+  while (true) {
+    const dup = await pool.query('SELECT id FROM empresas WHERE slug = $1', [slugFinal]);
+    if (dup.rowCount === 0) break;
+    slugSufixo++;
+    slugFinal = `${slugBase}-${slugSufixo}`;
+    if (slugSufixo > 99) { slugFinal = `${slugBase}-${Date.now()}`; break; }
+  }
+
+  try {
+    // 1. Verifica se já existe usuário com esse email
+    const existe = await pool.query('SELECT id FROM empresa_usuarios WHERE email = $1', [emailLower]);
+    if (existe.rowCount > 0) {
+      return res.status(409).json({ erro: 'Já existe uma conta com esse e-mail. Faça login.' });
+    }
+
+    // 2. Verifica se já existe empresa com mesmo CNPJ (se informado)
+    if (cnpjClean) {
+      const existeCnpj = await pool.query('SELECT id FROM empresas WHERE cnpj = $1', [cnpjClean]);
+      if (existeCnpj.rowCount > 0) {
+        return res.status(409).json({ erro: 'Já existe uma empresa cadastrada com esse CNPJ' });
+      }
+    }
+
+    // 3. Cria a empresa
+    const empRes = await pool.query(`
+      INSERT INTO empresas (nome, cnpj, email_principal, telefone, ativo, plano, slug)
+      VALUES ($1, $2, $3, $4, true, $5, $6)
+      RETURNING id, nome, cnpj, email_principal, plano, slug, criado_em
+    `, [empresa_nome.trim(), cnpjClean, email_principal?.toLowerCase() || null, telefone || null, plano || 'essencial', slugFinal]);
+    const empresa = empRes.rows[0];
+
+    // 4. Cria o admin master (empresa_usuarios)
+    const senhaHash = await bcrypt.hash(admin_senha, 10);
+    const userRes = await pool.query(`
+      INSERT INTO empresa_usuarios (empresa_id, nome, email, senha_hash, cargo, ativo, primeiro_acesso)
+      VALUES ($1, $2, $3, $4, $5, true, false)
+      RETURNING id, nome, email, cargo, empresa_id
+    `, [empresa.id, admin_nome.trim(), emailLower, senhaHash, admin_cargo || 'Administrador']);
+    const adminUser = userRes.rows[0];
+
+    // 5. Gera tokens (já loga o admin master)
+    const accessToken = criarAccessToken({
+      id: adminUser.id, email: adminUser.email, nome: adminUser.nome, tipo: 'empresa',
+      empresa_id: empresa.id, empresa_nome: empresa.nome
+    });
+    const refresh = criarRefreshToken();
+    await persistirRefresh('empresa', adminUser.id, adminUser.email, refresh, req);
+
+    // 6. Audit log
+    await audit(req, 'empresa.created', {
+      resource_type: 'empresa',
+      resource_id: empresa.id,
+      user_email: adminUser.email,
+      metadata: { plano: empresa.plano, cnpj: cnpjClean, admin_user_id: adminUser.id }
+    });
+
+    res.status(201).json({
+      ok: true,
+      msg: 'Empresa cadastrada com sucesso! Você já está logado.',
+      token: accessToken,
+      refreshToken: refresh,
+      usuario: {
+        id: adminUser.id,
+        nome: adminUser.nome,
+        email: adminUser.email,
+        tipo: 'empresa',
+        cargo: adminUser.cargo,
+        empresa_id: empresa.id,
+        empresa_nome: empresa.nome,
+        primeiro_acesso: false
+      },
+      empresa: {
+        id: empresa.id,
+        nome: empresa.nome,
+        cnpj: empresa.cnpj,
+        email_principal: empresa.email_principal,
+        plano: empresa.plano,
+        slug: empresa.slug,
+        criado_em: empresa.criado_em
+      }
+    });
+  } catch (e) {
+    return erroInterno(req, res, e, 'api-empresa-cadastro');
+  }
+});
+
 // ========== LOGIN EMPRESA ==========
 app.post('/api/auth/login-empresa', rateLimitLogin, async (req, res) => {
   const { email, senha } = req.body;
