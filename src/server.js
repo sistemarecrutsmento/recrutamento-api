@@ -4998,7 +4998,7 @@ process.on('unhandledRejection', (e) => {
 
 (async () => {
   try {
-    aawait init();
+    await init();
     console.log('Banco inicializado com sucesso');
 
     // FIX C3 (2026-07-27): rota /api/_teste/email REMOVIDA.
