@@ -524,7 +524,7 @@ if (DEBUG) {
       );
       res.json({ ok: true, etapas: upd.rows[0].etapas });
     } catch (e) {
-      return erroInterno(req, res, e, 'unknown-7');
+      return erroInterno(req, res, e, 'api-admin-vaga-etapas-put');
     }
   });
 
@@ -574,7 +574,7 @@ if (DEBUG) {
         msg: `Candidato squatter id=${candId} (${email}) removido com sucesso`
       });
     } catch (e) {
-      return erroInterno(req, res, e, 'unknown-8');
+      return erroInterno(req, res, e, 'api-_debug-deletar-candidato');
     }
   });
 } else {
@@ -1163,7 +1163,7 @@ app.get('/api/candidato/notificacoes', authCandidato, async (req, res) => {
     res.json({ aguardando, atualizacoes });
   } catch (e) {
     console.error('[CANDIDATO NOTIFICACOES]', e);
-    return erroInterno(req, res, e, 'unknown-9');
+    return erroInterno(req, res, e, 'api-candidato-notificacoes');
   }
 });
 
@@ -1805,7 +1805,7 @@ app.get('/api/admin/dashboard', authAdmin, async (req, res) => {
     });
   } catch (e) {
     console.error('[DASHBOARD ERRO]', e);
-    return erroInterno(req, res, e, 'unknown-12');
+    return erroInterno(req, res, e, 'api-admin-dashboard');
   }
 });
 
@@ -1852,7 +1852,7 @@ app.get('/api/admin/contratacoes', authAdmin, async (req, res) => {
     });
   } catch (e) {
     console.error('[CONTRATACOES ERRO]', e);
-    return erroInterno(req, res, e, 'unknown-13');
+    return erroInterno(req, res, e, 'api-admin-contratacoes');
   }
 });
 
@@ -1942,7 +1942,7 @@ app.get('/api/admin/candidaturas-por-etapa', authAdmin, async (req, res) => {
     });
   } catch (e) {
     console.error('[CAND POR ETAPA ERRO]', e);
-    return erroInterno(req, res, e, 'unknown-15');
+    return erroInterno(req, res, e, 'api-admin-candidatos-por-etapa');
   }
 });
 
@@ -2431,7 +2431,7 @@ app.post('/api/candidatura/:id/documentos', authCandidato, async (req, res) => {
     res.json({ ok: true, salvos });
   } catch (e) {
     console.error('[DOCS] erro ao enviar:', e);
-    return erroInterno(req, res, e, 'unknown-16');
+    return erroInterno(req, res, e, 'api-candidatura-id-documentos-post');
   }
 });
 
@@ -2518,7 +2518,7 @@ app.post('/api/admin/candidato/:id/deletar', authAdmin, async (req, res) => {
       msg: `Candidato ${cand[0].nome} (${cand[0].email}) removido com sucesso`
     });
   } catch (e) {
-    return erroInterno(req, res, e, 'unknown-18');
+    return erroInterno(req, res, e, 'api-admin-candidatura-id-deletar');
   }
 });
 
@@ -2658,7 +2658,7 @@ app.post('/api/admin/documento/:id/revisar', authAdmin, async (req, res) => {
     res.json({ ok: true, status, documento: { id: docId, status, justificativa_admin: justificativa || null } });
   } catch (e) {
     console.error('[DOC REVISAR]', e);
-    return erroInterno(req, res, e, 'unknown-20');
+    return erroInterno(req, res, e, 'api-admin-documento-id-revisar');
   }
 });
 
@@ -2767,7 +2767,7 @@ app.post('/api/admin/candidatura/:id/aprovar-documentos', authAdmin, async (req,
     });
   } catch (e) {
     console.error('[APROVAR DOCS E AVANCAR]', e);
-    return erroInterno(req, res, e, 'unknown-21');
+    return erroInterno(req, res, e, 'api-admin-candidatura-id-docs-aprovar');
   }
 });
 
@@ -2902,7 +2902,7 @@ app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
     res.json({ ok: true, entrevista, googleEventId, meetHtmlLink });
   } catch (e) {
     console.error('[ENTREVISTA CRIAR ERRO]', e);
-    return erroInterno(req, res, e, 'unknown-22');
+    return erroInterno(req, res, e, 'api-admin-entrevista-post');
   }
 });
 
@@ -2950,7 +2950,7 @@ app.post('/api/admin/entrevista/:id/cancelar', authAdmin, async (req, res) => {
     res.json({ ok: true, entrevista_id: id, status: 'cancelada' });
   } catch (e) {
     console.error('[ENTREVISTA CANCELAR ERRO]', e);
-    return erroInterno(req, res, e, 'unknown-23');
+    return erroInterno(req, res, e, 'api-admin-entrevistas');
   }
 });
 
@@ -3250,7 +3250,7 @@ app.get('/api/chat/:candidatura_id/mensagens', authCandidatoOrAdminStrict, async
     res.json({ mensagens: msgs, candidatura_status: c.status });
   } catch (e) {
     console.error('[CHAT LISTAR]', e);
-    return erroInterno(req, res, e, 'unknown-27');
+    return erroInterno(req, res, e, 'api-chat-cid-mensagens-get');
   }
 });
 
@@ -3339,7 +3339,7 @@ app.post('/api/chat/:candidatura_id/mensagens', authCandidatoOrAdminStrict, asyn
     res.json({ ok: true, mensagem: msg[0] });
   } catch (e) {
     console.error('[CHAT ENVIAR]', e);
-    return erroInterno(req, res, e, 'unknown-28');
+    return erroInterno(req, res, e, 'api-chat-cid-upload');
   }
 });
 
@@ -3410,7 +3410,7 @@ app.post('/api/chat/:candidatura_id/upload', authCandidatoOrAdminStrict, rateLim
     res.json({ ok: true, mensagem: msg, arquivo: arqRows[0] });
   } catch (e) {
     console.error('[CHAT UPLOAD]', e);
-    return erroInterno(req, res, e, 'unknown-29');
+    return erroInterno(req, res, e, 'api-chat-arquivo-id');
   }
 });
 
@@ -3513,7 +3513,7 @@ app.get('/api/admin/conversas', authAdmin, async (req, res) => {
     res.json({ conversas: rows });
   } catch (e) {
     console.error('[CONVERSAS LISTAR]', e);
-    return erroInterno(req, res, e, 'unknown-31');
+    return erroInterno(req, res, e, 'api-admin-candidatura-id-enviar-proposta');
   }
 });
 
@@ -5063,7 +5063,7 @@ process.on('unhandledRejection', (e) => {
       res.json({ ok: true, criadas: criadas.length, jaExistiam: jaExistiam.length, detalhes: { criadas, jaExistiam } });
     } catch (e) {
       console.error('[SEED VAGAS DEMO ERRO]', e);
-      return erroInterno(req, res, e, 'unknown-32');
+      return erroInterno(req, res, e, 'api-admin-audit-logs');
     }
   });
 
