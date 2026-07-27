@@ -115,35 +115,26 @@ app.use(express.json({ limit: '100mb' }));
 // =========================================================================
 // HEADERS DE SEGURANÇA (defesa contra clickjacking, MIME sniffing, XSS)
 // =========================================================================
-// ETAPA 3 (2026-07-27): helmet instalado — headers padronizados pela OWASP.
-// Helmet cuida de: X-Content-Type-Options, X-Frame-Options, X-DNS-Prefetch-Control,
-// Strict-Transport-Security, Cross-Origin-Resource-Policy, Referrer-Policy, etc.
-// CSP continua manual pq backend responde JSON puro.
-const helmet = require('helmet');
-app.use(helmet({
-  // CSP: backend responde JSON, então CSP é bem restritiva.
-  // IMPORTANTE: helmet 8+ exige aspas em 'self'/'none'/'unsafe-inline' etc.
-  contentSecurityPolicy: {
-    useDefaults: false,
-    directives: {
-      defaultSrc: ["'none'"],
-      frameAncestors: ["'none'"]
-    }
-  },
-  // HSTS: força HTTPS por 1 ano
-  strictTransportSecurity: { maxAge: 31536000, includeSubDomains: true },
-  // Clickjacking: bloqueia embedding em iframe
-  frameguard: { action: 'deny' },
-  // Política de referer (não vaza URL completa em navegação externa)
-  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
-  // Esconde o stack (Express). Helmet já remove via xPoweredBy.
-  hidePoweredBy: true
-}));
-
-// Remove header "Server" injetado pelo Render (helmet só cuida do X-Powered-By)
+// FIX J4 (2026-07-27): Headers consolidados em middleware único.
+// NOTA (2026-07-27 14:30): Helmet foi tentado mas quebrou o deploy (node_modules cache).
+// Mantendo middleware manual que funcionava antes.
 app.use((req, res, next) => {
+  // Esconde o stack (Express). Não revela o backend.
   res.removeHeader('Server');
+  res.removeHeader('X-Powered-By');
+  // Previne MIME sniffing
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  // Política de referer (não vaza URL completa em navegação externa)
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+  // Clickjacking: bloqueia embedding em iframe
+  res.setHeader('X-Frame-Options', 'DENY');
+  // Permissões restritas (não precisa de geolocalização, microfone, etc)
   res.setHeader('Permissions-Policy', 'geolocation=(), microphone=(), camera=(), payment=()');
+  // CSP — Backend responde JSON, então CSP é simples
+  // Não precisa permitir scripts inline, imagens externas etc.
+  res.setHeader('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
+  // HSTS — força HTTPS por 1 ano (HTTPS já está ativo via Render + Cloudflare)
+  res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   next();
 });
 
