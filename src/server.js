@@ -121,7 +121,8 @@ app.use(express.json({ limit: '100mb' }));
 // CSP continua manual pq backend responde JSON puro.
 const helmet = require('helmet');
 app.use(helmet({
-  // CSP: backend responde JSON, então CSP é bem restritiva
+  // CSP: backend responde JSON, então CSP é bem restritiva.
+  // IMPORTANTE: helmet 8+ exige aspas em 'self'/'none'/'unsafe-inline' etc.
   contentSecurityPolicy: {
     useDefaults: false,
     directives: {
@@ -129,16 +130,13 @@ app.use(helmet({
       frameAncestors: ["'none'"]
     }
   },
-  // HSTS: força HTTPS por 1 ano (HTTPS já está ativo via Render + Cloudflare)
+  // HSTS: força HTTPS por 1 ano
   strictTransportSecurity: { maxAge: 31536000, includeSubDomains: true },
   // Clickjacking: bloqueia embedding em iframe
   frameguard: { action: 'deny' },
   // Política de referer (não vaza URL completa em navegação externa)
   referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
-  // Permissões restritas (não precisa de geolocalização, microfone, etc)
-  permittedCrossDomainPolicies: false,
   // Esconde o stack (Express). Helmet já remove via xPoweredBy.
-  // FIX Etapa 2 (2026-07-27): remove também o 'Server' header que o Render injeta por padrão.
   hidePoweredBy: true
 }));
 
