@@ -172,7 +172,11 @@ const IP_RATE_LIMITS = {
   verificar: { max: 10, windowMs: 60 * 60 * 1000 },     // 10 verificações/hora por IP
   esqueci: { max: 5, windowMs: 60 * 60 * 1000 },        // 5 resets/hora por IP
   upload: { max: 30, windowMs: 60 * 60 * 1000 },        // 30 uploads/hora por IP
-  chat: { max: 60, windowMs: 60 * 60 * 1000 }           // 60 msgs/hora por IP
+  chat: { max: 60, windowMs: 60 * 60 * 1000 },          // 60 msgs/hora por IP
+  twofa: { max: 5, windowMs: 60 * 60 * 1000 },          // 5 códigos 2FA/hora por IP+email
+  'chat-download': { max: 120, windowMs: 60 * 60 * 1000 }, // 120 downloads/hora por IP (mitiga scraping)
+  'api-read': { max: 600, windowMs: 60 * 60 * 1000 },   // 600 leituras/hora por IP
+  'api-write': { max: 120, windowMs: 60 * 60 * 1000 }   // 120 escritas/hora por IP
 };
 
 function rateLimitByIp(routeName) {
@@ -186,6 +190,8 @@ function rateLimitByIp(routeName) {
     if (rec && rec.blockedUntil && rec.blockedUntil > now) {
       const waitSec = Math.ceil((rec.blockedUntil - now) / 1000);
       audit(req, 'security.rate_limited', { result: 'blocked', metadata: { rota: routeName, waitSec } });
+      // FIX Etapa 2: envia Retry-After pra clientes educados
+      res.setHeader('Retry-After', waitSec);
       return res.status(429).json({ erro: `Muitas requisições. Tente novamente em ${waitSec}s.` });
     }
     if (rec && (now - rec.firstAt) > cfg.windowMs) {
@@ -755,7 +761,12 @@ app.post('/api/candidato/login', rateLimitLogin, async (req, res) => {
   if (!email || !senha) return res.status(400).json({ erro: 'E-mail e senha obrigatórios' });
 
   const emailLower = email.toLowerCase();
-  const { rows } = await pool.query('SELECT * FROM candidatos WHERE email = $1', [emailLower]);
+  // FIX Etapa 2: whitelist explícita (mesmo que a resposta final não exponha cand, é mais seguro).
+  // Inclui senha_hash pra fazer o bcrypt compare internamente.
+  const { rows } = await pool.query(
+    'SELECT id, email, nome, senha_hash, email_verificado FROM candidatos WHERE email = $1',
+    [emailLower]
+  );
   if (rows.length === 0) {
     rateLimitRegisterFail(req);
     await audit(req, 'login.failure', { resource_type: 'candidato', metadata: { email: emailLower } });
@@ -996,6 +1007,7 @@ app.put('/api/candidato/perfil', authCandidato, async (req, res) => {
 });
 
 app.post('/api/candidato/trocar-senha', authCandidato, async (req, res) => {
+  await audit(req, 'candidato.password.changed', { resource_type: 'candidato' });
   const { senha_atual, senha_nova } = req.body;
   if (!senha_atual || !senha_nova) {
     return res.status(400).json({ erro: 'Informe a senha atual e a nova senha' });
@@ -1248,6 +1260,7 @@ app.post('/api/candidato/candidatar/:vagaId', authCandidato, async (req, res) =>
     } catch (e) {
       console.error('[candidatar] Falha ao enviar e-mail de inscrição:', e.message);
     }
+    await audit(req, 'candidatura.created', { resource_type: 'candidatura', resource_id: rows[0].id, metadata: { vaga_id: req.params.vagaId, etapa: 0 } });
     res.json({ ok: true, candidatura: rows[0] });
   } catch (e) {
     if (e.code === '23505') return res.status(400).json({ erro: 'Você já se candidatou a esta vaga' });
@@ -1426,7 +1439,7 @@ app.post('/api/admin/login', rateLimitLogin, async (req, res) => {
 // ============================================================
 // 2FA — Verificar código (segunda etapa)
 // ============================================================
-app.post('/api/admin/2fa/verificar', rateLimitLogin, async (req, res) => {
+app.post('/api/admin/2fa/verificar', rateLimitByIp('twofa'), async (req, res) => {
   try {
     const { codigo_id, codigo } = req.body;
     if (!codigo_id || !codigo) {
@@ -1460,7 +1473,7 @@ app.post('/api/admin/2fa/verificar', rateLimitLogin, async (req, res) => {
 // ============================================================
 // 2FA — Reenviar código
 // ============================================================
-app.post('/api/admin/2fa/reenviar', rateLimitLogin, async (req, res) => {
+app.post('/api/admin/2fa/reenviar', rateLimitByIp('twofa'), async (req, res) => {
   try {
     const { codigo_id } = req.body;
     if (!codigo_id) return res.status(400).json({ erro: 'codigo_id obrigatório' });
@@ -3402,7 +3415,7 @@ app.post('/api/chat/:candidatura_id/upload', authCandidatoOrAdminStrict, rateLim
 });
 
 // Download de arquivo do chat
-app.get('/api/chat/arquivo/:id', authCandidatoOrAdminStrict, async (req, res) => {
+app.get('/api/chat/arquivo/:id', authCandidatoOrAdminStrict, rateLimitByIp('chat-download'), async (req, res) => {
   // FIX Etapa 2 (2026-07-27): whitelist + verificação de tamanho ANTES de carregar base64.
   // Atacante podia tentar baixar arquivo de outro candidato via ID guessing.
   try {
@@ -3584,6 +3597,7 @@ app.get('/api/admin/candidatura/:id/proposta', authAdmin, async (req, res) => {
 
 // ===== Candidato: aceitar proposta =====
 app.post('/api/candidato/aceitar-proposta/:candidaturaId', authCandidato, async (req, res) => {
+  await audit(req, 'candidatura.proposta.aceitar', { resource_type: 'candidatura', resource_id: req.params.candidaturaId });
   const { rows: c } = await pool.query(`
     SELECT c.*, v.titulo, v.etapas, cd.email as cand_email
     FROM candidaturas c
@@ -3657,6 +3671,7 @@ app.post('/api/candidato/aceitar-proposta/:candidaturaId', authCandidato, async 
 // ===== Candidato: recusar proposta =====
 // Candidato desiste da vaga a qualquer momento
 app.post('/api/candidatura/:id/desistir', authCandidato, async (req, res) => {
+  await audit(req, 'candidatura.desistir', { resource_type: 'candidatura', resource_id: req.params.id });
   const { motivo } = req.body;
   const { rows: c } = await pool.query(`
     SELECT c.*, v.titulo, cd.email as cand_email, cd.nome_completo as cand_nome
@@ -3694,6 +3709,7 @@ app.post('/api/candidatura/:id/desistir', authCandidato, async (req, res) => {
 });
 
 app.post('/api/candidato/recusar-proposta/:candidaturaId', authCandidato, async (req, res) => {
+  await audit(req, 'candidatura.proposta.recusar', { resource_type: 'candidatura', resource_id: req.params.candidaturaId });
   const { motivo } = req.body;
   const { rows: c } = await pool.query(`
     SELECT c.*, v.titulo, cd.email as cand_email
