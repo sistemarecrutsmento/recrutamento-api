@@ -88,6 +88,17 @@ app.get('/api/_diag/raw-id', (req, res) => {
   res.json({ raw_id: 'DIAG_' + Date.now(), port: process.env.PORT || 10000, ts: new Date().toISOString() });
 });
 
+app.get('/api/_diag/list-routes', (req, res) => {
+  const rotas = [];
+  app._router.stack.forEach(l => {
+    if (l.route) {
+      const m = Object.keys(l.route.methods || {}).filter(x => x !== 'all').join(',') || 'all';
+      rotas.push(m.toUpperCase() + ' ' + (l.route.path || ''));
+    }
+  });
+  res.json({ total: rotas.length, rotas });
+});
+
 
 // FIX Etapa 2 (2026-07-27): hardening de headers + Express.
 // disable() remove o header de TODAS as respostas, incluindo OPTIONS e 404/500.
