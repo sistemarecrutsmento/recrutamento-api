@@ -3818,7 +3818,7 @@ app.get('/api/empresa/dashboard', authEmpresa, async (req, res) => {
 
     // 5. Próximas entrevistas
     const proximas = await pool.query(`
-      SELECT e.id, e.candidatura_id, e.data_hora, e.tipo,
+      SELECT e.id, e.candidatura_id, e.data_hora, e.etapa, e.local,
         cd.nome as candidato_nome, cd.email as candidato_email,
         v.titulo as vaga_titulo
       FROM entrevistas e
