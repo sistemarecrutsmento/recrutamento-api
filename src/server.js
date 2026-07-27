@@ -113,39 +113,6 @@ app.delete('/api/_debug/meet-deletar/:eventId', async (req, res) => {
 
 // ============= DEBUG TEMPORÁRIO (remover depois) =============
 // Tenta enviar e-mail rico de notificação de mudança de etapa (preview)
-// 🔍 DEBUG TEMPORÁRIO: força etapa de uma candidatura (1-indexed) para teste
-app.post('/api/_debug-forcar-etapa', async (req, res) => {
-  try {
-    const { candidatura_id, etapa } = req.body;
-    if (!candidatura_id || !etapa) return res.status(400).json({ erro: 'candidatura_id e etapa obrigatórios' });
-    const { rows } = await pool.query(
-      'UPDATE candidaturas SET etapa_atual = $1, atualizada_em = NOW() WHERE id = $2 RETURNING id, etapa_atual, vaga_id',
-      [etapa, candidatura_id]
-    );
-    res.json({ ok: true, atualizado: rows.length, candidatura: rows[0] });
-  } catch (e) {
-    res.status(500).json({ ok: false, erro: e.message });
-  }
-});
-
-// 🔍 DEBUG TEMPORÁRIO: lista usuários de empresa (com senha_hash mascarado)
-app.get('/api/_debug-empresas-usuarios', async (req, res) => {
-  try {
-    const { rows } = await pool.query(`
-      SELECT u.id, u.empresa_id, u.nome, u.email, u.cargo, u.ativo,
-        e.nome as empresa_nome, e.ativo as empresa_ativa,
-        SUBSTRING(u.senha_hash, 1, 7) as hash_inicio
-      FROM empresa_usuarios u
-      JOIN empresas e ON e.id = u.empresa_id
-      ORDER BY u.criado_em DESC
-      LIMIT 20
-    `);
-    res.json({ ok: true, total: rows.length, usuarios: rows });
-  } catch (e) {
-    res.status(500).json({ ok: false, erro: e.message });
-  }
-});
-
 // 🔍 DEBUG TEMPORÁRIO: testa query direta na tabela recrutadores
 app.get('/api/_debug-recrutadores', async (req, res) => {
   try {
@@ -3925,8 +3892,8 @@ app.get('/api/empresa/dashboard', authEmpresa, async (req, res) => {
       empresa: { id: empresa_id, nome: req.user?.nome || req.user?.email || 'Empresa' }
     });
   } catch (e) {
-    console.error('[empresa dashboard] ERRO:', e.message, e.code, e.detail);
-    res.status(500).json({ erro: 'Erro ao carregar dashboard', debug: e.message });
+    console.error('[empresa dashboard]', e);
+    res.status(500).json({ erro: 'Erro ao carregar dashboard' });
   }
 });
 
