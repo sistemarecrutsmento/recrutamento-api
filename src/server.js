@@ -1166,7 +1166,7 @@ app.get('/api/vagas', async (req, res) => {
   // Filtra por status='publicada' (a coluna "publicada" não existe — é status)
   // Limite duro pra evitar DoS / queries pesadas
   let sql = `SELECT id, titulo, empresa, descricao, requisitos, beneficios, salario_min, salario_max,
-                    tipo_contrato, nivel, area, cidade, estado, modelo, publicada_em, etapas
+                    tipo_contrato, nivel, area, cidade, estado, modelo, etapas
              FROM vagas WHERE status = 'publicada'`;
   const params = [];
   if (cidade) { params.push(`%${cidade}%`); sql += ` AND cidade ILIKE $${params.length}`; }
@@ -1194,7 +1194,7 @@ app.get('/api/vagas/:id', async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT id, titulo, empresa, descricao, requisitos, beneficios, salario_min, salario_max,
-              tipo_contrato, nivel, area, cidade, estado, modelo, publicada_em, etapas,
+              tipo_contrato, nivel, area, cidade, estado, modelo, etapas,
               CASE WHEN status = 'publicada' THEN 'publicada' ELSE NULL END as status
        FROM vagas WHERE id = $1 AND status = 'publicada'`,
       [id]
