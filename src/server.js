@@ -37,7 +37,7 @@ const { criarAccessToken, criarRefreshToken, persistirRefresh, consumirRefresh, 
 
 // Email do admin pra receber notificações de ação do candidato
 const ADMIN_NOTIF_EMAIL = process.env.ADMIN_NOTIF_EMAIL || process.env.ADMIN_EMAIL || 'fabio08dejesusjunior@gmail.com';
-const { authMiddleware, authCandidato, authAdmin, authEmpresa, authAdminOnly, authCandidatoOrEmpresaOrAdmin, authCandidatoOrAdminStrict, JWT_VERIFY_OPTIONS } = require('./auth');
+const { authMiddleware, authCandidato, authAdmin, authEmpresa, authAdminOnly, authCandidatoOrEmpresaOrAdmin, authCandidatoOrAdminStrict, requireAdminEmpresa, requireRecrutadorOuAdmin, requireEmpresaViewer, JWT_VERIFY_OPTIONS } = require('./auth');
 const { sanitizeText, sanitizeFilename, escapeContentDispositionFilename } = require('./sanitize');
 
 // =========================================================================
@@ -4463,7 +4463,7 @@ app.post('/api/auth/login-empresa', rateLimitLogin, async (req, res) => {
 });
 
 // Trocar própria senha (empresa)
-app.post('/api/auth/trocar-senha-empresa', authEmpresa, async (req, res) => {
+app.post('/api/auth/trocar-senha-empresa', requireEmpresaViewer, async (req, res) => {
   const { senha_atual, senha_nova } = req.body;
   if (!senha_atual || !senha_nova) return res.status(400).json({ erro: 'Informe senha atual e nova' });
   try {
@@ -4490,7 +4490,7 @@ app.post('/api/auth/trocar-senha-empresa', authEmpresa, async (req, res) => {
 // Fluxo: cria a vaga + vincula automaticamente no empresa_vaga_acesso.
 // A vaga começa com status='rascunho' e a empresa precisa publicar depois
 // (futuro: publicar imediato pra planos pagos; moderação pra free beta).
-app.post('/api/empresa/vagas', authEmpresa, async (req, res) => {
+app.post('/api/empresa/vagas', requireRecrutadorOuAdmin, async (req, res) => {
   try {
     const v = req.body || {};
     if (!v.titulo || String(v.titulo).trim().length < 2) {
@@ -4565,7 +4565,7 @@ app.post('/api/empresa/vagas', authEmpresa, async (req, res) => {
 // ========== EMPRESA LISTAR/EDITAR/PUBLICAR VAGA ==========
 
 // Lista vagas da empresa (criadas por ela + liberadas pelo admin)
-app.get('/api/empresa/vagas', authEmpresa, async (req, res) => {
+app.get('/api/empresa/vagas', requireEmpresaViewer, async (req, res) => {
   try {
     const { empresa_id } = req.user;
     const { rows } = await pool.query(`
@@ -4589,7 +4589,7 @@ app.get('/api/empresa/vagas', authEmpresa, async (req, res) => {
 });
 
 // Atualizar vaga (empresa só pode editar vagas criadas por ela)
-app.put('/api/empresa/vagas/:id', authEmpresa, async (req, res) => {
+app.put('/api/empresa/vagas/:id', requireRecrutadorOuAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { empresa_id } = req.user;
@@ -4633,7 +4633,7 @@ app.put('/api/empresa/vagas/:id', authEmpresa, async (req, res) => {
 });
 
 // Publicar/despublicar vaga (empresa)
-app.patch('/api/empresa/vagas/:id/status', authEmpresa, async (req, res) => {
+app.patch('/api/empresa/vagas/:id/status', requireRecrutadorOuAdmin, async (req, res) => {
   try {
     const { id } = req.params;
     const { status } = req.body || {};
@@ -4657,7 +4657,7 @@ app.patch('/api/empresa/vagas/:id/status', authEmpresa, async (req, res) => {
 });
 
 // Dashboard da empresa
-app.get('/api/empresa/dashboard', authEmpresa, async (req, res) => {
+app.get('/api/empresa/dashboard', requireEmpresaViewer, async (req, res) => {
   const { empresa_id } = req.user;
   try {
     const now = new Date();
@@ -4887,7 +4887,7 @@ app.get('/api/empresa/dashboard', authEmpresa, async (req, res) => {
 
 
 // Detalhes de uma vaga liberada (info completa, não só KPIs)
-app.get('/api/empresa/vagas/:vaga_id', authEmpresa, async (req, res) => {
+app.get('/api/empresa/vagas/:vaga_id', requireEmpresaViewer, async (req, res) => {
   const { empresa_id } = req.user;
   const { vaga_id } = req.params;
   try {
@@ -4909,7 +4909,7 @@ app.get('/api/empresa/vagas/:vaga_id', authEmpresa, async (req, res) => {
 });
 
 // Lista candidatos de UMA vaga liberada
-app.get('/api/empresa/vagas/:vaga_id/candidatos', authEmpresa, async (req, res) => {
+app.get('/api/empresa/vagas/:vaga_id/candidatos', requireEmpresaViewer, async (req, res) => {
   const { empresa_id } = req.user;
   const { vaga_id } = req.params;
   try {
@@ -4939,7 +4939,7 @@ app.get('/api/empresa/vagas/:vaga_id/candidatos', authEmpresa, async (req, res) 
 
 // Vagas com candidatos (espelho de /api/admin/vagas-com-candidaturas, filtrado por empresa)
 // Lista TODAS as vagas liberadas da empresa (independente de ter candidato)
-app.get('/api/empresa/vagas-todas', authEmpresa, async (req, res) => {
+app.get('/api/empresa/vagas-todas', requireEmpresaViewer, async (req, res) => {
   const { empresa_id } = req.user;
   try {
     const { rows } = await pool.query(`
@@ -4966,7 +4966,7 @@ app.get('/api/empresa/vagas-todas', authEmpresa, async (req, res) => {
   }
 });
 
-app.get('/api/empresa/vagas-com-candidaturas', authEmpresa, async (req, res) => {
+app.get('/api/empresa/vagas-com-candidaturas', requireEmpresaViewer, async (req, res) => {
   const { empresa_id } = req.user;
   try {
     const { rows } = await pool.query(`
@@ -4993,7 +4993,7 @@ app.get('/api/empresa/vagas-com-candidaturas', authEmpresa, async (req, res) => 
 });
 
 // Agenda da empresa (entrevistas marcadas nas vagas liberadas)
-app.get('/api/empresa/agenda', authEmpresa, async (req, res) => {
+app.get('/api/empresa/agenda', requireEmpresaViewer, async (req, res) => {
   const { empresa_id } = req.user;
   const { periodo } = req.query; // 'hoje' | 'proximos' | 'passados' | 'todos' | 'semana' | '7dias' | '30dias' | 'atrasadas' | 'realizadas' | 'canceladas'
   try {
@@ -5050,7 +5050,7 @@ app.get('/api/empresa/agenda', authEmpresa, async (req, res) => {
 });
 
 // Chat Empresa ↔ RH (mensagens trocadas entre empresa e admin/recrutador)
-app.get('/api/empresa/candidatura/:id/chat', authEmpresa, async (req, res) => {
+app.get('/api/empresa/candidatura/:id/chat', requireEmpresaViewer, async (req, res) => {
   const { empresa_id } = req.user;
   const { id } = req.params;
   try {
@@ -5077,7 +5077,7 @@ app.get('/api/empresa/candidatura/:id/chat', authEmpresa, async (req, res) => {
   }
 });
 
-app.post('/api/empresa/candidatura/:id/chat', authEmpresa, async (req, res) => {
+app.post('/api/empresa/candidatura/:id/chat', requireRecrutadorOuAdmin, async (req, res) => {
   const { empresa_id, nome: empresa_nome } = req.user;
   const { id } = req.params;
   let { mensagem } = req.body;
@@ -5107,7 +5107,7 @@ app.post('/api/empresa/candidatura/:id/chat', authEmpresa, async (req, res) => {
 });
 
 // Detalhe do candidato (com verificação de acesso)
-app.get('/api/empresa/candidatura/:id', authEmpresa, async (req, res) => {
+app.get('/api/empresa/candidatura/:id', requireEmpresaViewer, async (req, res) => {
   const { empresa_id } = req.user;
   const { id } = req.params;
   try {
@@ -5146,7 +5146,7 @@ app.get('/api/empresa/candidatura/:id', authEmpresa, async (req, res) => {
 });
 
 // Empresa visualiza documentos de uma candidatura das suas vagas (READ-ONLY)
-app.get('/api/empresa/candidatura/:id/documentos', authEmpresa, async (req, res) => {
+app.get('/api/empresa/candidatura/:id/documentos', requireEmpresaViewer, async (req, res) => {
   const { empresa_id } = req.user;
   const candidaturaId = Number(req.params.id);
   if (!Number.isInteger(candidaturaId) || candidaturaId <= 0) {
@@ -5179,7 +5179,7 @@ app.get('/api/empresa/candidatura/:id/documentos', authEmpresa, async (req, res)
 });
 
 // Ação da empresa (aprovar, reprovar, avançar) — só etapa 4+
-app.post('/api/empresa/candidatura/:id/acao', authEmpresa, async (req, res) => {
+app.post('/api/empresa/candidatura/:id/acao', requireRecrutadorOuAdmin, async (req, res) => {
   const { empresa_id, nome: empresa_nome } = req.user;
   const { id } = req.params;
   const { acao, motivo, comentario } = req.body; // acao: 'avancar' | 'reprovar' | 'comentar'
@@ -5335,7 +5335,7 @@ app.get('/api/admin/chat-empresa-lista', authAdmin, async (req, res) => {
 });
 
 // Lista conversas chat RH para a empresa logada (para a bolinha flutuante da empresa)
-app.get('/api/empresa/chat-rh-lista', authEmpresa, async (req, res) => {
+app.get('/api/empresa/chat-rh-lista', requireEmpresaViewer, async (req, res) => {
   const { empresa_id } = req.user;
   try {
     const { rows } = await pool.query(`
@@ -5643,6 +5643,161 @@ process.on('unhandledRejection', (e) => {
     console.error(`[ERRO ${contexto}]`, e && (e.stack || e.message || e));
     return res.status(500).json({ erro: 'Erro interno do servidor' });
   }
+
+  // =========================================================================
+  // FASE 2 — ROTAS RBAC DE ADMIN_EMPRESA (28/07/2026)
+  // admin_empresa gerencia apenas usuarios da PROPRIA empresa (req.user.empresa_id).
+  // Bloqueios:
+  //   - tentativa de acessar outra empresa -> 403
+  //   - self-downgrade (alterar o proprio role) -> 403
+  //   - bloquear duplo admin_empresa na mesma empresa
+  // =========================================================================
+
+  // Lista usuarios da empresa logada (read-only, qualquer role)
+  app.get('/api/empresa/usuarios', requireEmpresaViewer, async (req, res) => {
+    const { empresa_id } = req.user;
+    try {
+      const { rows } = await pool.query(`
+        SELECT id, nome, email, cargo, role, ativo, primeiro_acesso, criado_em
+        FROM empresa_usuarios
+        WHERE empresa_id = $1
+        ORDER BY nome
+      `, [empresa_id]);
+      res.json({ usuarios: rows });
+    } catch (e) {
+      return erroInterno(req, res, e, 'empresa.usuarios.list');
+    }
+  });
+
+  // Cria usuario (apenas admin_empresa)
+  app.post('/api/empresa/usuarios', requireAdminEmpresa, async (req, res) => {
+    const { empresa_id } = req.user;
+    const { nome, email, senha, cargo, role } = req.body;
+    if (!nome || !email || !senha) {
+      return res.status(400).json({ erro: 'nome, email, senha obrigatorios' });
+    }
+    let roleFinal = role;
+    if (roleFinal && !['admin_empresa', 'recrutador', 'viewer'].includes(roleFinal)) {
+      return res.status(400).json({ erro: 'role invalido' });
+    }
+    if (!roleFinal) roleFinal = 'recrutador';
+    try {
+      const hash = await bcrypt.hash(senha, 10);
+      const { rows } = await pool.query(`
+        INSERT INTO empresa_usuarios (empresa_id, nome, email, senha_hash, cargo, criado_por, role, ativo)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, true)
+        RETURNING id, nome, email, cargo, role, ativo
+      `, [empresa_id, nome, email.toLowerCase(), hash, cargo || 'Recrutador', req.user.id, roleFinal]);
+      await audit(req, 'empresa.usuario.created', {
+        resource_type: 'empresa_usuario',
+        resource_id: rows[0].id,
+        user_email: rows[0].email,
+        metadata: { empresa_id, role: roleFinal }
+      });
+      res.json({ ok: true, usuario: rows[0] });
+    } catch (e) {
+      if (e.code === '23505') return res.status(400).json({ erro: 'Email ja cadastrado' });
+      return erroInterno(req, res, e, 'empresa.usuarios.create');
+    }
+  });
+
+  // Edita role/cargo/ativo (admin_empresa)
+  app.put('/api/empresa/usuarios/:id', requireAdminEmpresa, async (req, res) => {
+    const { empresa_id } = req.user;
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ erro: 'id invalido' });
+    const { cargo, role, ativo } = req.body;
+    try {
+      const own = await pool.query(
+        'SELECT id, role FROM empresa_usuarios WHERE id=$1 AND empresa_id=$2',
+        [id, empresa_id]
+      );
+      if (own.rowCount === 0) return res.status(403).json({ erro: 'Usuario nao pertence a esta empresa' });
+
+      // Self-downgrade: bloquear
+      if (id === req.user.id && role !== undefined && role !== 'admin_empresa') {
+        return res.status(403).json({ erro: 'admin_empresa nao pode rebaixar a si mesmo' });
+      }
+
+      // Promocao a admin_empresa por outra pessoa so se ainda nao existir
+      if (id !== req.user.id && role === 'admin_empresa') {
+        const admins = await pool.query(
+          "SELECT COUNT(*)::int AS qtd FROM empresa_usuarios WHERE empresa_id=$1 AND role='admin_empresa'",
+          [empresa_id]
+        );
+        if (admins.rows[0].qtd >= 1) {
+          return res.status(403).json({ erro: 'Ja existe admin_empresa para esta empresa' });
+        }
+      }
+
+      if (role !== undefined && !['admin_empresa', 'recrutador', 'viewer'].includes(role)) {
+        return res.status(400).json({ erro: 'role invalido' });
+      }
+
+      const upd = [];
+      const vals = [];
+      if (cargo !== undefined) { vals.push(cargo); upd.push(`cargo=$${vals.length}`); }
+      if (role !== undefined)  { vals.push(role);  upd.push(`role=$${vals.length}`); }
+      if (ativo !== undefined) { vals.push(!!ativo); upd.push(`ativo=$${vals.length}`); }
+      if (upd.length === 0) return res.status(400).json({ erro: 'nada para atualizar' });
+      vals.push(id);
+      const { rows } = await pool.query(
+        `UPDATE empresa_usuarios SET ${upd.join(', ')} WHERE id=$${vals.length} RETURNING id, nome, email, cargo, role, ativo`,
+        vals
+      );
+      await audit(req, 'empresa.usuario.updated', {
+        resource_type: 'empresa_usuario',
+        resource_id: id,
+        metadata: { fields: Object.keys(req.body) }
+      });
+      res.json({ ok: true, usuario: rows[0] });
+    } catch (e) {
+      return erroInterno(req, res, e, 'empresa.usuarios.update');
+    }
+  });
+
+  // Reset de senha (admin_empresa) para usuarios da empresa
+  app.post('/api/empresa/usuarios/:id/reset-senha', requireAdminEmpresa, async (req, res) => {
+    const { empresa_id } = req.user;
+    const id = parseInt(req.params.id, 10);
+    const { nova_senha } = req.body || {};
+    if (!Number.isFinite(id) || !nova_senha || nova_senha.length < 6) {
+      return res.status(400).json({ erro: 'nova_senha>=6 obrigatoria' });
+    }
+    try {
+      const own = await pool.query('SELECT id FROM empresa_usuarios WHERE id=$1 AND empresa_id=$2', [id, empresa_id]);
+      if (own.rowCount === 0) return res.status(403).json({ erro: 'Usuario nao pertence a esta empresa' });
+      const hash = await bcrypt.hash(nova_senha, 10);
+      await pool.query('UPDATE empresa_usuarios SET senha_hash=$1, primeiro_acesso=true WHERE id=$2', [hash, id]);
+      await audit(req, 'empresa.usuario.password_reset', {
+        resource_type: 'empresa_usuario',
+        resource_id: id
+      });
+      res.json({ ok: true });
+    } catch (e) {
+      return erroInterno(req, res, e, 'empresa.usuarios.reset');
+    }
+  });
+
+  // Desativa usuario (admin_empresa) — soft delete via ativo=false
+  app.delete('/api/empresa/usuarios/:id', requireAdminEmpresa, async (req, res) => {
+    const { empresa_id } = req.user;
+    const id = parseInt(req.params.id, 10);
+    if (!Number.isFinite(id)) return res.status(400).json({ erro: 'id invalido' });
+    if (id === req.user.id) return res.status(403).json({ erro: 'admin_empresa nao pode desativar a si mesmo' });
+    try {
+      const own = await pool.query('SELECT id FROM empresa_usuarios WHERE id=$1 AND empresa_id=$2', [id, empresa_id]);
+      if (own.rowCount === 0) return res.status(403).json({ erro: 'Usuario nao pertence a esta empresa' });
+      await pool.query('UPDATE empresa_usuarios SET ativo=false WHERE id=$1', [id]);
+      await audit(req, 'empresa.usuario.deactivated', {
+        resource_type: 'empresa_usuario',
+        resource_id: id
+      });
+      res.json({ ok: true });
+    } catch (e) {
+      return erroInterno(req, res, e, 'empresa.usuarios.delete');
+    }
+  });
 
   const port = process.env.PORT || 10000;
   app.listen(port, () => console.log(`API rodando na porta ${port}`));
