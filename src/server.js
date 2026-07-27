@@ -113,6 +113,21 @@ app.delete('/api/_debug/meet-deletar/:eventId', async (req, res) => {
 
 // ============= DEBUG TEMPORÁRIO (remover depois) =============
 // Tenta enviar e-mail rico de notificação de mudança de etapa (preview)
+// 🔍 DEBUG TEMPORÁRIO: força etapa de uma candidatura (1-indexed) para teste
+app.post('/api/_debug-forcar-etapa', async (req, res) => {
+  try {
+    const { candidatura_id, etapa } = req.body;
+    if (!candidatura_id || !etapa) return res.status(400).json({ erro: 'candidatura_id e etapa obrigatórios' });
+    const { rows } = await pool.query(
+      'UPDATE candidaturas SET etapa_atual = $1, atualizada_em = NOW() WHERE id = $2 RETURNING id, etapa_atual, vaga_id',
+      [etapa, candidatura_id]
+    );
+    res.json({ ok: true, atualizado: rows.length, candidatura: rows[0] });
+  } catch (e) {
+    res.status(500).json({ ok: false, erro: e.message });
+  }
+});
+
 // 🔍 DEBUG TEMPORÁRIO: lista usuários de empresa (com senha_hash mascarado)
 app.get('/api/_debug-empresas-usuarios', async (req, res) => {
   try {
