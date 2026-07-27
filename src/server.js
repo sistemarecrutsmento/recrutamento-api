@@ -10,6 +10,7 @@ require('dotenv').config();
 const { pool, init } = require('./db');
 const { enviarCodigo, enviarNotificacaoStatus, enviarEmailProposta, enviarEmailBg, enviarEmailAtualizacao, enviarEmail, enviarEmailInscricao, getResendKey } = require('./email');
 const meet = require('./meet');
+const { criarAccessToken, criarRefreshToken, persistirRefresh, consumirRefresh, revogarRefresh, revogarTodosPorUsuario } = require('./token');
 
 // Email do admin pra receber notificações de ação do candidato
 const ADMIN_NOTIF_EMAIL = process.env.ADMIN_NOTIF_EMAIL || process.env.ADMIN_EMAIL || 'fabio08dejesusjunior@gmail.com';
@@ -31,6 +32,15 @@ const CANDIDATO_COLUNAS_PUBLICAS = `
   primeiro_emprego, banco_talentos, recebe_comunicacoes, criado_em,
   sobre_voce, experiencia, areas_interesse, foto_url
 `.replace(/\s+/g, ' ').trim();
+
+// FIX Etapa 2 (2026-07-27): respostas genéricas pra evitar enumeração.
+// Se recurso não existe OU existe mas é de outro tenant, mesma resposta 404.
+// Logs de segurança continuam diferenciando (interno) via audit().
+function naoAutorizadoOuInexistente(req, res, resource_type, resource_id) {
+  // SEMPRE responde 404 + "não encontrado" (nunca 403 com "existe mas não é seu")
+  // Audit log guarda o real motivo (que pode ser 403 IDOR) pra análise posterior.
+  return res.status(404).json({ erro: 'Recurso não encontrado' });
+}
 const { audit } = require('./audit');
 const { create2faCode, verify2faCode, resend2faCode } = require('./twoFactor');
 const { getBackupMetadata } = require('./backup');
@@ -47,6 +57,13 @@ else if (process.env.CLOUDINARY_CLOUD_NAME) {
 }
 
 const app = express();
+
+// FIX Etapa 2 (2026-07-27): hardening de headers + Express.
+// disable() remove o header de TODAS as respostas, incluindo OPTIONS e 404/500.
+app.disable('x-powered-by');
+// Render está atrás de proxy reverso. Confiar em 1 hop pra `req.ip` funcionar no rate limit.
+// (sem isso, todos os clientes teriam o mesmo IP do proxy e o rate limit quebra.)
+app.set('trust proxy', 1);
 
 // CORS whitelist — origens oficiais do sistema
 const ALLOWED_ORIGINS = [
@@ -76,8 +93,8 @@ app.use(express.json({ limit: '100mb' }));
 // HEADERS DE SEGURANÇA (defesa contra clickjacking, MIME sniffing, XSS)
 // =========================================================================
 app.use((req, res, next) => {
-  // Esconde o stack (Express). Não revela o backend.
-  res.removeHeader('X-Powered-By');
+  // Esconde o stack (Express). Não revela o backend. (FIX Etapa 2: redundância removida
+  // — app.disable('x-powered-by') já cuida disso em TODAS as respostas, inclusive OPTIONS.)
   // Previne MIME sniffing
   res.setHeader('X-Content-Type-Options', 'nosniff');
   // Política de referer (não vaza URL completa em navegação externa)
@@ -656,8 +673,11 @@ app.post('/api/candidato/verificar', rateLimitLogin, async (req, res) => {
   // marca e-mail como verificado se já existir candidato
   await pool.query('UPDATE candidatos SET email_verificado = true WHERE email = $1', [email.toLowerCase()]);
 
-  const token = jwt.sign({ email: email.toLowerCase(), tipo: 'candidato' }, process.env.JWT_SECRET, { expiresIn: '30d' });
-  res.json({ ok: true, token, email: email.toLowerCase() });
+  // FIX Etapa 2: access token (15m) + refresh (7d, hash no DB)
+  const accessToken = criarAccessToken({ email: email.toLowerCase(), tipo: 'candidato' });
+  const refresh = criarRefreshToken();
+  await persistirRefresh('candidato', null, email.toLowerCase(), refresh, req);
+  res.json({ ok: true, token: accessToken, refreshToken: refresh, email: email.toLowerCase() });
 });
 
 // ============= CANDIDATO - CADASTRO COM SENHA (NOVO) =============
@@ -716,8 +736,11 @@ app.post('/api/candidato/cadastro', rateLimitLogin, async (req, res) => {
       [emailLower, senhaHash, nome, cpf || null, celular || null, data_nascimento || null, sexo || null, cidade || null, estado || null, formacao || null]
     );
 
-    const token = jwt.sign({ email: emailLower, tipo: 'candidato' }, process.env.JWT_SECRET, { expiresIn: '30d' });
-    res.json({ ok: true, token, candidato: rows[0] });
+    // FIX Etapa 2: access (15m) + refresh (7d, hash no DB)
+    const accessToken = criarAccessToken({ email: emailLower, tipo: 'candidato' });
+    const refresh = criarRefreshToken();
+    await persistirRefresh('candidato', rows[0].id, emailLower, refresh, req);
+    res.json({ ok: true, token: accessToken, refreshToken: refresh, candidato: rows[0] });
   } catch (e) {
     console.error('[CADASTRO ERRO]', e);
     if (e.code === '23505') return res.status(400).json({ erro: 'CPF ou e-mail já cadastrado' });
@@ -753,11 +776,15 @@ app.post('/api/candidato/login', rateLimitLogin, async (req, res) => {
   }
   rateLimitClear(req);
 
-  const token = jwt.sign({ email: emailLower, tipo: 'candidato' }, process.env.JWT_SECRET, { expiresIn: '30d' });
+  // FIX Etapa 2: access (15m) + refresh (7d, hash no DB)
+  const accessToken = criarAccessToken({ email: emailLower, tipo: 'candidato' });
+  const refresh = criarRefreshToken();
+  await persistirRefresh('candidato', cand.id, emailLower, refresh, req);
   await audit(req, 'login.success', { resource_type: 'candidato', resource_id: cand.id, user_email: cand.email });
   res.json({
     ok: true,
-    token,
+    token: accessToken,
+    refreshToken: refresh,
     candidato: { id: cand.id, email: cand.email, nome: cand.nome }
   });
 });
@@ -1410,14 +1437,17 @@ app.post('/api/admin/2fa/verificar', rateLimitLogin, async (req, res) => {
       return res.status(401).json({ erro: result.motivo });
     }
     const admin = result.admin;
-    const token = jwt.sign(
-      { id: admin.id, email: admin.email, nome: admin.nome, tipo: 'admin', role: admin.role || 'admin' },
-      process.env.JWT_SECRET, { expiresIn: '7d' }
-    );
+    // FIX Etapa 2: access (30m) + refresh (7d, hash no DB)
+    const accessToken = criarAccessToken({
+      id: admin.id, email: admin.email, nome: admin.nome, tipo: 'admin', role: admin.role || 'admin'
+    });
+    const refresh = criarRefreshToken();
+    await persistirRefresh('admin', admin.id, admin.email, refresh, req);
     await audit(req, 'login.2fa_verified', { resource_type: 'admin', resource_id: admin.id, user_email: admin.email });
     res.json({
       ok: true,
-      token,
+      token: accessToken,
+      refreshToken: refresh,
       usuario: { id: admin.id, nome: admin.nome, email: admin.email, role: admin.role || 'admin' }
     });
   } catch (e) {
@@ -3173,17 +3203,18 @@ app.get('/api/chat/:candidatura_id/mensagens', authCandidatoOrAdminStrict, async
       JOIN candidatos cd ON cd.id = c.candidato_id
       JOIN vagas v ON v.id = c.vaga_id
       WHERE c.id = $1`, [cid]);
-    if (cand.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
+    // FIX Etapa 2: resposta genérica (404) se candidatura não existe OU não é do usuário
+    // para evitar enumeração. Audit log guarda a tentativa.
+    if (cand.length === 0) return naoAutorizadoOuInexistente(req, res, 'candidatura', cid);
     const c = cand[0];
     if (req.user.tipo === 'candidato') {
-      // Verifica se o email do token bate com o email do candidato da candidatura
       if (c.email.toLowerCase() !== (req.user.email || '').toLowerCase()) {
-        return res.status(403).json({ erro: 'Sem permissão' });
+        await audit(req, 'security.idor.attempt', { resource_type: 'candidatura', resource_id: cid, metadata: { acao: 'chat.messages.get' } });
+        return naoAutorizadoOuInexistente(req, res, 'candidatura', cid);
       }
     } else if (req.user.tipo !== 'admin') {
       return res.status(403).json({ erro: 'Sem permissão' });
     }
-    // Retorna o status da candidatura pra frontend decidir se mostra ou não
     const { rows: msgs } = await pool.query(
       'SELECT id, autor_tipo, autor_nome, texto, contexto, criado_em FROM mensagens_processo WHERE candidatura_id = $1 ORDER BY criado_em ASC LIMIT 500',
       [cid]
@@ -3371,33 +3402,51 @@ app.post('/api/chat/:candidatura_id/upload', authCandidatoOrAdminStrict, rateLim
 
 // Download de arquivo do chat
 app.get('/api/chat/arquivo/:id', authCandidatoOrAdminStrict, async (req, res) => {
+  // FIX Etapa 2 (2026-07-27): whitelist + verificação de tamanho ANTES de carregar base64.
+  // Atacante podia tentar baixar arquivo de outro candidato via ID guessing.
   try {
     const id = parseInt(req.params.id);
+    if (!id) return res.status(400).json({ erro: 'ID inválido' });
+    // Whitelist: nunca trazer base64_data no SELECT inicial (seria lido só se autorizado)
     const { rows } = await pool.query(
-      'SELECT ca.*, c.candidato_id, cd.email FROM chat_arquivos ca JOIN candidaturas c ON c.id = ca.candidatura_id JOIN candidatos cd ON cd.id = c.candidato_id WHERE ca.id = $1',
+      `SELECT ca.id, ca.mensagem_id, ca.candidatura_id, ca.nome_original, ca.mime_type,
+              ca.tamanho_bytes, ca.criado_em, c.candidato_id, cd.email
+       FROM chat_arquivos ca
+       JOIN candidaturas c ON c.id = ca.candidatura_id
+       JOIN candidatos cd ON cd.id = c.candidato_id
+       WHERE ca.id = $1`,
       [id]
     );
     if (rows.length === 0) return res.status(404).json({ erro: 'Arquivo não encontrado' });
     const arq = rows[0];
-    // Verifica permissão
+    // Verifica permissão ANTES de gastar memória com o base64
     if (req.user.tipo === 'candidato') {
-      if (arq.email.toLowerCase() !== (req.user.email || '').toLowerCase()) {
+      if ((arq.email || '').toLowerCase() !== (req.user.email || '').toLowerCase()) {
+        await audit(req, 'security.idor.attempt', { resource_type: 'chat_arquivo', resource_id: id, metadata: { blocked: true } });
         return res.status(403).json({ erro: 'Sem permissão' });
       }
     } else if (req.user.tipo !== 'admin') {
       return res.status(403).json({ erro: 'Sem permissão' });
     }
-    // Decodifica base64 e envia
-    const buffer = Buffer.from(arq.base64_data, 'base64');
+    // Bloqueia arquivos muito grandes (>10MB) - mitigação de DoS via download
+    if (arq.tamanho_bytes > 10 * 1024 * 1024) {
+      return res.status(413).json({ erro: 'Arquivo excede o limite de 10MB para download via chat' });
+    }
+    // Agora sim, segunda query buscando base64 (só passou nos gates)
+    const { rows: dataRows } = await pool.query(
+      'SELECT base64_data FROM chat_arquivos WHERE id = $1',
+      [id]
+    );
+    if (dataRows.length === 0) return res.status(404).json({ erro: 'Arquivo não encontrado' });
+    const buffer = Buffer.from(dataRows[0].base64_data, 'base64');
     res.setHeader('Content-Type', arq.mime_type);
-    // Nome seguro no Content-Disposition (impede header injection via nome_original)
     const nomeSeguro = escapeContentDispositionFilename(arq.nome_original || 'arquivo');
     res.setHeader('Content-Disposition', `inline; filename="${nomeSeguro}"`);
     res.setHeader('Content-Length', arq.tamanho_bytes);
     res.send(buffer);
   } catch (e) {
     console.error('[CHAT ARQUIVO]', e);
-    res.status(500).json({ erro: e.message });
+    res.status(500).json({ erro: 'Erro ao buscar arquivo' });
   }
 });
 
@@ -3827,15 +3876,17 @@ app.post('/api/auth/login-recrutador', rateLimitLogin, async (req, res) => {
       return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
     }
     rateLimitClear(req);
-    const token = jwt.sign(
-      { id: r.id, email: r.email, nome: r.nome, tipo: 'recrutador', role: r.role },
-      process.env.JWT_SECRET,
-      { expiresIn: '30d' }
-    );
+    // FIX Etapa 2: access (30m) + refresh (7d, hash no DB)
+    const accessToken = criarAccessToken({
+      id: r.id, email: r.email, nome: r.nome, tipo: 'recrutador', role: r.role
+    });
+    const refresh = criarRefreshToken();
+    await persistirRefresh('recrutador', r.id, r.email, refresh, req);
     await audit(req, 'login.success', { resource_type: 'recrutador', resource_id: r.id, user_email: r.email });
     res.json({
       ok: true,
-      token,
+      token: accessToken,
+      refreshToken: refresh,
       usuario: { id: r.id, nome: r.nome, email: r.email, tipo: 'recrutador', role: r.role, primeiro_acesso: r.primeiro_acesso }
     });
   } catch (e) {
@@ -4126,15 +4177,18 @@ app.post('/api/auth/login-empresa', rateLimitLogin, async (req, res) => {
       return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
     }
     rateLimitClear(req);
-    const token = jwt.sign(
-      { id: u.id, email: u.email, nome: u.nome, tipo: 'empresa', empresa_id: u.empresa_id, empresa_nome: u.empresa_nome },
-      process.env.JWT_SECRET,
-      { expiresIn: '30d' }
-    );
+    // FIX Etapa 2: access (30m) + refresh (7d, hash no DB)
+    const accessToken = criarAccessToken({
+      id: u.id, email: u.email, nome: u.nome, tipo: 'empresa',
+      empresa_id: u.empresa_id, empresa_nome: u.empresa_nome
+    });
+    const refresh = criarRefreshToken();
+    await persistirRefresh('empresa', u.id, u.email, refresh, req);
     await audit(req, 'login.success', { resource_type: 'empresa', resource_id: u.id, user_email: u.email, metadata: { empresa_id: u.empresa_id } });
     res.json({
       ok: true,
-      token,
+      token: accessToken,
+      refreshToken: refresh,
       usuario: {
         id: u.id, nome: u.nome, email: u.email, tipo: 'empresa',
         cargo: u.cargo, empresa_id: u.empresa_id, empresa_nome: u.empresa_nome,
@@ -4890,7 +4944,7 @@ process.on('unhandledRejection', (e) => {
 
 (async () => {
   try {
-    await init();
+    aawait init();
     console.log('Banco inicializado com sucesso');
 
     // FIX C3 (2026-07-27): rota /api/_teste/email REMOVIDA.
@@ -5056,6 +5110,88 @@ process.on('unhandledRejection', (e) => {
       console.error('[BACKUP CREATE]', e);
       res.status(500).json({ erro: 'Erro ao criar backup', detalhes: e.message });
     }
+  });
+
+  // =========================================================================
+  // REFRESH TOKEN (Etapa 2, 2026-07-27)
+  // =========================================================================
+  // Recebe refresh token (opaco, não JWT) → valida no DB → gera novo access + novo refresh.
+  // Implementa ROTAÇÃO: cada uso emite novo refresh e revoga o antigo. Reutilização
+  // do refresh antigo = comprometido → revoga TODOS os tokens do usuário.
+  app.post('/api/auth/refresh', async (req, res) => {
+    try {
+      const { refreshToken } = req.body || {};
+      if (!refreshToken || typeof refreshToken !== 'string' || refreshToken.length < 32) {
+        return res.status(400).json({ erro: 'refreshToken inválido' });
+      }
+      const r = await consumirRefresh(refreshToken);
+      if (!r.valido) {
+        await audit(req, 'security.refresh_invalid', { metadata: { motivo: r.motivo } });
+        return res.status(401).json({ erro: 'Refresh token inválido' });
+      }
+      const t = r.token;
+      // Gera novo access (15m) + novo refresh (7d)
+      const novoAccess = criarAccessToken({
+        id: t.user_id || undefined,
+        email: t.user_email,
+        tipo: t.user_type
+      });
+      const novoRefresh = criarRefreshToken();
+      // Revoga o refresh usado e persiste o novo (ROTAÇÃO)
+      await revogarRefresh(refreshToken, 'rotacionado');
+      await persistirRefresh(t.user_type, t.user_id, t.user_email, novoRefresh, req);
+      await audit(req, 'security.refresh_rotated', { resource_type: t.user_type, user_email: t.user_email });
+      res.json({ ok: true, token: novoAccess, refreshToken: novoRefresh });
+    } catch (e) {
+      console.error('[AUTH REFRESH]', e);
+      res.status(500).json({ erro: 'Erro ao renovar sessão' });
+    }
+  });
+
+  // =========================================================================
+  // LOGOUT (revoga o refresh token)
+  // =========================================================================
+  app.post('/api/auth/logout', async (req, res) => {
+    try {
+      const { refreshToken } = req.body || {};
+      if (refreshToken && typeof refreshToken === 'string') {
+        await revogarRefresh(refreshToken, 'logout');
+      }
+      // access token é descartado pelo cliente — não tem como "revogar" JWT
+      // sem manter blacklist. Refresh revogado é suficiente pra impedir novo access.
+      res.json({ ok: true, message: 'Sessão encerrada' });
+    } catch (e) {
+      console.error('[AUTH LOGOUT]', e);
+      res.status(500).json({ erro: 'Erro ao encerrar sessão' });
+    }
+  });
+
+  // =========================================================================
+  // FIX Etapa 2 (2026-07-27): HANDLER GLOBAL 404 — JSON seguro, sem stack.
+  // =========================================================================
+  // Impede que Express retorne HTML "<pre>Cannot GET ...</pre>" em rotas inexistentes.
+  // Aplica para qualquer método (GET/POST/PUT/DELETE/OPTIONS) em qualquer rota não casada.
+  app.use((req, res, next) => {
+    res.status(404).json({
+      ok: false,
+      error: 'NOT_FOUND',
+      message: 'Rota não encontrada'
+    });
+  });
+
+  // =========================================================================
+  // FIX Etapa 2 (2026-07-27): HANDLER GLOBAL DE ERRO — sem vazar stack/Express/SQL.
+  // =========================================================================
+  // 4 args = Express reconhece como error handler. SEMPRE no final.
+  app.use((err, req, res, next) => {
+    // Log interno com detalhes
+    console.error('[UNHANDLED]', err && (err.stack || err.message || err));
+    // Resposta genérica pro cliente (sem detalhes de implementação)
+    res.status(err.status || 500).json({
+      ok: false,
+      error: 'INTERNAL_ERROR',
+      message: 'Ocorreu um erro interno. Tente novamente em instantes.'
+    });
   });
 
   const port = process.env.PORT || 10000;
