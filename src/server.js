@@ -1484,6 +1484,7 @@ app.post('/api/admin/2fa/verificar', rateLimitByIp('twofa'), async (req, res) =>
     }
     const result = await verify2faCode(codigo_id, codigo);
     if (!result.ok) {
+      ipRateRegister('twofa', req);  // FIX: registrar falha pra ativar bloqueio (max: 5)
       await audit(req, 'login.2fa_failed', { resource_type: 'admin', metadata: { motivo: result.motivo } });
       return res.status(401).json({ erro: result.motivo });
     }
