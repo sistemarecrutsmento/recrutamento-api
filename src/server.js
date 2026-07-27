@@ -499,13 +499,17 @@ if (DEBUG) {
         return res.json({ ok: true, removidos: 0, msg: 'Nenhum candidato com esse email' });
       }
       const candId = cand[0].id;
-      // Apaga dependências em ordem (documentos + mensagens -> candidaturas -> candidato)
+      // Apaga dependências em ordem (documentos + arquivos + mensagens -> candidaturas -> candidato)
       const docs = await pool.query(
         'DELETE FROM documentos_candidatura WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE candidato_id = $1) RETURNING id',
         [candId]
       );
+      const arquivos = await pool.query(
+        'DELETE FROM chat_arquivos WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE candidato_id = $1) RETURNING id',
+        [candId]
+      );
       const msgsC = await pool.query(
-        'DELETE FROM chat_mensagens WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE candidato_id = $1) RETURNING id',
+        'DELETE FROM mensagens_processo WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE candidato_id = $1) RETURNING id',
         [candId]
       );
       const cands = await pool.query('DELETE FROM candidaturas WHERE candidato_id = $1 RETURNING id', [candId]);
@@ -516,7 +520,8 @@ if (DEBUG) {
           candidato: removed.rowCount,
           candidaturas: cands.rowCount,
           documentos: docs.rowCount,
-          mensagens_chat: msgsC.rowCount
+          mensagens_chat: msgsC.rowCount,
+          arquivos_chat: arquivos.rowCount
         },
         msg: `Candidato squatter id=${candId} (${email}) removido com sucesso`
       });
@@ -2266,13 +2271,17 @@ app.post('/api/admin/candidato/:id/deletar', authAdmin, async (req, res) => {
     );
     if (cand.length === 0) return res.status(404).json({ erro: 'Candidato não encontrado' });
 
-    // Cascade manual: documentos -> mensagens -> candidaturas -> candidato
+    // Cascade manual: documentos -> arquivos de chat -> mensagens -> candidaturas -> candidato
     const docs = await pool.query(
       'DELETE FROM documentos_candidatura WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE candidato_id = $1) RETURNING id',
       [candId]
     );
+    const arquivos = await pool.query(
+      'DELETE FROM chat_arquivos WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE candidato_id = $1) RETURNING id',
+      [candId]
+    );
     const msgsC = await pool.query(
-      'DELETE FROM chat_mensagens WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE candidato_id = $1) RETURNING id',
+      'DELETE FROM mensagens_processo WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE candidato_id = $1) RETURNING id',
       [candId]
     );
     const cands = await pool.query('DELETE FROM candidaturas WHERE candidato_id = $1 RETURNING id', [candId]);
@@ -2288,7 +2297,8 @@ app.post('/api/admin/candidato/:id/deletar', authAdmin, async (req, res) => {
         candidato: removed.rowCount,
         candidaturas: cands.rowCount,
         documentos: docs.rowCount,
-        mensagens_chat: msgsC.rowCount
+        mensagens_chat: msgsC.rowCount,
+        arquivos_chat: arquivos.rowCount
       },
       msg: `Candidato ${cand[0].nome} (${cand[0].email}) removido com sucesso`
     });
