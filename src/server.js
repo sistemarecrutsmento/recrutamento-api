@@ -3739,10 +3739,12 @@ app.get('/api/empresa/dashboard', authEmpresa, async (req, res) => {
          JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id
          WHERE eva.empresa_id = $1 AND c.criada_em > $3)::int as processos_novos_14d,
         (SELECT COUNT(*) FROM entrevistas e
-         JOIN empresa_vaga_acesso eva ON eva.vaga_id = e.vaga_id
+         JOIN candidaturas cand ON cand.id = e.candidatura_id
+         JOIN empresa_vaga_acesso eva ON eva.vaga_id = cand.vaga_id
          WHERE eva.empresa_id = $1 AND e.data_hora >= NOW() AND e.status = 'agendada')::int as entrevistas_agendadas,
         (SELECT COUNT(*) FROM entrevistas e
-         JOIN empresa_vaga_acesso eva ON eva.vaga_id = e.vaga_id
+         JOIN candidaturas cand ON cand.id = e.candidatura_id
+         JOIN empresa_vaga_acesso eva ON eva.vaga_id = cand.vaga_id
          WHERE eva.empresa_id = $1 AND e.data_hora >= NOW() AND e.data_hora < NOW() + INTERVAL '7 days' AND e.status = 'agendada')::int as entrevistas_proximos_7d,
         (SELECT COUNT(*) FROM candidaturas c
          JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id
@@ -3819,10 +3821,10 @@ app.get('/api/empresa/dashboard', authEmpresa, async (req, res) => {
         cd.nome as candidato_nome, cd.email as candidato_email,
         v.titulo as vaga_titulo
       FROM entrevistas e
-      JOIN empresa_vaga_acesso eva ON eva.vaga_id = e.vaga_id
       JOIN candidaturas c ON c.id = e.candidatura_id
+      JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id
       JOIN candidatos cd ON cd.id = c.candidato_id
-      JOIN vagas v ON v.id = e.vaga_id
+      JOIN vagas v ON v.id = c.vaga_id
       WHERE eva.empresa_id = $1 AND e.data_hora >= NOW() AND e.status = 'agendada'
       ORDER BY e.data_hora ASC
       LIMIT 10
