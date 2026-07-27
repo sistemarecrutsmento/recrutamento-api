@@ -15,6 +15,7 @@ const meet = require('./meet');
 const ADMIN_NOTIF_EMAIL = process.env.ADMIN_NOTIF_EMAIL || process.env.ADMIN_EMAIL || 'fabio08dejesusjunior@gmail.com';
 const { authMiddleware, authCandidato, authAdmin, authEmpresa, authAdminOnly, authCandidatoOrEmpresaOrAdmin, JWT_VERIFY_OPTIONS } = require('./auth');
 const { sanitizeText, sanitizeFilename, escapeContentDispositionFilename } = require('./sanitize');
+const { create2faCode, verify2faCode, resend2faCode } = require('./twoFactor');
 
 // Cloudinary: aceita CLOUDINARY_URL no formato cloudinary://key:secret@cloud_name
 if (process.env.CLOUDINARY_URL) cloudinary.config({ url: process.env.CLOUDINARY_URL, secure: true });
@@ -186,6 +187,13 @@ setInterval(() => {
     }
   }
 }, 60 * 1000).unref();
+
+// =========================================================================
+// 2FA RATE LIMIT (proteção contra brute force em códigos 2FA)
+// =========================================================================
+// Limite de reenvio: 1 requisição a cada 30s por codigo_id
+// (a lógica de limite está no módulo twoFactor.js)
+// Tentativas de validação: máximo 5 por código (no módulo)
 
 // =========================================================================
 // AUTH DEBUG (proteção adicional pras rotas de debug em prod)
@@ -1265,7 +1273,7 @@ app.get('/api/auth/validar-token', rateLimitByIp('esqueci'), validarToken);
 // ============= ADMIN/RECRUTADOR =============
 app.post('/api/admin/login', rateLimitLogin, async (req, res) => {
   try {
-    console.log('[LOGIN] body recebido:', JSON.stringify(req.body));
+    console.log('[LOGIN] body recebido');
     const { email, senha } = req.body;
     if (!email || !senha) {
       console.log('[LOGIN] campos faltando');
@@ -1291,22 +1299,186 @@ app.post('/api/admin/login', rateLimitLogin, async (req, res) => {
       rateLimitRegisterFail(req);
       return res.status(401).json({ erro: 'Credenciais inválidas' });
     }
-    console.log('[LOGIN] hash começa com:', rows[0].senha_hash?.substring(0, 7));
     const ok = await bcrypt.compare(senha, rows[0].senha_hash);
-    console.log('[LOGIN] compare result:', ok);
     if (!ok) {
       rateLimitRegisterFail(req);
       return res.status(401).json({ erro: 'Credenciais inválidas' });
     }
     rateLimitClear(req);
 
-    const token = jwt.sign(
-      { id: rows[0].id, email: rows[0].email, nome: rows[0].nome, tipo: 'admin' },
-      process.env.JWT_SECRET, { expiresIn: '7d' }
-    );
-    res.json({ ok: true, token, usuario: { id: rows[0].id, nome: rows[0].nome, email: rows[0].email, role: rows[0].role || 'admin' } });
+    // Senha OK → dispara 2FA
+    const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || '';
+    const { codigo_id, code } = await create2faCode(rows[0].id, 'admin', ip);
+
+    // Envia código por e-mail (NUNCA logar o código)
+    const nome = rows[0].nome;
+    try {
+      const { enviarEmail } = require('./email');
+      await enviarEmail({
+        to: rows[0].email,
+        subject: 'Seu código de acesso - Vagas.io',
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px; background: #fafafa; border-radius: 12px;">
+            <div style="background: #7a1f3d; color: #fff; padding: 22px 20px; border-radius: 8px; text-align: center;">
+              <h2 style="margin:0;font-size:20px">Vagas.io</h2>
+            </div>
+            <div style="background: #fff; padding: 28px 24px; border-radius: 8px; margin-top: 16px;">
+              <p style="color: #2b2b2b; font-size: 15px; line-height: 1.5;">Olá, <strong>${nome}</strong>!</p>
+              <p style="color: #2b2b2b; font-size: 15px; line-height: 1.5;">Seu código de verificação é:</p>
+              <div style="text-align:center;margin:24px 0;padding:16px;background:#f5f5f5;border-radius:8px;font-size:36px;font-weight:700;letter-spacing:8px;color:#7a1f3d;font-family:monospace">${code}</div>
+              <p style="color: #6b6b6b; font-size: 13px; line-height: 1.5;">Este código expira em <strong>10 minutos</strong>.</p>
+              <p style="color: #6b6b6b; font-size: 13px; line-height: 1.5;">Se você não fez esta solicitação, ignore este e-mail.</p>
+            </div>
+            <div style="text-align:center;padding:14px 8px 0;color:#999;font-size:11px">
+              Equipe Vagas.io
+            </div>
+          </div>
+        `,
+        text: `Olá, ${nome}!\n\nSeu código de verificação é: ${code}\n\nEste código expira em 10 minutos.\n\nSe você não fez esta solicitação, ignore este e-mail.\n\nEquipe Vagas.io`
+      });
+    } catch (emailErr) {
+      console.error('[LOGIN] Erro ao enviar e-mail 2FA:', emailErr.message);
+      // Não bloqueia o login — o código foi gerado, o admin pode tentar reenviar
+    }
+
+    res.json({ ok: true, requer_2fa: true, codigo_id, email: rows[0].email });
   } catch (e) {
     console.error('[LOGIN ERRO]', e);
+    res.status(500).json({ erro: 'Erro interno' });
+  }
+});
+
+// ============= 2FA: VERIFICAR CÓDIGO =============
+app.post('/api/admin/2fa/verificar', async (req, res) => {
+  try {
+    const { codigo_id, codigo } = req.body;
+    if (!codigo_id || !codigo) {
+      return res.status(400).json({ erro: 'codigo_id e codigo são obrigatórios' });
+    }
+
+    const result = await verify2faCode(codigo_id, codigo);
+
+    if (!result.valido) {
+      return res.status(401).json({ erro: result.motivo });
+    }
+
+    // Código válido → busca dados do admin/recrutador para emitir JWT
+    let usuario;
+    if (result.admin_tipo === 'admin') {
+      const { rows } = await pool.query(
+        'SELECT id, nome, email, role FROM admins WHERE id = $1',
+        [result.admin_id]
+      );
+      if (rows.length === 0) return res.status(401).json({ erro: 'Usuário não encontrado' });
+      usuario = { ...rows[0], tipo: 'admin' };
+    } else {
+      const { rows } = await pool.query(
+        'SELECT id, nome, email, role, ativo, primeiro_acesso FROM recrutadores WHERE id = $1',
+        [result.admin_id]
+      );
+      if (rows.length === 0) return res.status(401).json({ erro: 'Usuário não encontrado' });
+      if (!rows[0].ativo) return res.status(403).json({ erro: 'Conta desativada. Fale com o admin.' });
+      usuario = { ...rows[0], tipo: 'recrutador' };
+    }
+
+    const token = jwt.sign(
+      { id: usuario.id, email: usuario.email, nome: usuario.nome, tipo: usuario.tipo, role: usuario.role },
+      process.env.JWT_SECRET,
+      { expiresIn: '7d' }
+    );
+
+    const resposta = {
+      ok: true,
+      token,
+      usuario: {
+        id: usuario.id,
+        nome: usuario.nome,
+        email: usuario.email,
+        tipo: usuario.tipo,
+        role: usuario.role
+      }
+    };
+
+    // Se for recrutador, repassa primeiro_acesso
+    if (usuario.primeiro_acesso !== undefined) {
+      resposta.usuario.primeiro_acesso = usuario.primeiro_acesso;
+    }
+
+    res.json(resposta);
+  } catch (e) {
+    console.error('[2FA VERIFICAR ERRO]', e);
+    res.status(500).json({ erro: 'Erro interno' });
+  }
+});
+
+// ============= 2FA: REENVIAR CÓDIGO =============
+app.post('/api/admin/2fa/reenviar', async (req, res) => {
+  try {
+    const { codigo_id } = req.body;
+    if (!codigo_id) {
+      return res.status(400).json({ erro: 'codigo_id é obrigatório' });
+    }
+
+    const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || '';
+    const result = await resend2faCode(codigo_id, ip);
+
+    if (!result.ok) {
+      const status = result.cooldown ? 429 : 400;
+      return res.status(status).json({ erro: result.motivo });
+    }
+
+    // Busca dados do admin/recrutador pelo novo código gerado
+    const { rows: codeRows } = await pool.query(
+      'SELECT admin_id, admin_tipo FROM admin_2fa_codes WHERE codigo_id = $1',
+      [result.codigo_id]
+    );
+
+    let nome = 'Usuário', email = '';
+    if (codeRows.length > 0) {
+      const { admin_id, admin_tipo } = codeRows[0];
+      if (admin_tipo === 'admin') {
+        const { rows } = await pool.query('SELECT nome, email FROM admins WHERE id = $1', [admin_id]);
+        if (rows.length > 0) { nome = rows[0].nome; email = rows[0].email; }
+      } else {
+        const { rows } = await pool.query('SELECT nome, email FROM recrutadores WHERE id = $1', [admin_id]);
+        if (rows.length > 0) { nome = rows[0].nome; email = rows[0].email; }
+      }
+    }
+
+    // Envia e-mail com o novo código
+    if (email) {
+      try {
+        const { enviarEmail } = require('./email');
+        await enviarEmail({
+          to: email,
+          subject: 'Seu código de acesso - Vagas.io',
+          html: `
+            <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px; background: #fafafa; border-radius: 12px;">
+              <div style="background: #7a1f3d; color: #fff; padding: 22px 20px; border-radius: 8px; text-align: center;">
+                <h2 style="margin:0;font-size:20px">Vagas.io</h2>
+              </div>
+              <div style="background: #fff; padding: 28px 24px; border-radius: 8px; margin-top: 16px;">
+                <p style="color: #2b2b2b; font-size: 15px; line-height: 1.5;">Olá, <strong>${nome}</strong>!</p>
+                <p style="color: #2b2b2b; font-size: 15px; line-height: 1.5;">Seu novo código de verificação é:</p>
+                <div style="text-align:center;margin:24px 0;padding:16px;background:#f5f5f5;border-radius:8px;font-size:36px;font-weight:700;letter-spacing:8px;color:#7a1f3d;font-family:monospace">${result.code}</div>
+                <p style="color: #6b6b6b; font-size: 13px; line-height: 1.5;">Este código expira em <strong>10 minutos</strong>.</p>
+                <p style="color: #6b6b6b; font-size: 13px; line-height: 1.5;">Se você não fez esta solicitação, ignore este e-mail.</p>
+              </div>
+              <div style="text-align:center;padding:14px 8px 0;color:#999;font-size:11px">
+                Equipe Vagas.io
+              </div>
+            </div>
+          `,
+          text: `Olá, ${nome}!\n\nSeu novo código de verificação é: ${result.code}\n\nEste código expira em 10 minutos.\n\nSe você não fez esta solicitação, ignore este e-mail.\n\nEquipe Vagas.io`
+        });
+      } catch (emailErr) {
+        console.error('[2FA REENVIAR] Erro ao enviar e-mail:', emailErr.message);
+      }
+    }
+
+    res.json({ ok: true, codigo_id: result.codigo_id });
+  } catch (e) {
+    console.error('[2FA REENVIAR ERRO]', e);
     res.status(500).json({ erro: 'Erro interno' });
   }
 });
@@ -3620,7 +3792,6 @@ app.post('/api/auth/login-recrutador', rateLimitLogin, async (req, res) => {
   const { email, senha } = req.body;
   if (!email || !senha) return res.status(400).json({ erro: 'E-mail e senha obrigatórios' });
   try {
-    // 🔍 Debug: loga a query exata pra investigar erro 500
     console.log('[login-recrutador] tentando:', email);
     const result = await pool.query(
       'SELECT id, nome, email, senha_hash, ativo, role, primeiro_acesso FROM recrutadores WHERE email = $1',
@@ -3643,16 +3814,42 @@ app.post('/api/auth/login-recrutador', rateLimitLogin, async (req, res) => {
       return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
     }
     rateLimitClear(req);
-    const token = jwt.sign(
-      { id: r.id, email: r.email, nome: r.nome, tipo: 'recrutador', role: r.role },
-      process.env.JWT_SECRET,
-      { expiresIn: '30d' }
-    );
-    res.json({
-      ok: true,
-      token,
-      usuario: { id: r.id, nome: r.nome, email: r.email, tipo: 'recrutador', role: r.role, primeiro_acesso: r.primeiro_acesso }
-    });
+
+    // Senha OK → dispara 2FA
+    const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || '';
+    const { codigo_id, code } = await create2faCode(r.id, 'recrutador', ip);
+
+    // Envia código por e-mail (NUNCA logar o código)
+    const nome = r.nome;
+    try {
+      const { enviarEmail } = require('./email');
+      await enviarEmail({
+        to: r.email,
+        subject: 'Seu código de acesso - Vagas.io',
+        html: `
+          <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px; background: #fafafa; border-radius: 12px;">
+            <div style="background: #7a1f3d; color: #fff; padding: 22px 20px; border-radius: 8px; text-align: center;">
+              <h2 style="margin:0;font-size:20px">Vagas.io</h2>
+            </div>
+            <div style="background: #fff; padding: 28px 24px; border-radius: 8px; margin-top: 16px;">
+              <p style="color: #2b2b2b; font-size: 15px; line-height: 1.5;">Olá, <strong>${nome}</strong>!</p>
+              <p style="color: #2b2b2b; font-size: 15px; line-height: 1.5;">Seu código de verificação é:</p>
+              <div style="text-align:center;margin:24px 0;padding:16px;background:#f5f5f5;border-radius:8px;font-size:36px;font-weight:700;letter-spacing:8px;color:#7a1f3d;font-family:monospace">${code}</div>
+              <p style="color: #6b6b6b; font-size: 13px; line-height: 1.5;">Este código expira em <strong>10 minutos</strong>.</p>
+              <p style="color: #6b6b6b; font-size: 13px; line-height: 1.5;">Se você não fez esta solicitação, ignore este e-mail.</p>
+            </div>
+            <div style="text-align:center;padding:14px 8px 0;color:#999;font-size:11px">
+              Equipe Vagas.io
+            </div>
+          </div>
+        `,
+        text: `Olá, ${nome}!\n\nSeu código de verificação é: ${code}\n\nEste código expira em 10 minutos.\n\nSe você não fez esta solicitação, ignore este e-mail.\n\nEquipe Vagas.io`
+      });
+    } catch (emailErr) {
+      console.error('[login-recrutador] Erro ao enviar e-mail 2FA:', emailErr.message);
+    }
+
+    res.json({ ok: true, requer_2fa: true, codigo_id, email: r.email });
   } catch (e) {
     console.error('[login recrutador]', e);
     res.status(500).json({ erro: 'Erro ao fazer login' });
