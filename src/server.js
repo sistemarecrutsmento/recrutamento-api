@@ -5819,7 +5819,7 @@ process.on('unhandledRejection', (e) => {
     res.json({ rotas: list.length, amostra: list.slice(0,200) });
   });
 
-  app.listen(port, () => console.log(`API rodando na porta ${port}`));
+  app.listen(port, () => console.log('BUILD-SIG-DA0C94580C-FASE2 port ' + port));
   } catch (e) {
     console.error('Erro ao iniciar:', e);
     process.exit(1);
