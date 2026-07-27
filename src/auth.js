@@ -101,6 +101,78 @@ function authCandidatoOrAdminStrict(req, res, next) {
   });
 }
 
+// =============================================================
+// RBAC — FASE 2 (28/07/2026)
+// Roles de usuarios de empresa:
+//   - admin_empresa: tudo (gerencia usuarios + recursos da empresa)
+//   - recrutador:    leitura + operacao (vagas, candidatos, chat)
+//   - viewer:        apenas leitura
+// =============================================================
+
+const EMPRESA_ROLES = Object.freeze({
+  ADMIN: 'admin_empresa',
+  RECRUTADOR: 'recrutador',
+  VIEWER: 'viewer'
+});
+
+function isEmpresaRole(role) {
+  return role === EMPRESA_ROLES.ADMIN
+      || role === EMPRESA_ROLES.RECRUTADOR
+      || role === EMPRESA_ROLES.VIEWER;
+}
+
+// Apenas admin_empresa pode chamar (gerenciar usuarios, configs).
+// Exige: token tipo=empresa + role=admin_empresa + empresa_id no JWT.
+function requireAdminEmpresa(req, res, next) {
+  return authMiddleware(req, res, () => {
+    if (req.user.tipo !== 'empresa') {
+      return res.status(403).json({ erro: 'Acesso apenas para usuarios de empresa' });
+    }
+    if (req.user.role !== EMPRESA_ROLES.ADMIN) {
+      return res.status(403).json({ erro: 'Operacao restrita a admin_empresa' });
+    }
+    if (!req.user.empresa_id || typeof req.user.empresa_id !== 'number') {
+      return res.status(401).json({ erro: 'Token invalido: empresa_id ausente' });
+    }
+    next();
+  });
+}
+
+// admin_empresa OU recrutador: leituras ja passam (podem tudo operacional)
+// Usado em POST/PUT/PATCH de vagas, candidatos, chat etc.
+function requireRecrutadorOuAdmin(req, res, next) {
+  return authMiddleware(req, res, () => {
+    if (req.user.tipo !== 'empresa') {
+      return res.status(403).json({ erro: 'Acesso apenas para usuarios de empresa' });
+    }
+    if (req.user.role !== EMPRESA_ROLES.ADMIN
+        && req.user.role !== EMPRESA_ROLES.RECRUTADOR) {
+      return res.status(403).json({ erro: 'Operacao restrita a admin_empresa ou recrutador' });
+    }
+    if (!req.user.empresa_id || typeof req.user.empresa_id !== 'number') {
+      return res.status(401).json({ erro: 'Token invalido: empresa_id ausente' });
+    }
+    next();
+  });
+}
+
+// Viewer ou superior: usado em GETs. authEmpresa passa por todos os 3 roles
+// mas exige tipo=empresa. Viewers podem ler tudo da propria empresa.
+function requireEmpresaViewer(req, res, next) {
+  return authMiddleware(req, res, () => {
+    if (req.user.tipo !== 'empresa') {
+      return res.status(403).json({ erro: 'Acesso apenas para usuarios de empresa' });
+    }
+    if (!isEmpresaRole(req.user.role)) {
+      return res.status(403).json({ erro: 'Role invalida para esta operacao' });
+    }
+    if (!req.user.empresa_id || typeof req.user.empresa_id !== 'number') {
+      return res.status(401).json({ erro: 'Token invalido: empresa_id ausente' });
+    }
+    next();
+  });
+}
+
 module.exports = {
   authMiddleware,
   authCandidato,
@@ -109,5 +181,9 @@ module.exports = {
   authAdminOnly,
   authCandidatoOrEmpresaOrAdmin,
   authCandidatoOrAdminStrict,
+  requireAdminEmpresa,
+  requireRecrutadorOuAdmin,
+  requireEmpresaViewer,
+  EMPRESA_ROLES,
   JWT_VERIFY_OPTIONS
 };
