@@ -1164,6 +1164,7 @@ app.get('/api/vagas', async (req, res) => {
   const { cidade, area, tipo, nivel, busca } = req.query;
   // Whitelist explícita (não usa SELECT *) — evita leak de colunas internas
   // Filtra por status='publicada' (a coluna "publicada" não existe — é status)
+  // Limite duro pra evitar DoS / queries pesadas
   let sql = `SELECT id, titulo, empresa, descricao, requisitos, beneficios, salario_min, salario_max,
                     tipo_contrato, nivel, area, cidade, estado, modelo, publicada_em, etapas
              FROM vagas WHERE status = 'publicada'`;
@@ -1173,9 +1174,14 @@ app.get('/api/vagas', async (req, res) => {
   if (tipo) { params.push(`%${tipo}%`); sql += ` AND tipo_contrato ILIKE $${params.length}`; }
   if (nivel) { params.push(`%${nivel}%`); sql += ` AND nivel ILIKE $${params.length}`; }
   if (busca) { params.push(`%${busca}%`); sql += ` AND (titulo ILIKE $${params.length} OR empresa ILIKE $${params.length})`; }
-  sql += ' ORDER BY COALESCE(publicada_em, criada_em) DESC NULLS LAST, id DESC';
-  const { rows } = await pool.query(sql, params);
-  res.json({ vagas: rows });
+  sql += ' ORDER BY id DESC LIMIT 100';
+  try {
+    const { rows } = await pool.query(sql, params);
+    res.json({ vagas: rows });
+  } catch (e) {
+    console.error('[vagas lista]', e.message);
+    res.status(500).json({ erro: 'Erro ao listar vagas' });
+  }
 });
 
 app.get('/api/vagas/:id', async (req, res) => {
@@ -1185,15 +1191,20 @@ app.get('/api/vagas/:id', async (req, res) => {
   if (!Number.isInteger(id) || id <= 0) {
     return res.status(400).json({ erro: 'ID de vaga inválido' });
   }
-  const { rows } = await pool.query(
-    `SELECT id, titulo, empresa, descricao, requisitos, beneficios, salario_min, salario_max,
-            tipo_contrato, nivel, area, cidade, estado, modelo, publicada_em, etapas,
-            CASE WHEN status = 'publicada' THEN 'publicada' ELSE NULL END as status
-     FROM vagas WHERE id = $1 AND status = 'publicada'`,
-    [id]
-  );
-  if (rows.length === 0) return res.status(404).json({ erro: 'Vaga não encontrada' });
-  res.json({ vaga: rows[0] });
+  try {
+    const { rows } = await pool.query(
+      `SELECT id, titulo, empresa, descricao, requisitos, beneficios, salario_min, salario_max,
+              tipo_contrato, nivel, area, cidade, estado, modelo, publicada_em, etapas,
+              CASE WHEN status = 'publicada' THEN 'publicada' ELSE NULL END as status
+       FROM vagas WHERE id = $1 AND status = 'publicada'`,
+      [id]
+    );
+    if (rows.length === 0) return res.status(404).json({ erro: 'Vaga não encontrada' });
+    res.json({ vaga: rows[0] });
+  } catch (e) {
+    console.error('[vagas id]', e.message);
+    res.status(500).json({ erro: 'Erro ao buscar vaga' });
+  }
 });
 
 // ============= RECUPERAÇÃO DE SENHA =============
