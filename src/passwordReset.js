@@ -2,6 +2,7 @@ const crypto = require('crypto');
 const bcrypt = require('bcryptjs');
 const { pool } = require('./db');
 const { enviarEmailBg } = require('./email');
+const { audit } = require('./audit');
 
 // Tempo de expiração do token (1 hora)
 const TOKEN_EXPIRY_HOURS = 1;
@@ -80,6 +81,7 @@ async function esqueciSenha(req, res) {
     const usuario = await buscarUsuarioPorEmail(email);
     if (!usuario) {
       console.log(`[esqueci-senha] e-mail não encontrado: ${email}`);
+      await audit(req, 'password.reset_requested', { result: 'failure', metadata: { email, motivo: 'email_nao_encontrado' } });
       return res.json(respostaOk);
     }
 
@@ -111,6 +113,7 @@ async function esqueciSenha(req, res) {
     });
 
     console.log(`[esqueci-senha] token gerado pra ${email} (id=${usuario.id}, tipo=${usuario.tipo})`);
+    await audit(req, 'password.reset_requested', { result: 'success', metadata: { email, user_tipo: usuario.tipo } });
     return res.json(respostaOk);
   } catch (err) {
     console.error('[esqueci-senha] erro:', err);
@@ -126,6 +129,7 @@ async function redefinirSenha(req, res) {
     return res.status(400).json({ erro: 'Token e nova senha são obrigatórios' });
   }
   if (novaSenha.length < 6) {
+    await audit(req, 'password.changed', { result: 'failure', metadata: { motivo: 'senha_curta' } });
     return res.status(400).json({ erro: 'Senha deve ter no mínimo 6 caracteres' });
   }
 
@@ -136,6 +140,7 @@ async function redefinirSenha(req, res) {
       [tokenH]
     );
     if (r.rows.length === 0) {
+      await audit(req, 'password.changed', { result: 'failure', metadata: { motivo: 'token_invalido_expirado' } });
       return res.status(400).json({ erro: 'Token inválido ou expirado' });
     }
     const reset = r.rows[0];
@@ -149,6 +154,7 @@ async function redefinirSenha(req, res) {
     };
     const tabela = tipoParaTabela[reset.user_tipo];
     if (!tabela) {
+      await audit(req, 'password.changed', { result: 'failure', metadata: { motivo: 'tipo_invalido', user_tipo: reset.user_tipo } });
       return res.status(500).json({ erro: 'Tipo de usuário inválido' });
     }
 
@@ -166,6 +172,7 @@ async function redefinirSenha(req, res) {
     );
 
     console.log(`[redefinir-senha] senha atualizada: user_id=${reset.user_id}, tipo=${reset.user_tipo}`);
+    await audit(req, 'password.changed', { result: 'success', metadata: { user_tipo: reset.user_tipo } });
     return res.json({ ok: true, mensagem: 'Senha redefinida com sucesso' });
   } catch (err) {
     console.error('[redefinir-senha] erro:', err);
