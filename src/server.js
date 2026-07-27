@@ -8,6 +8,28 @@ const axios = require('axios');
 const cloudinary = require('cloudinary').v2;
 require('dotenv').config();
 
+// =========================================================================
+// VALIDAÇÃO DE ENV VARS (J5 — antes de produção)
+// =========================================================================
+// Se uma env var crítica está faltando, o servidor NÃO deve subir
+// (em vez de aceitar fallback perigoso).
+const REQUIRED_ENV = ['JWT_SECRET', 'DATABASE_URL'];
+const missingEnv = REQUIRED_ENV.filter(k => !process.env[k]);
+if (missingEnv.length > 0) {
+  console.error('[FATAL] Env vars obrigatórias faltando:', missingEnv.join(', '));
+  console.error('[FATAL] Servidor NÃO iniciado.');
+  // Em produção, sai com erro. Em dev, apenas avisa.
+  if (process.env.NODE_ENV === 'production') {
+    process.exit(1);
+  }
+}
+if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'sua_chave_secreta_aqui' || process.env.JWT_SECRET.length < 32) {
+  console.error('[FATAL] JWT_SECRET é fraco ou está faltando. Mínimo 32 caracteres.');
+  if (process.env.NODE_ENV === 'production') {
+    process.exit(1);
+  }
+}
+
 const { pool, init } = require('./db');
 const { enviarCodigo, enviarNotificacaoStatus, enviarEmailProposta, enviarEmailBg, enviarEmailAtualizacao, enviarEmail, enviarEmailInscricao, getResendKey } = require('./email');
 const meet = require('./meet');
@@ -93,6 +115,9 @@ app.use(express.json({ limit: '100mb' }));
 // =========================================================================
 // HEADERS DE SEGURANÇA (defesa contra clickjacking, MIME sniffing, XSS)
 // =========================================================================
+// FIX J4 (2026-07-27): Headers consolidados em middleware único.
+// TODO Etapa 3: instalar `helmet` quando o Fabio estiver pronto.
+// npm install helmet (no diretório recrutamento-api)
 app.use((req, res, next) => {
   // Esconde o stack (Express). Não revela o backend. (FIX Etapa 2: redundância removida
   // — app.disable('x-powered-by') já cuida disso em TODAS as respostas, inclusive OPTIONS.)
