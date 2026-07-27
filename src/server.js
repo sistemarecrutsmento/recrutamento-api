@@ -13,8 +13,24 @@ const meet = require('./meet');
 
 // Email do admin pra receber notificações de ação do candidato
 const ADMIN_NOTIF_EMAIL = process.env.ADMIN_NOTIF_EMAIL || process.env.ADMIN_EMAIL || 'fabio08dejesusjunior@gmail.com';
-const { authMiddleware, authCandidato, authAdmin, authEmpresa, authAdminOnly, authCandidatoOrEmpresaOrAdmin, JWT_VERIFY_OPTIONS } = require('./auth');
+const { authMiddleware, authCandidato, authAdmin, authEmpresa, authAdminOnly, authCandidatoOrEmpresaOrAdmin, authCandidatoOrAdminStrict, JWT_VERIFY_OPTIONS } = require('./auth');
 const { sanitizeText, sanitizeFilename, escapeContentDispositionFilename } = require('./sanitize');
+
+// =========================================================================
+// WHITELISTS DE COLUNAS (defesa contra vazamento de dados sensíveis)
+// =========================================================================
+// Regra de ouro: nunca usar SELECT * ou RETURNING * em entidades sensíveis.
+// Se um dia for adicionada uma coluna nova (ex: token, cartao_numero),
+// ela NÃO vazará por default — só se adicionada explicitamente aqui.
+// Auditoria 2026-07-27: corrigido vazamento de senha_hash no candidato.
+
+const CANDIDATO_COLUNAS_PUBLICAS = `
+  id, cpf, nome, data_nascimento, sexo, celular, email, email_verificado,
+  acessibilidade, cep, estado, cidade, bairro, logradouro, numero, complemento,
+  formacao, instituicao, curso, situacao, data_conclusao,
+  primeiro_emprego, banco_talentos, recebe_comunicacoes, criado_em,
+  sobre_voce, experiencia, areas_interesse, foto_url
+`.replace(/\s+/g, ' ').trim();
 const { audit } = require('./audit');
 const { create2faCode, verify2faCode, resend2faCode } = require('./twoFactor');
 const { getBackupMetadata } = require('./backup');
@@ -750,7 +766,13 @@ app.post('/api/candidato/cadastrar', authCandidato, async (req, res) => {
   const d = req.body;
   if (!d.nome) return res.status(400).json({ erro: 'Nome obrigatório' });
 
-  const email = (d.email || req.user.email).toLowerCase();
+  // FIX C5 (2026-07-27): o email SEMPRE vem do token validado.
+  // O frontend NUNCA pode dizer qual email atualizar (proteção contra IDOR/escrita).
+  // Se vier `email` no body, IGNORA — não é fonte de identidade.
+  const email = req.user.email.toLowerCase();
+  if (d.email !== undefined) {
+    await audit(req, 'security.email_in_body_ignored', { metadata: { rota: '/api/candidato/cadastrar' } });
+  }
   const areasInteresse = Array.isArray(d.areas_interesse) ? d.areas_interesse.slice(0, 5) : [];
 
   try {
@@ -855,9 +877,18 @@ app.post('/api/candidato/cadastrar', authCandidato, async (req, res) => {
 });
 
 app.get('/api/candidato/perfil', authCandidato, async (req, res) => {
-  const { rows: c } = await pool.query('SELECT * FROM candidatos WHERE email = $1', [req.user.email]);
+  // FIX C1 (2026-07-27): whitelist explícita — nunca expor senha_hash.
+  // SELECT * traria inclusive qualquer coluna interna nova sem o dev perceber.
+  const { rows: c } = await pool.query(
+    `SELECT ${CANDIDATO_COLUNAS_PUBLICAS} FROM candidatos WHERE email = $1`,
+    [req.user.email]
+  );
   if (c.length === 0) return res.json({ candidato: null });
-  const { rows: ex } = await pool.query('SELECT * FROM experiencias WHERE candidato_id = $1 ORDER BY id DESC', [c[0].id]);
+  const { rows: ex } = await pool.query(
+    `SELECT id, candidato_id, cargo, empresa, inicio, fim, emprego_atual, descricao
+     FROM experiencias WHERE candidato_id = $1 ORDER BY inicio DESC NULLS LAST, id DESC`,
+    [c[0].id]
+  );
   res.json({ candidato: c[0], experiencias: ex });
 });
 
@@ -904,7 +935,7 @@ app.put('/api/candidato/perfil', authCandidato, async (req, res) => {
         experiencia = COALESCE($20, experiencia),
         primeiro_emprego = COALESCE($21, primeiro_emprego),
         areas_interesse = COALESCE($22, areas_interesse)
-       WHERE email = $23 RETURNING *`,
+       WHERE email = $23 RETURNING ${CANDIDATO_COLUNAS_PUBLICAS}`,
       [
         d.nome, d.cpf, d.data_nascimento, d.sexo, d.celular,
         d.cep, d.estado, d.cidade, d.bairro, d.logradouro, d.numero, d.complemento,
@@ -3128,21 +3159,12 @@ app.post('/api/admin/candidatura/:id/status', authAdmin, async (req, res) => {
   res.json({ ok: true });
 });
 
-// ===== CHAT CANDIDATO ↔ ADMIN (jul/2026) =====
-function authCandidatoOrAdmin(req, res, next) {
-  const token = (req.headers.authorization || '').replace('Bearer ', '');
-  if (!token) return res.status(401).json({ erro: 'Não autenticado' });
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-    req.user = decoded;
-    return next();
-  } catch (e) {
-    return res.status(401).json({ erro: 'Token inválido' });
-  }
-}
+// FIX C4 (2026-07-27): removida função local frouxa.
+// Agora usa authCandidatoOrAdminStrict do auth.js (HS256 validado, tipo checado).
+// Empresa NUNCA acessa chat de candidato.
 
 // Lista mensagens de uma candidatura (candidato ou admin autenticado)
-app.get('/api/chat/:candidatura_id/mensagens', authCandidatoOrAdmin, async (req, res) => {
+app.get('/api/chat/:candidatura_id/mensagens', authCandidatoOrAdminStrict, async (req, res) => {
   try {
     const cid = parseInt(req.params.candidatura_id);
     const { rows: cand } = await pool.query(`
@@ -3188,7 +3210,7 @@ app.get('/api/chat/:candidatura_id/mensagens', authCandidatoOrAdmin, async (req,
 });
 
 // Envia mensagem (candidato ou admin)
-app.post('/api/chat/:candidatura_id/mensagens', authCandidatoOrAdmin, async (req, res) => {
+app.post('/api/chat/:candidatura_id/mensagens', authCandidatoOrAdminStrict, async (req, res) => {
   try {
     const cid = parseInt(req.params.candidatura_id);
     // Bloqueia envio se a candidatura já foi encerrada OU se ainda tá na etapa 1 (inscrição)
@@ -3278,7 +3300,7 @@ app.post('/api/chat/:candidatura_id/mensagens', authCandidatoOrAdmin, async (req
 
 // Upload de arquivo pra chat (POST /api/chat/:cid/upload)
 // Body JSON: { texto?: string, arquivo: { nome, mime, base64 } }
-app.post('/api/chat/:candidatura_id/upload', authCandidatoOrAdmin, rateLimitByIp('upload'), async (req, res) => {
+app.post('/api/chat/:candidatura_id/upload', authCandidatoOrAdminStrict, rateLimitByIp('upload'), async (req, res) => {
   try {
     const cid = parseInt(req.params.candidatura_id);
     const { texto, arquivo } = req.body;
@@ -3348,7 +3370,7 @@ app.post('/api/chat/:candidatura_id/upload', authCandidatoOrAdmin, rateLimitByIp
 });
 
 // Download de arquivo do chat
-app.get('/api/chat/arquivo/:id', authCandidatoOrAdmin, async (req, res) => {
+app.get('/api/chat/arquivo/:id', authCandidatoOrAdminStrict, async (req, res) => {
   try {
     const id = parseInt(req.params.id);
     const { rows } = await pool.query(
@@ -3380,7 +3402,7 @@ app.get('/api/chat/arquivo/:id', authCandidatoOrAdmin, async (req, res) => {
 });
 
 // Lista arquivos de uma mensagem
-app.get('/api/chat/mensagem/:id/arquivos', authCandidatoOrAdmin, async (req, res) => {
+app.get('/api/chat/mensagem/:id/arquivos', authCandidatoOrAdminStrict, async (req, res) => {
   try {
     const id = parseInt(req.params.id);
     const { rows } = await pool.query(
@@ -4871,37 +4893,9 @@ process.on('unhandledRejection', (e) => {
     await init();
     console.log('Banco inicializado com sucesso');
 
-    // Endpoint pra testar email em produção (sem auth, mas com token simples)
-  // GET /api/_teste/email?to=email@x.com
-  app.get('/api/_teste/email', async (req, res) => {
-    const to = req.query.to;
-    if (!to) return res.status(400).json({ erro: 'Passe ?to=email@dominio.com' });
-    if (!process.env.EMAIL_FROM && !process.env.RESEND_API_KEY) {
-      return res.status(500).json({
-        erro: 'Nenhum provedor de e-mail configurado',
-        hasEmailFrom: !!process.env.EMAIL_FROM,
-        hasResend: !!process.env.RESEND_API_KEY
-      });
-    }
-    try {
-      const result = await enviarEmail({
-        to,
-        subject: '🧪 Teste de envio - Recrutamento',
-        html: '<h1>Funcionando! ✅</h1><p>Este é um teste do Zapia. Se você recebeu, o e-mail tá ok.</p>',
-        text: 'Teste Zapia OK'
-      });
-      res.json({ ok: true, provedor: process.env.RESEND_API_KEY ? 'Resend' : 'Gmail SMTP', result });
-    } catch (e) {
-      console.error('[teste-email] ERRO:', e.message);
-      res.status(500).json({
-        erro: e.message,
-        code: e.code,
-        command: e.command,
-        responseCode: e.responseCode,
-        response: e.response
-      });
-    }
-  });
+    // FIX C3 (2026-07-27): rota /api/_teste/email REMOVIDA.
+    // Era pública sem auth — atacante podia mandar e-mail arbitrário pelo nosso domínio.
+    // Pra testar envio de e-mail em prod, use uma rota admin com auth + restrição por domínio.
 
   // ========== SEED DEMO: Importa 6 vagas de exemplo (apenas admin) ==========
   // Idempotente: se a vaga já existe (mesmo título+empresa), não duplica.
