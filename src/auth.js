@@ -88,6 +88,19 @@ function authCandidatoOrEmpresaOrAdmin(req, res, next) {
   });
 }
 
+// FIX C4 (2026-07-27): substitui o middleware LOCAL frouxo em server.js.
+// Aceita APENAS candidato OU admin/recrutador — nunca empresa.
+// Usa authMiddleware (que valida HS256 + tipo string).
+function authCandidatoOrAdminStrict(req, res, next) {
+  return authMiddleware(req, res, () => {
+    const tiposValidos = ['candidato', 'admin', 'recrutador'];
+    if (!tiposValidos.includes(req.user.tipo)) {
+      return res.status(403).json({ erro: 'Acesso restrito a candidato ou admin' });
+    }
+    next();
+  });
+}
+
 module.exports = {
   authMiddleware,
   authCandidato,
@@ -95,5 +108,6 @@ module.exports = {
   authEmpresa,
   authAdminOnly,
   authCandidatoOrEmpresaOrAdmin,
+  authCandidatoOrAdminStrict,
   JWT_VERIFY_OPTIONS
 };
