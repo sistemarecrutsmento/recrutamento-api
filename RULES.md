@@ -222,6 +222,7 @@ Quando criar debug routes (`/api/_debug-*`) pro Fabio, listar aqui pra remover d
 - `/api/_debug-recrutadores`
 - ~~`/api/_debug-empresas-usuarios`~~ (REMOVIDA 26/07/2026 — listava usuários empresa pra teste de login)
 - ~~`/api/_debug-forcar-etapa`~~ (REMOVIDA 26/07/2026 — forçava etapa_atual pra testar regex de permissão)
+- ~~`/api/_debug-restaurar-etapa`~~ (REMOVIDA 26/07/2026 — restaurava etapa após teste)
 
 ### 🚨 REGRA: Env vars do Render com JSON quebrado por newlines
 
