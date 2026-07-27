@@ -483,6 +483,47 @@ if (DEBUG) {
   // NOTA: /api/_debug-recrutadores e /api/_debug/fix-entrevistas foram REMOVIDAS.
   // A primeira vazava senha_hash bcrypt; a segunda permitia migração sem auth.
   // Foram removidas por segurança (2026-07-26). Ver RULES.md.
+
+  // ====== Limpeza do candidato squatter criado durante auditoria ======
+  // Use: curl -H "x-debug-key: $KEY" "https://api/api/_debug/limpar-squatter?email=fabio08dejesusjunior@gmail.com"
+  // Operação IRREVERSÍVEL — só use se for pra limpeza controlada.
+  app.delete('/api/_debug/limpar-squatter', authDebug, async (req, res) => {
+    try {
+      const { email } = req.query;
+      if (!email) return res.status(400).json({ erro: 'Informe ?email=...' });
+      const { rows: cand } = await pool.query(
+        'SELECT id, email, criado_em FROM candidatos WHERE LOWER(email) = LOWER($1)',
+        [email]
+      );
+      if (cand.length === 0) {
+        return res.json({ ok: true, removidos: 0, msg: 'Nenhum candidato com esse email' });
+      }
+      const candId = cand[0].id;
+      // Apaga dependências em ordem (documentos + mensagens -> candidaturas -> candidato)
+      const docs = await pool.query(
+        'DELETE FROM documentos_candidatura WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE candidato_id = $1) RETURNING id',
+        [candId]
+      );
+      const msgsC = await pool.query(
+        'DELETE FROM chat_mensagens WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE candidato_id = $1) RETURNING id',
+        [candId]
+      );
+      const cands = await pool.query('DELETE FROM candidaturas WHERE candidato_id = $1 RETURNING id', [candId]);
+      const removed = await pool.query('DELETE FROM candidatos WHERE id = $1 RETURNING id', [candId]);
+      res.json({
+        ok: true,
+        removidos: {
+          candidato: removed.rowCount,
+          candidaturas: cands.rowCount,
+          documentos: docs.rowCount,
+          mensagens_chat: msgsC.rowCount
+        },
+        msg: `Candidato squatter id=${candId} (${email}) removido com sucesso`
+      });
+    } catch (e) {
+      res.status(500).json({ erro: e.message });
+    }
+  });
 } else {
   // Em produção, todas as rotas /api/_debug* retornam 404 sem executar
   app.all('/api/_debug/*', (req, res) => res.status(404).json({ erro: 'Not found' }));
