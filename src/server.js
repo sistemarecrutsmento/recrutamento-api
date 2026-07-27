@@ -296,6 +296,15 @@ app.use((err, req, res, next) => {
 // ============= SAÚDE =============
 app.get('/api/saude', (req, res) => res.json({ ok: true, sistema: process.env.SISTEMA_NOME, hora: new Date().toISOString() }));
 
+// ETAPA 2: rota pública para diagnóstico de deploy (sem info sensível)
+app.get('/api/_build', (req, res) => res.json({
+  ok: true,
+  versao: '1.0.2',
+  etapa2: true,
+  refresh_disponivel: true,
+  hora: new Date().toISOString()
+}));
+
 // =========================================================================
 // ROTAS DE DEBUG (APENAS DESENVOLVIMENTO / DEBUG EXPLÍCITO)
 // =========================================================================
