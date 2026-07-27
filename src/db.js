@@ -356,15 +356,30 @@ async function init() {
     // ──────────────────────────────────────────────────────────────────
     try {
       const { aplicar: aplicarMigracoesFase1 } = require('./migrations/001_multi_tenant_fase1');
-      const r = await aplicarMigracoesFase1();
-      if (!r.ok) {
-        console.error('[MIGRATION FASE 1] Falha (mas segui):', r.erro);
+      const r1 = await aplicarMigracoesFase1();
+      if (!r1.ok) {
+        console.error('[MIGRATION FASE 1] Falha (mas segui):', r1.erro);
       }
     } catch (migrationErr) {
       console.error('[MIGRATION FASE 1] Erro não tratado (mas segui):', migrationErr.message);
     }
 
-    console.log('Tabelas criadas/verificadas + colunas garantidas + migrations Fase 1 aplicadas');
+    // Migration 002 (28/07/2026) — normalização de nomenclatura RBAC.
+    // Idempotente; corrige inconsistências detectadas na revisão:
+    //  • empresa_vaga_acesso.tipo: alinha default + atualiza 'proprietaria' legacy → 'propria'
+    //  • empresa_usuarios.role:    popula pendentes + adiciona CHECK constraint RBAC
+    //    Valores canônicos: admin_empresa | recrutador | viewer
+    try {
+      const { aplicar: aplicarMigration002 } = require('./migrations/002_normalizar_rbac');
+      const r2 = await aplicarMigration002();
+      if (!r2.ok) {
+        console.error('[MIGRATION 002] Falha (mas segui):', r2.erro);
+      }
+    } catch (migrationErr) {
+      console.error('[MIGRATION 002] Erro não tratado (mas segui):', migrationErr.message);
+    }
+
+    console.log('Tabelas criadas/verificadas + migrations Fase 1 + 002 aplicadas');
   } finally {
     client.release();
   }
