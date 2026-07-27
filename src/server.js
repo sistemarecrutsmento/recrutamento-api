@@ -4469,17 +4469,19 @@ app.post('/api/empresa/vagas', authEmpresa, async (req, res) => {
         v.beneficios || null,
         JSON.stringify(etapas),
         'rascunho',           // empresa cria em rascunho; admin pode aprovar depois
-        req.user.id
+        null                  // criada_por FK → admins(id). NULL pq é empresa (não admin).
       ]
     );
     const vaga = vagaRows[0];
 
     // Vincula automaticamente a vaga à empresa (pra ela ver no dashboard)
+    // NOTA: concedido_por é FK pra admins(id). Como o usuário é empresa_usuarios (não admin),
+    // passamos NULL pra evitar violação de FK. Auto-criação é da própria empresa.
     await pool.query(
       `INSERT INTO empresa_vaga_acesso (empresa_id, vaga_id, concedido_por)
-       VALUES ($1, $2, $3)
+       VALUES ($1, $2, NULL)
        ON CONFLICT (empresa_id, vaga_id) DO NOTHING`,
-      [empresa_id, vaga.id, req.user.id]
+      [empresa_id, vaga.id]
     );
 
     await audit(req, 'empresa.vaga.created', {
