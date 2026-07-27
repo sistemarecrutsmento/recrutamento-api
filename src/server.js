@@ -85,19 +85,7 @@ const app = express();
 // DIAGNOSTICO - SUPERMERCURADO: TESTA QUE ESTE ARQUIVO ESTA SENDO USADO
 // =========================================================================
 app.get('/api/_diag/raw-id', (req, res) => {
-  res.json({ raw_id: 'DIAG_'
-app.get('/api/_diag/list', (req, res) => {
-      const rotas = [];
-      app._router.stack.forEach(l => {
-        if (l.route) {
-          const m = l.route.methods ? Object.keys(l.route.methods).filter(x => x !== 'all').join(',') : '?';
-          rotas.push((m || '').toUpperCase() + ' ' + l.route.path);
-        }
-      });
-      res.json({ total: rotas.length, amostra: rotas.slice(0, 400) });
-    });
-
- + Date.now(), port: process.env.PORT || 10000, ts: new Date().toISOString() });
+  res.json({ raw_id: 'DIAG_' + Date.now(), port: process.env.PORT || 10000, ts: new Date().toISOString() });
 });
 
 
