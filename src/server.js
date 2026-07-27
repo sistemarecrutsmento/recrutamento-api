@@ -1,4 +1,4 @@
-# BUILD_TIMESTAMP: 2026-07-27T05:53-Z (Etapa 2 force redeploy)
+# BUILD_TIMESTAMP: 2026-07-27T05:55-Z (Etapa 2 force redeploy)
 // BUILD_TIMESTAMP: 2026-07-25T21:20-Z — commit forçando redeploy
 const express = require('express');
 const cors = require('cors');
