@@ -2249,6 +2249,54 @@ app.get('/api/candidatura/:id/documentos', authCandidato, async (req, res) => {
   }
 });
 
+// ====== Admin DELETAR candidato (limpeza operacional) ======
+// POST /api/admin/candidato/:id/deletar { confirm: 'SIM_DELETAR' }
+// Apaga o candidato, suas candidaturas, documentos e mensagens de chat (cascade manual).
+// Operação IRREVERSÍVEL — exige confirmação textual.
+app.post('/api/admin/candidato/:id/deletar', authAdmin, async (req, res) => {
+  try {
+    const candId = Number(req.params.id);
+    if (!candId) return res.status(400).json({ erro: 'id inválido' });
+    if (req.body.confirm !== 'SIM_DELETAR') {
+      return res.status(400).json({ erro: 'Confirme com { confirm: "SIM_DELETAR" }' });
+    }
+    const { rows: cand } = await pool.query(
+      'SELECT id, email, nome FROM candidatos WHERE id = $1',
+      [candId]
+    );
+    if (cand.length === 0) return res.status(404).json({ erro: 'Candidato não encontrado' });
+
+    // Cascade manual: documentos -> mensagens -> candidaturas -> candidato
+    const docs = await pool.query(
+      'DELETE FROM documentos_candidatura WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE candidato_id = $1) RETURNING id',
+      [candId]
+    );
+    const msgsC = await pool.query(
+      'DELETE FROM chat_mensagens WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE candidato_id = $1) RETURNING id',
+      [candId]
+    );
+    const cands = await pool.query('DELETE FROM candidaturas WHERE candidato_id = $1 RETURNING id', [candId]);
+    const removed = await pool.query('DELETE FROM candidatos WHERE id = $1 RETURNING id', [candId]);
+
+    // Log de auditoria
+    console.log(`[AUDITORIA] Admin ${req.user?.email || '?'} deletou candidato id=${candId} (${cand[0].email})`);
+
+    res.json({
+      ok: true,
+      candidato_deletado: { id: candId, email: cand[0].email, nome: cand[0].nome },
+      removidos: {
+        candidato: removed.rowCount,
+        candidaturas: cands.rowCount,
+        documentos: docs.rowCount,
+        mensagens_chat: msgsC.rowCount
+      },
+      msg: `Candidato ${cand[0].nome} (${cand[0].email}) removido com sucesso`
+    });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
 // Admin lista documentos de uma candidatura
 app.get('/api/admin/candidatura/:id/documentos', authAdmin, async (req, res) => {
   try {
