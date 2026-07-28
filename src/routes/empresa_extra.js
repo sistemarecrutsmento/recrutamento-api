@@ -487,17 +487,6 @@ function registrar(app, ctx) {
       res.status(500).json({ erro: 'Erro ao buscar proposta' });
     }
   });
-
-);
-
-);
-
-  // ===========================================================
-  // POST /api/empresa/candidatura/:id/proposta
-  // Envia proposta de emprego ao candidato
-  // ===========================================================
-);
-
 }
 
 module.exports = { registrar };
