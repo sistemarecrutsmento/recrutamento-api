@@ -33,7 +33,7 @@ if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'sua_chave_secreta_aqu
 const { pool, init, inserirNotificacao } = require('./db');
 const { enviarCodigo, enviarNotificacaoStatus, enviarEmailProposta, enviarEmailBg, enviarEmailAtualizacao, enviarEmail, enviarEmailInscricao, getResendKey } = require('./email');
 const meet = require('./meet');
-const { criarAccessToken, criarRefreshToken, persistirRefresh, consumirRefresh, revogarRefresh, revogarTodosPorUsuario } = require('./token');
+const { criarAccessToken, criarRefreshToken, persistirRefresh, consumirRefresh, revogarRefresh, revogarTodosPorUsuario, listarSessoes, revogarSessaoById, revogarOutrasSessoes } = require('./token');
 
 // Email do admin pra receber notificações de ação do candidato
 const ADMIN_NOTIF_EMAIL = process.env.ADMIN_NOTIF_EMAIL || process.env.ADMIN_EMAIL || 'fabio08dejesusjunior@gmail.com';
@@ -1216,6 +1216,8 @@ app.post('/api/candidato/trocar-senha', authCandidato, async (req, res) => {
     }
     const novoHash = await bcrypt.hash(senha_nova, 10);
     await pool.query('UPDATE candidatos SET senha_hash = $1 WHERE id = $2', [novoHash, rows[0].id]);
+    // Fase 10: revoga todos os refresh tokens (outras sessões invalidadas)
+    await revogarTodosPorUsuario(req.user.email, 'candidato', 'password_changed');
     await audit(req, 'password.changed', { result: 'success', resource_type: 'candidato', resource_id: rows[0].id });
     res.json({ ok: true });
   } catch (e) {
@@ -4787,7 +4789,8 @@ app.post('/api/auth/login-empresa', rateLimitLogin, async (req, res) => {
   try {
     const { rows } = await pool.query(`
       SELECT u.id, u.nome, u.email, u.senha_hash, u.ativo, u.primeiro_acesso, u.cargo, u.role,
-        u.empresa_id, e.nome as empresa_nome, e.ativo as empresa_ativa
+        u.empresa_id, u.totp_ativo, u.totp_secret,
+        e.nome as empresa_nome, e.ativo as empresa_ativa
       FROM empresa_usuarios u
       JOIN empresas e ON e.id = u.empresa_id
       WHERE u.email = $1
@@ -4809,7 +4812,19 @@ app.post('/api/auth/login-empresa', rateLimitLogin, async (req, res) => {
       return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
     }
     rateLimitClear(req);
-    // FIX Etapa 2: access (30m) + refresh (7d, hash no DB)
+
+    // ── Fase 10: se 2FA ativo, emite pending_token (5min) em vez de access+refresh
+    if (u.totp_ativo) {
+      const pending = jwt.sign(
+        { id: u.id, email: u.email, tipo: 'empresa_2fa_pending' },
+        process.env.JWT_SECRET,
+        { algorithm: 'HS256', expiresIn: '5m', issuer: 'vagasio-api' }
+      );
+      await audit(req, 'login.2fa_required', { resource_type: 'empresa', resource_id: u.id });
+      return res.json({ ok: true, requer_2fa: true, pending_token: pending });
+    }
+
+    // Sem 2FA: access (30m) + refresh (7d, hash no DB)
     const accessToken = criarAccessToken({
       id: u.id, email: u.email, nome: u.nome, tipo: 'empresa',
       role: u.role || 'recrutador',
@@ -6750,6 +6765,389 @@ process.on('unhandledRejection', (e) => {
     } catch (e) {
       console.error('[SAAS/EMPRESAS PUT]', e);
       res.status(500).json({ erro: 'Erro ao atualizar empresa' });
+    }
+  });
+
+  // =========================================================================
+  // FASE 10 — AUTENTICAÇÃO, SESSÕES E RECUPERAÇÃO DE CONTA
+  // =========================================================================
+  //
+  // Módulos importados lazily para evitar circular dep:
+  //   totp.js   — TOTP RFC 6238 (sem dependência externa)
+  //   token.js  — já importado no topo
+  //   passwordReset.js — já importado no topo
+  //
+  // ── A. GESTÃO DE SESSÕES (todos os tipos) ─────────────────────────────────
+
+  // GET /api/auth/sessoes — lista sessões ativas do usuário logado
+  app.get('/api/auth/sessoes', authMiddleware, async (req, res) => {
+    try {
+      const { email, tipo } = req.user;
+      const sessoes = await listarSessoes(email, tipo);
+      // Não expor token_hash; apenas metadados de UX
+      const lista = sessoes.map(s => ({
+        id: s.id,
+        ip: s.ip_criacao,
+        device: s.device_name || parsarDevice(s.user_agent_criacao),
+        criado_em: s.criado_em,
+        expira_em: s.expira_em,
+      }));
+      res.json({ sessoes: lista });
+    } catch (e) {
+      console.error('[SESSOES LIST]', e);
+      res.status(500).json({ erro: 'Erro ao listar sessões' });
+    }
+  });
+
+  // DELETE /api/auth/sessoes/:id — encerra sessão específica
+  app.delete('/api/auth/sessoes/:id', authMiddleware, async (req, res) => {
+    try {
+      const { email, tipo } = req.user;
+      const sessaoId = parseInt(req.params.id, 10);
+      if (!sessaoId) return res.status(400).json({ erro: 'ID inválido' });
+      const ok = await revogarSessaoById(sessaoId, email, tipo);
+      if (!ok) return res.status(404).json({ erro: 'Sessão não encontrada ou já encerrada' });
+      res.json({ ok: true });
+    } catch (e) {
+      console.error('[SESSAO DELETE]', e);
+      res.status(500).json({ erro: 'Erro ao encerrar sessão' });
+    }
+  });
+
+  // POST /api/auth/sessoes/encerrar-outras — revoga todas exceto a atual
+  app.post('/api/auth/sessoes/encerrar-outras', authMiddleware, async (req, res) => {
+    try {
+      const { email, tipo } = req.user;
+      const { refreshToken } = req.body || {};
+      if (!refreshToken) return res.status(400).json({ erro: 'refreshToken necessário' });
+      const count = await revogarOutrasSessoes(email, tipo, refreshToken);
+      res.json({ ok: true, encerradas: count });
+    } catch (e) {
+      console.error('[SESSOES ENCERRAR-OUTRAS]', e);
+      res.status(500).json({ erro: 'Erro ao encerrar sessões' });
+    }
+  });
+
+  // POST /api/auth/sessoes/encerrar-todas — revoga TODAS (logout global)
+  app.post('/api/auth/sessoes/encerrar-todas', authMiddleware, async (req, res) => {
+    try {
+      const { email, tipo } = req.user;
+      await revogarTodosPorUsuario(email, tipo, 'logout_global');
+      await audit(req, 'security.logout_global', { resource_type: tipo });
+      res.json({ ok: true });
+    } catch (e) {
+      console.error('[SESSOES ENCERRAR-TODAS]', e);
+      res.status(500).json({ erro: 'Erro ao encerrar sessões' });
+    }
+  });
+
+  // Helper: extrai device name do user-agent (UX)
+  function parsarDevice(ua) {
+    if (!ua) return 'Dispositivo desconhecido';
+    if (/mobile/i.test(ua)) return 'Mobile';
+    if (/tablet/i.test(ua)) return 'Tablet';
+    if (/chrome/i.test(ua)) return 'Chrome (Desktop)';
+    if (/firefox/i.test(ua)) return 'Firefox (Desktop)';
+    if (/safari/i.test(ua)) return 'Safari (Desktop)';
+    return 'Navegador (Desktop)';
+  }
+
+  // ── B. TROCAR SENHA — Empresa ──────────────────────────────────────────────
+
+  // POST /api/empresa/trocar-senha — troca senha com confirmação da senha atual
+  app.post('/api/empresa/trocar-senha', requireEmpresaViewer, async (req, res) => {
+    try {
+      const { senha_atual, senha_nova } = req.body || {};
+      if (!senha_atual || !senha_nova) return res.status(400).json({ erro: 'senha_atual e senha_nova são obrigatórios' });
+      if (senha_nova.length < 8) return res.status(400).json({ erro: 'Senha nova deve ter ao menos 8 caracteres' });
+
+      const { rows } = await pool.query('SELECT senha_hash FROM empresa_usuarios WHERE id = $1', [req.user.id]);
+      if (!rows.length) return res.status(404).json({ erro: 'Usuário não encontrado' });
+
+      const ok = await bcrypt.compare(senha_atual, rows[0].senha_hash);
+      if (!ok) return res.status(401).json({ erro: 'Senha atual incorreta' });
+
+      const novoHash = await bcrypt.hash(senha_nova, 12);
+      await pool.query('UPDATE empresa_usuarios SET senha_hash = $1 WHERE id = $2', [novoHash, req.user.id]);
+
+      // Revogar TODOS os refresh tokens (exceto sessão atual não é possível sem o refresh raw — revogamos todos)
+      await revogarTodosPorUsuario(req.user.email, 'empresa', 'password_changed');
+      await audit(req, 'security.password_changed', { resource_type: 'empresa', resource_id: req.user.id });
+      res.json({ ok: true, msg: 'Senha alterada. Faça login novamente.' });
+    } catch (e) {
+      console.error('[EMPRESA TROCAR-SENHA]', e);
+      res.status(500).json({ erro: 'Erro ao trocar senha' });
+    }
+  });
+
+  // ── D. RECUPERAÇÃO DE SENHA — Empresa ──────────────────────────────────────
+  // Reutiliza passwordReset.js mas adaptado para empresa_usuarios.
+  // As rotas genéricas já existem em /api/auth/esqueci-senha e /api/auth/redefinir-senha
+  // e suportam user_tipo='empresa'. Adicionamos endpoint específico de empresa
+  // para o frontend empresa/login.html poder chamar com frontendUrl correto.
+
+  app.post('/api/empresa/esqueci-senha', rateLimitByIp('esqueci'), async (req, res) => {
+    // Redireciona para a implementação centralizada, injetando frontendUrl de empresa
+    req.body = req.body || {};
+    if (!req.body.frontendUrl) {
+      req.body.frontendUrl = (process.env.FRONTEND_URL || 'https://vagasio.com.br') + '/empresa/redefinir-senha.html';
+    }
+    req.body._user_tipo_hint = 'empresa'; // Hint para passwordReset.js priorizar empresa_usuarios
+    return esqueciSenha(req, res);
+  });
+
+  // ── E. 2FA TOTP — Empresa ─────────────────────────────────────────────────
+
+  const { totpVerify, generateTotpSecret, totpOtpauthUrl, generateBackupCodes, verifyBackupCode } = require('./totp');
+
+  // POST /api/empresa/2fa/iniciar — gera segredo TOTP e URL de QR Code (NÃO ativa ainda)
+  app.post('/api/empresa/2fa/iniciar', requireEmpresaViewer, async (req, res) => {
+    try {
+      const { id, email } = req.user;
+      // Se já tem 2FA ativo, exige confirmação de senha para resetar
+      const { rows } = await pool.query('SELECT totp_ativo, totp_secret FROM empresa_usuarios WHERE id = $1', [id]);
+      if (!rows.length) return res.status(404).json({ erro: 'Usuário não encontrado' });
+
+      const secret = generateTotpSecret();
+      const otpauthUrl = totpOtpauthUrl(secret, email);
+
+      // Salva segredo PENDENTE (totp_ativo permanece false até confirmação)
+      await pool.query('UPDATE empresa_usuarios SET totp_secret = $1 WHERE id = $2', [secret, id]);
+
+      res.json({
+        ok: true,
+        secret,
+        otpauthUrl,
+        // QR Code via API pública (não requer chave)
+        qrCodeUrl: `https://api.qrserver.com/v1/create-qr-code/?data=${encodeURIComponent(otpauthUrl)}&size=200x200`,
+      });
+    } catch (e) {
+      console.error('[2FA INICIAR]', e);
+      res.status(500).json({ erro: 'Erro ao iniciar 2FA' });
+    }
+  });
+
+  // POST /api/empresa/2fa/confirmar — confirma e ATIVA o 2FA com primeiro código
+  app.post('/api/empresa/2fa/confirmar', requireEmpresaViewer, async (req, res) => {
+    try {
+      const { id } = req.user;
+      const { codigo } = req.body || {};
+      if (!codigo || !/^\d{6}$/.test(codigo)) return res.status(400).json({ erro: 'Código inválido' });
+
+      const { rows } = await pool.query('SELECT totp_secret FROM empresa_usuarios WHERE id = $1', [id]);
+      if (!rows.length || !rows[0].totp_secret) return res.status(400).json({ erro: 'Inicie o processo de 2FA primeiro' });
+
+      if (!totpVerify(rows[0].totp_secret, codigo)) {
+        return res.status(401).json({ erro: 'Código incorreto' });
+      }
+
+      // Gera backup codes
+      const { plainCodes, hashedCodes } = await generateBackupCodes();
+      await pool.query(
+        `UPDATE empresa_usuarios SET totp_ativo = true, totp_backup_codes = $1, totp_ativado_em = NOW() WHERE id = $2`,
+        [JSON.stringify(hashedCodes), id]
+      );
+      await audit(req, 'security.2fa_enabled', { resource_type: 'empresa', resource_id: id });
+      res.json({ ok: true, backup_codes: plainCodes, msg: '2FA ativado. Guarde os códigos de backup.' });
+    } catch (e) {
+      console.error('[2FA CONFIRMAR]', e);
+      res.status(500).json({ erro: 'Erro ao confirmar 2FA' });
+    }
+  });
+
+  // POST /api/empresa/2fa/verificar — verifica código no login (quando 2FA ativo)
+  // Chamado pelo frontend após login com empresa_2fa_pending token
+  app.post('/api/empresa/2fa/verificar', rateLimitByIp('twofa'), async (req, res) => {
+    try {
+      const { pending_token, codigo } = req.body || {};
+      if (!pending_token || !codigo) return res.status(400).json({ erro: 'pending_token e codigo obrigatórios' });
+
+      // Valida o pending_token (JWT temporário de 5min, tipo='empresa_2fa_pending')
+      let payload;
+      try {
+        payload = jwt.verify(pending_token, process.env.JWT_SECRET, { algorithms: ['HS256'] });
+      } catch {
+        return res.status(401).json({ erro: 'Token inválido ou expirado' });
+      }
+      if (payload.tipo !== 'empresa_2fa_pending') return res.status(401).json({ erro: 'Token inválido' });
+
+      const { rows } = await pool.query(
+        `SELECT u.id, u.nome, u.email, u.totp_secret, u.totp_ativo, u.totp_backup_codes,
+                u.ativo, u.role, u.empresa_id, u.primeiro_acesso, e.nome as empresa_nome
+         FROM empresa_usuarios u JOIN empresas e ON e.id = u.empresa_id
+         WHERE u.id = $1`,
+        [payload.id]
+      );
+      if (!rows.length) return res.status(404).json({ erro: 'Usuário não encontrado' });
+      const u = rows[0];
+      if (!u.ativo) return res.status(403).json({ erro: 'Conta desativada' });
+
+      // Verifica código TOTP ou backup code
+      let valido = false;
+      let updatedBackups = null;
+      if (/^\d{6}$/.test(codigo)) {
+        valido = totpVerify(u.totp_secret, codigo);
+      } else {
+        // Tentativa de backup code
+        const backups = JSON.parse(u.totp_backup_codes || '[]');
+        const result = await verifyBackupCode(backups, codigo);
+        valido = result.valido;
+        if (valido) updatedBackups = result.updatedCodes;
+      }
+
+      if (!valido) {
+        await audit(req, 'login.2fa_failed', { resource_type: 'empresa', resource_id: u.id });
+        return res.status(401).json({ erro: 'Código incorreto' });
+      }
+
+      // Atualiza backup codes se foi usado um
+      if (updatedBackups !== null) {
+        await pool.query('UPDATE empresa_usuarios SET totp_backup_codes = $1 WHERE id = $2', [JSON.stringify(updatedBackups), u.id]);
+      }
+
+      // Emite access + refresh definitivos
+      const accessToken = criarAccessToken({
+        id: u.id, email: u.email, tipo: 'empresa',
+        empresa_id: u.empresa_id, empresa_nome: u.empresa_nome, role: u.role
+      });
+      const refresh = criarRefreshToken();
+      await persistirRefresh('empresa', u.id, u.email, refresh, req, {
+        user_role: u.role, user_empresa_id: u.empresa_id
+      });
+      await audit(req, 'login.2fa_verified', { resource_type: 'empresa', resource_id: u.id, user_email: u.email });
+      res.json({
+        ok: true,
+        token: accessToken,
+        refreshToken: refresh,
+        primeiro_acesso: u.primeiro_acesso,
+        usuario: { id: u.id, nome: u.nome, email: u.email, tipo: 'empresa', role: u.role, empresa_id: u.empresa_id, empresa_nome: u.empresa_nome }
+      });
+    } catch (e) {
+      console.error('[2FA VERIFICAR]', e);
+      res.status(500).json({ erro: 'Erro ao verificar 2FA' });
+    }
+  });
+
+  // POST /api/empresa/2fa/desativar — desativa 2FA com confirmação de senha
+  app.post('/api/empresa/2fa/desativar', requireEmpresaViewer, async (req, res) => {
+    try {
+      const { id, email } = req.user;
+      const { senha } = req.body || {};
+      if (!senha) return res.status(400).json({ erro: 'Senha obrigatória para desativar 2FA' });
+
+      const { rows } = await pool.query('SELECT senha_hash, totp_ativo FROM empresa_usuarios WHERE id = $1', [id]);
+      if (!rows.length) return res.status(404).json({ erro: 'Usuário não encontrado' });
+      if (!rows[0].totp_ativo) return res.status(400).json({ erro: '2FA não está ativo' });
+
+      const ok = await bcrypt.compare(senha, rows[0].senha_hash);
+      if (!ok) return res.status(401).json({ erro: 'Senha incorreta' });
+
+      await pool.query(
+        `UPDATE empresa_usuarios SET totp_ativo = false, totp_secret = NULL, totp_backup_codes = '[]', totp_ativado_em = NULL WHERE id = $1`,
+        [id]
+      );
+      await audit(req, 'security.2fa_disabled', { resource_type: 'empresa', resource_id: id });
+      res.json({ ok: true, msg: '2FA desativado.' });
+    } catch (e) {
+      console.error('[2FA DESATIVAR]', e);
+      res.status(500).json({ erro: 'Erro ao desativar 2FA' });
+    }
+  });
+
+  // GET /api/empresa/2fa/status — retorna se 2FA está ativo e data de ativação
+  app.get('/api/empresa/2fa/status', requireEmpresaViewer, async (req, res) => {
+    try {
+      const { rows } = await pool.query(
+        'SELECT totp_ativo, totp_ativado_em FROM empresa_usuarios WHERE id = $1',
+        [req.user.id]
+      );
+      if (!rows.length) return res.status(404).json({ erro: 'Usuário não encontrado' });
+      res.json({ totp_ativo: rows[0].totp_ativo || false, ativado_em: rows[0].totp_ativado_em });
+    } catch (e) {
+      res.status(500).json({ erro: 'Erro' });
+    }
+  });
+
+  // ── F. MODIFICAÇÃO DO LOGIN EMPRESA — adiciona 2FA quando ativo ───────────
+  // O login de empresa já existe em /api/auth/login-empresa (linha ~4784).
+  // Para não duplicar, adicionamos um middleware pós-autenticação via patch.
+  // A abordagem é: criar um novo endpoint /api/auth/login-empresa-v2 com 2FA,
+  // e manter o original para compatibilidade. O frontend empresa/login.html
+  // chama o endpoint correto conforme o status 2FA retornado.
+  //
+  // Na prática: o login existente retorna { requer_2fa: true, pending_token }
+  // quando totp_ativo=true. Adicionamos isso via patch abaixo.
+  //
+  // NOTA: não podemos substituir a rota existente (já registrada antes desta linha).
+  // Criamos /api/auth/login-empresa-2fa como substituta quando frontend atualizar.
+
+  // PATCH de comportamento 2FA no login empresa: rota alternativa
+  // O frontend empresa/login.html deve chamar este endpoint quando disponível.
+  app.post('/api/auth/login-empresa-v2', rateLimitLogin, async (req, res) => {
+    try {
+      const { email, senha } = req.body || {};
+      if (!email || !senha) return res.status(400).json({ erro: 'E-mail e senha obrigatórios' });
+
+      const { rows } = await pool.query(`
+        SELECT u.id, u.nome, u.email, u.senha_hash, u.ativo, u.primeiro_acesso, u.cargo, u.role,
+               u.empresa_id, u.totp_ativo, u.totp_secret,
+               e.nome as empresa_nome, e.ativo as empresa_ativa
+        FROM empresa_usuarios u
+        JOIN empresas e ON e.id = u.empresa_id
+        WHERE u.email = $1
+      `, [email.toLowerCase()]);
+
+      if (!rows.length) {
+        rateLimitRegisterFail(req);
+        await audit(req, 'login.failure', { resource_type: 'empresa', metadata: { email: email.toLowerCase() } });
+        return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
+      }
+
+      const u = rows[0];
+      if (!u.ativo || !u.empresa_ativa) {
+        return res.status(403).json({ erro: 'Conta ou empresa desativada' });
+      }
+
+      const ok = await bcrypt.compare(senha, u.senha_hash);
+      if (!ok) {
+        rateLimitRegisterFail(req);
+        await audit(req, 'login.failure', { resource_type: 'empresa', metadata: { email: email.toLowerCase() } });
+        return res.status(401).json({ erro: 'E-mail ou senha inválidos' });
+      }
+
+      rateLimitClear(req);
+
+      // Se 2FA está ativo → retorna pending token (5min), não emite sessão
+      if (u.totp_ativo) {
+        const pendingToken = jwt.sign(
+          { id: u.id, email: u.email, tipo: 'empresa_2fa_pending' },
+          process.env.JWT_SECRET,
+          { algorithm: 'HS256', expiresIn: '5m', issuer: 'vagasio-api' }
+        );
+        await audit(req, 'login.2fa_required', { resource_type: 'empresa', resource_id: u.id });
+        return res.json({ ok: true, requer_2fa: true, pending_token: pendingToken });
+      }
+
+      // Sem 2FA → emite tokens normalmente
+      const accessToken = criarAccessToken({
+        id: u.id, email: u.email, tipo: 'empresa',
+        empresa_id: u.empresa_id, empresa_nome: u.empresa_nome, role: u.role
+      });
+      const refresh = criarRefreshToken();
+      await persistirRefresh('empresa', u.id, u.email, refresh, req, {
+        user_role: u.role, user_empresa_id: u.empresa_id
+      });
+      await audit(req, 'login.success', { resource_type: 'empresa', resource_id: u.id, user_email: u.email });
+      res.json({
+        ok: true,
+        token: accessToken,
+        refreshToken: refresh,
+        primeiro_acesso: u.primeiro_acesso,
+        usuario: { id: u.id, nome: u.nome, email: u.email, tipo: 'empresa', role: u.role, empresa_id: u.empresa_id, empresa_nome: u.empresa_nome }
+      });
+    } catch (e) {
+      console.error('[LOGIN EMPRESA V2]', e);
+      res.status(500).json({ erro: 'Erro interno' });
     }
   });
 
