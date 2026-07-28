@@ -4637,8 +4637,8 @@ app.patch('/api/empresa/vagas/:id/status', requireRecrutadorOuAdmin, async (req,
   try {
     const { id } = req.params;
     const { status } = req.body || {};
-    if (!['publicada', 'pausada', 'rascunho'].includes(status)) {
-      return res.status(400).json({ erro: 'Status inválido. Use: publicada, pausada ou rascunho' });
+    if (!['publicada', 'pausada', 'rascunho', 'encerrada'].includes(status)) {
+      return res.status(400).json({ erro: 'Status inválido. Use: publicada, pausada, rascunho ou encerrada' });
     }
     const check = await pool.query(`SELECT 1 FROM empresa_vaga_acesso WHERE vaga_id = $1 AND empresa_id = $2`, [id, req.user.empresa_id]);
     if (check.rows.length === 0) {
@@ -5257,6 +5257,82 @@ app.post('/api/empresa/candidatura/:id/acao', requireRecrutadorOuAdmin, async (r
   } catch (e) {
     console.error('[empresa acao]', e);
     res.status(500).json({ erro: 'Erro ao processar ação' });
+  }
+});
+
+// FASE 4 — PATCH etapa/status da candidatura pela empresa (qualquer etapa, sem trava de "entrevista gestor")
+app.patch('/api/empresa/candidaturas/:id/etapa', requireRecrutadorOuAdmin, async (req, res) => {
+  const { empresa_id, nome: empresa_nome } = req.user;
+  const { id } = req.params;
+  const { etapa_atual, status, motivo } = req.body || {};
+  const parecer = (motivo || '').trim();
+  try {
+    // Carrega candidatura + etapas[] validando tenant via empresa_vaga_acesso
+    const acc = await pool.query(`
+      SELECT c.id, c.etapa_atual, c.status, c.historico, c.vaga_id, v.etapas
+      FROM candidaturas c
+      JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id
+      JOIN vagas v ON v.id = c.vaga_id
+      WHERE c.id = $1 AND eva.empresa_id = $2
+    `, [id, empresa_id]);
+    if (acc.rows.length === 0) return res.status(403).json({ erro: 'Sem acesso a esta candidatura' });
+    const cand = acc.rows[0];
+
+    // Bloqueia candidatura fechada
+    if (cand.status === 'contratado' || cand.status === 'rejeitado') {
+      return res.status(409).json({ erro: `Candidatura já está "${cand.status}" e não pode ser alterada.` });
+    }
+
+    let etapasArr = cand.etapas;
+    if (typeof etapasArr === 'string') { try { etapasArr = JSON.parse(etapasArr); } catch (_) { etapasArr = []; } }
+    const totalEtapas = Array.isArray(etapasArr) ? etapasArr.length : 0;
+
+    // Validar etapa
+    let novaEtapa = cand.etapa_atual;
+    if (etapa_atual !== undefined && etapa_atual !== null) {
+      const n = Number(etapa_atual);
+      if (!Number.isInteger(n) || n < 0 || (totalEtapas > 0 && n >= totalEtapas)) {
+        return res.status(400).json({ erro: `Etapa inválida. Deve ser entre 0 e ${totalEtapas - 1}.` });
+      }
+      novaEtapa = n;
+    }
+
+    // Validar status
+    let novoStatus = cand.status;
+    if (status !== undefined && status !== null) {
+      if (!['em_analise', 'em_andamento', 'rejeitado', 'contratado'].includes(status)) {
+        return res.status(400).json({ erro: 'Status inválido. Use: em_analise, em_andamento, rejeitado ou contratado.' });
+      }
+      novoStatus = status;
+    }
+
+    // Adiciona entrada no histórico
+    const hist = Array.isArray(cand.historico) ? cand.historico : [];
+    hist.push({
+      tipo: 'mudar_etapa',
+      por: `empresa:${empresa_nome}`,
+      quando: new Date().toISOString(),
+      etapa_de: cand.etapa_atual,
+      etapa_para: novaEtapa,
+      status_de: cand.status,
+      status_para: novoStatus,
+      motivo: parecer || ''
+    });
+
+    await pool.query(
+      `UPDATE candidaturas SET historico = $1::jsonb, etapa_atual = $2, status = $3, atualizada_em = NOW() WHERE id = $4`,
+      [JSON.stringify(hist), novaEtapa, novoStatus, id]
+    );
+
+    await audit(req, 'empresa.candidatura.etapa', {
+      resource_type: 'candidatura', resource_id: Number(id),
+      metadata: { empresa_nome, de_etapa: cand.etapa_atual, para_etapa: novaEtapa, de_status: cand.status, para_status: novoStatus, motivo: parecer || null }
+    });
+
+    res.json({ ok: true, etapa_atual: novaEtapa, status: novoStatus });
+  } catch (e) {
+    console.error('[empresa etapa patch]', e);
+    res.status(500).json({ erro: 'Erro ao atualizar etapa da candidatura' });
   }
 });
 
