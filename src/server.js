@@ -449,33 +449,6 @@ app.get('/api/_debug/fase6', async (req, res) => {
   }
 });
 
-// DEBUG FASE 6 — INSERT direto top-level (testa se tabela aceita escrita)
-app.post('/api/_debug/fase6-insert', async (req, res) => {
-  try {
-    const r = await pool.query(
-      `INSERT INTO candidatura_historico
-         (candidatura_id, vaga_id, empresa_id, etapa_nova, status_novo, alterado_por_tipo, alterado_por_nome, metadata)
-       VALUES (1, 1, 1, 0, 'em_analise', 'sistema', 'debug-top', '{"debug":true}'::jsonb)
-       RETURNING id, criado_em`
-    );
-    res.json({ ok: true, id: r.rows[0].id, criado_em: r.rows[0].criado_em });
-  } catch (e) {
-    res.status(500).json({ erro: e.message, code: e.code, detail: e.detail });
-  }
-});
-
-// DEBUG FASE 6 — UPDATE candidatura direta (testa o UPDATE)
-app.post('/api/_debug/fase6-update', async (req, res) => {
-  try {
-    const r = await pool.query(
-      `UPDATE candidaturas SET etapa_atual = 1, status = 'em_andamento', atualizada_em = NOW() WHERE id = 60 RETURNING id, etapa_atual, status`
-    );
-    res.json({ ok: true, rows: r.rows });
-  } catch (e) {
-    res.status(500).json({ erro: e.message, code: e.code, detail: e.detail });
-  }
-});
-
 // ETAPA 2: rota pública para diagnóstico de deploy (sem info sensível)
 app.get('/api/_build', (req, res) => res.json({
   ok: true,
@@ -5777,8 +5750,7 @@ app.patch('/api/empresa/candidaturas/:id/etapa', requireRecrutadorOuAdmin, async
     res.json({ ok: true, etapa_atual: novaEtapa, status: novoStatus, historico_registrado: etapaMudou || statusMudou });
   } catch (e) {
     console.error('[empresa etapa patch]', e);
-    try { console.error('[empresa etapa patch] SQL:', e.message, '| detail:', e.detail, '| code:', e.code, '| hint:', e.hint); } catch (_) {}
-    res.status(500).json({ erro: 'Erro ao atualizar etapa da candidatura', debug: e.message });
+    res.status(500).json({ erro: 'Erro ao atualizar etapa da candidatura' });
   }
 });
 
@@ -5976,35 +5948,6 @@ process.on('unhandledRejection', (e) => {
   try {
     await init();
     console.log('Banco inicializado com sucesso');
-
-    // DEBUG FASE 6 — teste INSERT direto
-    app.get('/api/_debug/insert-test', async (req, res) => {
-      try {
-        const r = await pool.query(
-          `INSERT INTO candidatura_historico
-             (candidatura_id, vaga_id, empresa_id, etapa_nova, status_novo, alterado_por_tipo, alterado_por_nome, metadata)
-           VALUES (1, 1, 1, 0, 'em_analise', 'sistema', 'debug', '{"debug":true}'::jsonb)
-           RETURNING id`
-        );
-        res.json({ ok: true, id: r.rows[0].id });
-      } catch (e) {
-        res.status(500).json({ erro: e.message, code: e.code, detail: e.detail });
-      }
-    });
-
-    // ============= DEBUG FASE 6 — checa estrutura tabela
-    app.get('/api/_debug/fase6-tabela', async (req, res) => {
-      try {
-        const cols = await pool.query(
-          `SELECT column_name, data_type FROM information_schema.columns
-           WHERE table_schema='public' AND table_name='candidatura_historico'
-           ORDER BY ordinal_position`
-        );
-        res.json({ ok: true, colunas: cols.rows });
-      } catch (e) {
-        res.status(500).json({ erro: e.message });
-      }
-    });
 
     // ping test: 1785206962.7014055
     // FIX C3 (2026-07-27): rota /api/_teste/email REMOVIDA.
