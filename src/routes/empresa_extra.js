@@ -18,42 +18,6 @@ function registrar(app, ctx) {
   console.log('[FASE 8] Registrando 21 rotas /api/empresa/* complementares...');
 
   // ===========================================================
-  // GET /api/empresa/candidatos
-  // Lista candidatos que se candidataram para vagas da empresa.
-  // Adaptado de /api/admin/candidatos (L2613).
-  // ===========================================================
-  app.get('/api/empresa/candidatos', requireEmpresaViewer, async (req, res) => {
-    try {
-      const { empresa_id } = req.user;
-      const { area } = req.query;
-      const params = [req.user.id, empresa_id];
-      const { rows } = await pool.query(`
-        SELECT DISTINCT c.id, c.nome, c.email, c.cpf, c.celular, c.cidade, c.estado,
-               c.areas_interesse, c.banco_talentos, c.criado_em, c.foto_url,
-               ult.status AS ultimo_status, ult.id AS ultima_candidatura_id,
-               ult.etapa_atual AS ultima_etapa,
-               v.titulo AS ultima_vaga_titulo,
-               (SELECT COUNT(*) FROM candidaturas cc WHERE cc.candidato_id = c.id) AS total_candidaturas
-        FROM candidatos c
-        JOIN candidaturas cand_filtro ON cand_filtro.candidato_id = c.id
-        JOIN vagas v_filtro ON v_filtro.id = cand_filtro.vaga_id
-        LEFT JOIN LATERAL (
-          SELECT cu.id, cu.status, cu.etapa_atual, cu.vaga_id
-          FROM candidaturas cu WHERE cu.candidato_id = c.id ORDER BY cu.criada_em DESC NULLS LAST LIMIT 1
-        ) ult ON true
-        LEFT JOIN vagas v ON v.id = ult.vaga_id
-        WHERE v_filtro.criada_por = $1 OR v_filtro.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2)
-        ${area ? `AND c.areas_interesse @> $3::jsonb` : ''}
-        ORDER BY c.criado_em DESC
-      `, area ? [...params, JSON.stringify([area])] : params);
-      res.json({ candidatos: rows });
-    } catch (e) {
-      console.error('[EMPRESA LISTAR CANDIDATOS]', e);
-      res.status(500).json({ erro: 'Erro ao listar candidatos' });
-    }
-  });
-
-  // ===========================================================
   // GET /api/empresa/candidaturas
   // Lista candidaturas das vagas da empresa. Adaptado de /api/admin/candidaturas.
   // ===========================================================
