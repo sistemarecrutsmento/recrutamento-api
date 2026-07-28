@@ -1211,17 +1211,225 @@ app.post('/api/candidato/trocar-senha', authCandidato, async (req, res) => {
 });
 
 app.get('/api/candidato/candidaturas', authCandidato, async (req, res) => {
-  const { rows: c } = await pool.query('SELECT id FROM candidatos WHERE email = $1', [req.user.email]);
-  if (c.length === 0) return res.json({ candidaturas: [] });
-  const { rows } = await pool.query(
-    `SELECT cand.*, v.titulo, v.empresa, v.cidade, v.estado
-     FROM candidaturas cand
-     JOIN vagas v ON v.id = cand.vaga_id
-     WHERE cand.candidato_id = $1
-     ORDER BY cand.criada_em DESC`,
-    [c[0].id]
-  );
-  res.json({ candidaturas: rows });
+  try {
+    const { rows: c } = await pool.query('SELECT id FROM candidatos WHERE email = $1', [req.user.email]);
+    if (c.length === 0) return res.json({ ok: true, candidaturas: [] });
+    const candidatoId = c[0].id;
+
+    // JOIN vagas (com etapas[]) e empresas (com logo/slug/cor) para enriquecer.
+    // NÃO exponha: candidato_id, empresa_id (interno), criada_por, observacoes_etapas.
+    const { rows } = await pool.query(
+      `SELECT
+        cand.id                  AS id,
+        cand.status              AS status,
+        cand.etapa_atual         AS etapa_atual,
+        cand.criada_em           AS data_candidatura,
+        cand.atualizada_em       AS atualizada_em,
+        cand.proposta_enviada_em AS proposta_enviada_em,
+        cand.proposta_aceita_em  AS proposta_aceita_em,
+        cand.proposta_recusada_em AS proposta_recusada_em,
+        v.id                     AS vaga_id,
+        v.titulo                 AS vaga_titulo,
+        v.cidade                 AS vaga_cidade,
+        v.estado                 AS vaga_estado,
+        v.tipo_contrato          AS vaga_tipo_contrato,
+        v.etapas                 AS vaga_etapas,
+        COALESCE(e.nome, v.empresa) AS empresa_nome,
+        e.slug                   AS empresa_slug,
+        e.logo_url               AS empresa_logo_url,
+        e.cor_destaque           AS empresa_cor
+       FROM candidaturas cand
+       JOIN vagas v ON v.id = cand.vaga_id
+       LEFT JOIN empresas e ON e.id = v.empresa_id
+       WHERE cand.candidato_id = $1
+       ORDER BY cand.criada_em DESC`,
+      [candidatoId]
+    );
+
+    // Enriquece cada item com: etapa_total, etapa_nome, progresso (0..1).
+    const enriquecidas = rows.map((r) => {
+      const etapasArr = Array.isArray(r.vaga_etapas)
+        ? r.vaga_etapas
+        : (typeof r.vaga_etapas === 'string' ? (() => { try { return JSON.parse(r.vaga_etapas); } catch (_) { return []; } })() : []);
+      const etapaTotal = etapasArr.length;
+      // etapa_atual é 0-indexed (próxima etapa a fazer); progresso = atual/total
+      const etapaAtual = Number(r.etapa_atual) || 0;
+      const etapaObj = etapaTotal > 0 ? etapasArr[Math.min(etapaAtual, etapaTotal - 1)] : null;
+      const etapaNome = etapaObj
+        ? (typeof etapaObj === 'string' ? etapaObj : etapaObj.nome)
+        : (etapaTotal > 0 ? `Etapa ${etapaAtual + 1}` : 'Em análise');
+      const progresso = etapaTotal > 0 ? Math.min(1, etapaAtual / etapaTotal) : 0;
+
+      // Remove campos internos antes de retornar
+      const { vaga_etapas, _empresa_id_interno, ...pub } = r;
+      return {
+        ...pub,
+        vaga_etapa_total: etapaTotal,
+        vaga_etapa_nome: etapaNome,
+        vaga_etapa_label: `${Math.min(etapaAtual + 1, etapaTotal)}/${etapaTotal}`,
+        progresso
+      };
+    });
+
+    res.json({ ok: true, candidaturas: enriquecidas });
+  } catch (e) {
+    console.error('[candidato/candidaturas]', e);
+    res.status(500).json({ erro: 'Erro ao listar candidaturas' });
+  }
+});
+
+// GET /api/candidato/candidaturas/:id — detalhe de UMA candidatura do candidato logado.
+// SEGURANÇA:
+//   - 404 se a candidatura não existe OU não pertence ao candidato (anti-IDOR)
+//   - NÃO expõe: candidato_id (interno), vaga.empresa_id, vaga.criada_por,
+//     vaga.criada_em (data exata), observacoes_etapas, proposta_motivo_recusa
+//     (interno da empresa), historico JSONB legado.
+app.get('/api/candidato/candidaturas/:id', authCandidato, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!/^\d+$/.test(String(id))) return res.status(404).json({ erro: 'Candidatura não encontrada' });
+
+    const { rows: c } = await pool.query('SELECT id FROM candidatos WHERE email = $1', [req.user.email]);
+    if (c.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
+    const candidatoId = c[0].id;
+
+    const { rows } = await pool.query(
+      `SELECT
+        cand.id                  AS id,
+        cand.status              AS status,
+        cand.etapa_atual         AS etapa_atual,
+        cand.criada_em           AS data_candidatura,
+        cand.atualizada_em       AS atualizada_em,
+        cand.proposta_enviada_em AS proposta_enviada_em,
+        cand.proposta_aceita_em  AS proposta_aceita_em,
+        cand.proposta_recusada_em AS proposta_recusada_em,
+        cand.curriculo_url       AS curriculo_url,
+        v.id                     AS vaga_id,
+        v.titulo                 AS vaga_titulo,
+        v.descricao              AS vaga_descricao,
+        v.requisitos             AS vaga_requisitos,
+        v.beneficios             AS vaga_beneficios,
+        v.cidade                 AS vaga_cidade,
+        v.estado                 AS vaga_estado,
+        v.tipo_contrato          AS vaga_tipo_contrato,
+        v.nivel                  AS vaga_nivel,
+        v.area                   AS vaga_area,
+        v.salario_min            AS vaga_salario_min,
+        v.salario_max            AS vaga_salario_max,
+        v.etapas                 AS vaga_etapas,
+        COALESCE(e.nome, v.empresa) AS empresa_nome,
+        e.slug                   AS empresa_slug,
+        e.logo_url               AS empresa_logo_url,
+        e.cor_destaque           AS empresa_cor,
+        e.site                   AS empresa_site
+       FROM candidaturas cand
+       JOIN vagas v ON v.id = cand.vaga_id
+       LEFT JOIN empresas e ON e.id = v.empresa_id
+       WHERE cand.id = $1 AND cand.candidato_id = $2
+       LIMIT 1`,
+      [id, candidatoId]
+    );
+    if (rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
+    const r = rows[0];
+
+    const etapasArr = Array.isArray(r.vaga_etapas)
+      ? r.vaga_etapas
+      : (typeof r.vaga_etapas === 'string' ? (() => { try { return JSON.parse(r.vaga_etapas); } catch (_) { return []; } })() : []);
+    const etapaTotal = etapasArr.length;
+    const etapaAtual = Number(r.etapa_atual) || 0;
+    const etapaObj = etapaTotal > 0 ? etapasArr[Math.min(etapaAtual, etapaTotal - 1)] : null;
+    const etapaNome = etapaObj
+      ? (typeof etapaObj === 'string' ? etapaObj : etapaObj.nome)
+      : (etapaTotal > 0 ? `Etapa ${etapaAtual + 1}` : 'Em análise');
+    const progresso = etapaTotal > 0 ? Math.min(1, etapaAtual / etapaTotal) : 0;
+
+    const { vaga_etapas, ...pub } = r;
+    res.json({
+      ok: true,
+      candidatura: {
+        ...pub,
+        vaga_etapa_total: etapaTotal,
+        vaga_etapa_nome: etapaNome,
+        vaga_etapa_label: `${Math.min(etapaAtual + 1, etapaTotal)}/${etapaTotal}`,
+        progresso
+      }
+    });
+  } catch (e) {
+    console.error('[candidato/candidaturas/:id]', e);
+    res.status(500).json({ erro: 'Erro ao buscar candidatura' });
+  }
+});
+
+// GET /api/candidato/candidaturas/:id/historico — histórico do candidato
+// sobre a PRÓPRIA candidatura. Anti-IDOR (404 se não for dele).
+// NÃO expõe: alterado_por_id, alterado_por_role (interno), metadata.
+app.get('/api/candidato/candidaturas/:id/historico', authCandidato, async (req, res) => {
+  try {
+    const { id } = req.params;
+    if (!/^\d+$/.test(String(id))) return res.status(404).json({ erro: 'Candidatura não encontrada' });
+
+    const { rows: c } = await pool.query('SELECT id FROM candidatos WHERE email = $1', [req.user.email]);
+    if (c.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
+    const candidatoId = c[0].id;
+
+    // Valida ownership antes de consultar histórico (anti-IDOR)
+    const own = await pool.query(
+      `SELECT cand.id, v.etapas
+       FROM candidaturas cand
+       JOIN vagas v ON v.id = cand.vaga_id
+       WHERE cand.id = $1 AND cand.candidato_id = $2`,
+      [id, candidatoId]
+    );
+    if (own.rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
+
+    const etapasArr = Array.isArray(own.rows[0].etapas)
+      ? own.rows[0].etapas
+      : (typeof own.rows[0].etapas === 'string' ? (() => { try { return JSON.parse(own.rows[0].etapas); } catch (_) { return []; } })() : []);
+
+    const { rows } = await pool.query(
+      `SELECT
+        h.id,
+        h.etapa_anterior,
+        h.etapa_nova,
+        h.status_anterior,
+        h.status_novo,
+        h.alterado_por_tipo,
+        h.alterado_por_nome,
+        h.motivo,
+        h.criado_em
+       FROM candidatura_historico h
+       WHERE h.candidatura_id = $1
+       ORDER BY h.criado_em ASC`,
+      [id]
+    );
+
+    // Enriquece com nome legível da etapa (não vaza índice cru)
+    const eventos = rows.map((h) => {
+      const etapaAnterior = Number.isInteger(h.etapa_anterior) && h.etapa_anterior !== null
+        ? (etapasArr[h.etapa_anterior] ? (typeof etapasArr[h.etapa_anterior] === 'string' ? etapasArr[h.etapa_anterior] : etapasArr[h.etapa_anterior].nome) : null)
+        : null;
+      const etapaNovaObj = etapasArr[h.etapa_nova];
+      const etapaNova = etapaNovaObj
+        ? (typeof etapaNovaObj === 'string' ? etapaNovaObj : etapaNovaObj.nome)
+        : `Etapa ${h.etapa_nova + 1}`;
+      return {
+        id: h.id,
+        de_etapa: etapaAnterior,
+        para_etapa: etapaNova,
+        de_status: h.status_anterior,
+        para_status: h.status_novo,
+        autor_tipo: h.alterado_por_tipo,
+        autor_nome: h.alterado_por_tipo === 'sistema' ? 'Sistema' : (h.alterado_por_nome || h.alterado_por_tipo),
+        mensagem: h.motivo,
+        data: h.criado_em
+      };
+    });
+
+    res.json({ ok: true, eventos });
+  } catch (e) {
+    console.error('[candidato/candidaturas/:id/historico]', e);
+    res.status(500).json({ erro: 'Erro ao buscar histórico' });
+  }
 });
 
 // ===== NOTIFICAÇÕES DO CANDIDATO =====
@@ -5448,7 +5656,17 @@ app.patch('/api/empresa/candidaturas/:id/etapa', requireRecrutadorOuAdmin, async
       novoStatus = status;
     }
 
-    // Adiciona entrada no histórico
+    // FASE 6 — Verifica se há mudança REAL. Não cria histórico desnecessário.
+    const etapaMudou = novaEtapa !== cand.etapa_atual;
+    const statusMudou = novoStatus !== cand.status;
+    const temMotivo = !!parecer;
+
+    if (!etapaMudou && !statusMudou && !temMotivo) {
+      // Nada de fato alterou — sem escrita
+      return res.json({ ok: true, etapa_atual: novaEtapa, status: novoStatus, historico_registrado: false });
+    }
+
+    // Adiciona entrada no histórico legado (JSONB) — manter compatibilidade
     const hist = Array.isArray(cand.historico) ? cand.historico : [];
     hist.push({
       tipo: 'mudar_etapa',
@@ -5461,20 +5679,140 @@ app.patch('/api/empresa/candidaturas/:id/etapa', requireRecrutadorOuAdmin, async
       motivo: parecer || ''
     });
 
-    await pool.query(
-      `UPDATE candidaturas SET historico = $1::jsonb, etapa_atual = $2, status = $3, atualizada_em = NOW() WHERE id = $4`,
-      [JSON.stringify(hist), novaEtapa, novoStatus, id]
-    );
+    // FASE 6 — Grava também na tabela append-only `candidatura_historico`
+    // (transação atômica: histórico + update)
+    await pool.query('BEGIN');
+    try {
+      if (etapaMudou || statusMudou) {
+        await pool.query(
+          `INSERT INTO candidatura_historico
+             (candidatura_id, vaga_id, empresa_id,
+              etapa_anterior, etapa_nova,
+              status_anterior, status_novo,
+              alterado_por_tipo, alterado_por_id, alterado_por_nome, alterado_por_role,
+              motivo, metadata, criado_em)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb, NOW())`,
+          [
+            Number(id),
+            cand.vaga_id,
+            empresa_id,
+            etapaMudou ? cand.etapa_atual : null,
+            etapaMudou ? novaEtapa : null,
+            statusMudou ? cand.status : null,
+            statusMudou ? novoStatus : null,
+            'empresa',
+            req.user.id || null,
+            empresa_nome || null,
+            req.user.role || null,
+            parecer || null,
+            JSON.stringify({
+              origem: 'patch_etapa',
+              de_etapa: cand.etapa_atual,
+              para_etapa: novaEtapa,
+              de_status: cand.status,
+              para_status: novoStatus,
+              empresa_id
+            })
+          ]
+        );
+      }
+
+      await pool.query(
+        `UPDATE candidaturas SET historico = $1::jsonb, etapa_atual = $2, status = $3, atualizada_em = NOW() WHERE id = $4`,
+        [JSON.stringify(hist), novaEtapa, novoStatus, id]
+      );
+
+      await pool.query('COMMIT');
+    } catch (e) {
+      await pool.query('ROLLBACK');
+      throw e;
+    }
 
     await audit(req, 'empresa.candidatura.etapa', {
       resource_type: 'candidatura', resource_id: Number(id),
-      metadata: { empresa_nome, de_etapa: cand.etapa_atual, para_etapa: novaEtapa, de_status: cand.status, para_status: novoStatus, motivo: parecer || null }
+      metadata: { empresa_nome, de_etapa: cand.etapa_atual, para_etapa: novaEtapa, de_status: cand.status, para_status: novoStatus, motivo: parecer || null, historico_registrado: etapaMudou || statusMudou }
     });
 
-    res.json({ ok: true, etapa_atual: novaEtapa, status: novoStatus });
+    res.json({ ok: true, etapa_atual: novaEtapa, status: novoStatus, historico_registrado: etapaMudou || statusMudou });
   } catch (e) {
     console.error('[empresa etapa patch]', e);
     res.status(500).json({ erro: 'Erro ao atualizar etapa da candidatura' });
+  }
+});
+
+// FASE 6 — Histórico da candidatura (visão da EMPRESA)
+// Tenant isolation via empresa_vaga_acesso. RBAC: viewer+ pode ler.
+// NÃO confia em empresa_id do body/query — usa req.user.empresa_id.
+app.get('/api/empresa/candidaturas/:id/historico', requireEmpresaViewer, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { empresa_id, role } = req.user;
+    if (!/^\d+$/.test(String(id))) return res.status(404).json({ erro: 'Candidatura não encontrada' });
+
+    // Valida tenant: candidatura → vaga → empresa_vaga_acesso (empresa_id do JWT)
+    const acc = await pool.query(
+      `SELECT c.id, c.vaga_id, c.etapa_atual, c.status, v.etapas
+       FROM candidaturas c
+       JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id
+       JOIN vagas v ON v.id = c.vaga_id
+       WHERE c.id = $1 AND eva.empresa_id = $2`,
+      [id, empresa_id]
+    );
+    if (acc.rows.length === 0) {
+      // 404 genérico — não revela se existe em outra empresa (anti-IDOR)
+      return res.status(404).json({ erro: 'Candidatura não encontrada' });
+    }
+
+    const etapasArr = Array.isArray(acc.rows[0].etapas)
+      ? acc.rows[0].etapas
+      : (typeof acc.rows[0].etapas === 'string' ? (() => { try { return JSON.parse(acc.rows[0].etapas); } catch (_) { return []; } })() : []);
+
+    const { rows } = await pool.query(
+      `SELECT
+        h.id, h.candidatura_id,
+        h.etapa_anterior, h.etapa_nova,
+        h.status_anterior, h.status_novo,
+        h.alterado_por_tipo, h.alterado_por_id, h.alterado_por_nome, h.alterado_por_role,
+        h.motivo, h.metadata, h.criado_em
+       FROM candidatura_historico h
+       WHERE h.candidatura_id = $1
+       ORDER BY h.criado_em ASC`,
+      [id]
+    );
+
+    const eventos = rows.map((h) => {
+      const etapaAntObj = Number.isInteger(h.etapa_anterior) && etapasArr[h.etapa_anterior]
+        ? etapasArr[h.etapa_anterior]
+        : null;
+      const etapaNovaObj = etapasArr[h.etapa_nova];
+      const etapaAntNome = etapaAntObj
+        ? (typeof etapaAntObj === 'string' ? etapaAntObj : etapaAntObj.nome)
+        : null;
+      const etapaNovaNome = etapaNovaObj
+        ? (typeof etapaNovaObj === 'string' ? etapaNovaObj : etapaNovaObj.nome)
+        : (Number.isInteger(h.etapa_nova) ? `Etapa ${h.etapa_nova + 1}` : null);
+      return {
+        id: h.id,
+        de_etapa: etapaAntNome,
+        de_etapa_indice: h.etapa_anterior,
+        para_etapa: etapaNovaNome,
+        para_etapa_indice: h.etapa_nova,
+        de_status: h.status_anterior,
+        para_status: h.status_novo,
+        autor_tipo: h.alterado_por_tipo,
+        autor_id: h.alterado_por_id,
+        autor_nome: h.alterado_por_nome,
+        autor_role: h.alterado_por_role,
+        mensagem: h.motivo,
+        metadata: h.metadata,
+        data: h.criado_em
+      };
+    });
+
+    res.json({ ok: true, eventos, viewer_role: role });
+  } catch (e) {
+    console.error('[empresa/candidaturas/:id/historico]', e);
+    res.status(500).json({ erro: 'Erro ao buscar histórico' });
   }
 });
 
