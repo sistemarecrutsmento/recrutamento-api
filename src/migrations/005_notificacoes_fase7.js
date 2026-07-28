@@ -34,6 +34,16 @@ async function aplicar() {
   const escreve = (m) => { log.push(m); console.log('[MIG005]', m); };
 
   try {
+    // 0. DROP se tabela existe com schema antigo (empresa_id em vez de user_type+user_id)
+    const oldCol = await client.query(
+      `SELECT 1 FROM information_schema.columns
+       WHERE table_schema='public' AND table_name='notificacoes' AND column_name='empresa_id'`
+    );
+    if (oldCol.rowCount > 0) {
+      await client.query('DROP TABLE IF EXISTS notificacoes CASCADE');
+      log.push('Tabela antiga com empresa_id removida');
+    }
+
     // 1. Tabela
     await client.query(`
       CREATE TABLE IF NOT EXISTS notificacoes (
