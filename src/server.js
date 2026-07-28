@@ -934,7 +934,7 @@ app.post('/api/candidato/cadastro', rateLimitLogin, async (req, res) => {
     );
 
     // FIX Etapa 2: access (15m) + refresh (7d, hash no DB)
-    const accessToken = criarAccessToken({ email: emailLower, tipo: 'candidato' });
+    const accessToken = criarAccessToken({ id: rows[0].id, email: emailLower, tipo: 'candidato' });
     const refresh = criarRefreshToken();
     await persistirRefresh('candidato', rows[0].id, emailLower, refresh, req, { user_role: 'candidato' });
     res.json({ ok: true, token: accessToken, refreshToken: refresh, candidato: rows[0] });
@@ -979,7 +979,7 @@ app.post('/api/candidato/login', rateLimitLogin, async (req, res) => {
   rateLimitClear(req);
 
   // FIX Etapa 2: access (15m) + refresh (7d, hash no DB)
-  const accessToken = criarAccessToken({ email: emailLower, tipo: 'candidato' });
+  const accessToken = criarAccessToken({ id: cand.id, email: emailLower, tipo: 'candidato' });
   const refresh = criarRefreshToken();
   await persistirRefresh('candidato', cand.id, emailLower, refresh, req, { user_role: 'candidato' });
   await audit(req, 'login.success', { resource_type: 'candidato', resource_id: cand.id, user_email: cand.email });
@@ -7156,6 +7156,12 @@ process.on('unhandledRejection', (e) => {
 
   // =========================================================================
   // FASE 11 — Busca avançada, Tags de Vaga, Favoritos, Score de Match
+  // Helper: resolve candidato_id do JWT (pode ser id direto ou busca por email para tokens antigos)
+  async function resolveCandId(user) {
+    if (user.id) return user.id;
+    const { rows } = await pool.query('SELECT id FROM candidatos WHERE email = $1', [user.email]);
+    return rows.length ? rows[0].id : null;
+  }
   // ═══════════════════════════════════════════════════════════════════════════
 
   // ── HELPERS DE MATCH ───────────────────────────────────────────────────────
@@ -7486,7 +7492,8 @@ process.on('unhandledRejection', (e) => {
   // GET /api/candidato/favoritos
   app.get('/api/candidato/favoritos', authCandidato, async (req, res) => {
     try {
-      const candId = req.user.id;
+      const candId = await resolveCandId(req.user);
+      if (!candId) return res.status(404).json({ erro: "Perfil de candidato não encontrado" });
       const { rows } = await pool.query(`
         SELECT f.id AS favorito_id, f.criado_em AS favoritado_em,
                v.id, v.titulo, v.empresa, v.cidade, v.estado,
@@ -7509,7 +7516,8 @@ process.on('unhandledRejection', (e) => {
   // POST /api/candidato/favoritos/:vaga_id
   app.post('/api/candidato/favoritos/:vaga_id', authCandidato, async (req, res) => {
     try {
-      const candId = req.user.id;
+      const candId = await resolveCandId(req.user);
+      if (!candId) return res.status(404).json({ erro: "Perfil de candidato não encontrado" });
       const vagaId = parseInt(req.params.vaga_id);
       if (!vagaId) return res.status(400).json({ erro: 'vaga_id inválido' });
 
@@ -7537,7 +7545,8 @@ process.on('unhandledRejection', (e) => {
   // DELETE /api/candidato/favoritos/:vaga_id
   app.delete('/api/candidato/favoritos/:vaga_id', authCandidato, async (req, res) => {
     try {
-      const candId = req.user.id;
+      const candId = await resolveCandId(req.user);
+      if (!candId) return res.status(404).json({ erro: "Perfil de candidato não encontrado" });
       const vagaId = parseInt(req.params.vaga_id);
       const { rowCount } = await pool.query(
         `DELETE FROM candidato_favoritos WHERE candidato_id = $1 AND vaga_id = $2`,
@@ -7615,7 +7624,8 @@ process.on('unhandledRejection', (e) => {
   app.get('/api/candidato/vagas/:id/match', authCandidato, async (req, res) => {
     try {
       const vagaId = parseInt(req.params.id);
-      const candId = req.user.id;
+      const candId = await resolveCandId(req.user);
+      if (!candId) return res.status(404).json({ erro: "Perfil de candidato não encontrado" });
 
       // Vaga deve existir (qualquer status — match é informativo, não requer publicação)
       const { rows: vagaRows } = await pool.query(
