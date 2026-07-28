@@ -8363,9 +8363,10 @@ process.on('unhandledRejection', (e) => {
       return res.status(401).json({ erro: 'Não autorizado' });
     }
     try {
-      const result = await emailSvc.bgDigestDiario({ empresaId: null });
-      await audit(req, 'cron.digest_disparado', { metadata: { result: JSON.stringify(result).slice(0, 200) } });
-      res.json({ ok: true, ts: new Date().toISOString(), result });
+      // bgDigestDiario é fire-and-forget (retorna undefined) — dispara em background
+      emailSvc.bgDigestDiario({ empresaId: null });
+      await audit(req, 'cron.digest_disparado', { metadata: { ts: new Date().toISOString() } });
+      res.json({ ok: true, ts: new Date().toISOString(), msg: 'digest disparado em background' });
     } catch (e) {
       console.error('[CRON DIGEST]', e.message);
       res.status(500).json({ ok: false, erro: e.message });
