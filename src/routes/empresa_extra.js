@@ -332,11 +332,11 @@ function registrar(app, ctx) {
       if (candCheck.rows.length === 0) return res.status(403).json({ erro: 'Candidatura não pertence a esta empresa' });
 
       const { rows } = await pool.query(`
-        INSERT INTO entrevistas (candidatura_id, etapa, data_hora, duracao_minutos, local, link_reuniao, observacoes, status, criada_em)
+        INSERT INTO entrevistas (candidatura_id, etapa, data_hora, duracao_minutos, local, link_reuniao, observacoes, status, criado_em)
         VALUES ($1, $2, $3, $4, $5, $6, $7, 'agendada', NOW())
         RETURNING id
       `, [candidatura_id, etapa, data_hora, duracao_minutos || 60, local, link_reuniao, observacoes]);
-      res.json({ ok: true, id: rows[0].id });
+      res.json({ ok: true, entrevista: { id: rows[0].id }, id: rows[0].id });
     } catch (e) {
       console.error('[EMPRESA ENTREVISTA POST]', e);
       res.status(500).json({ erro: 'Erro ao agendar entrevista' });
@@ -535,11 +535,22 @@ function registrar(app, ctx) {
       `, [id, req.user.id, empresa_id]);
       if (check.rows.length === 0) return res.status(403).json({ erro: 'Candidatura não pertence a esta empresa' });
       const { rows } = await pool.query(`
-        SELECT id, candidatura_id, texto, arquivo_url, salario, beneficios, data_inicio,
-               status, criada_em, enviada_em, aceita_em, recusada_em, motivo_recusa
-        FROM propostas WHERE candidatura_id = $1 ORDER BY criada_em DESC LIMIT 1
+        SELECT id, proposta_texto as texto, proposta_pdf_url as arquivo_url,
+               proposta_enviada_em as enviada_em, proposta_aceita_em as aceita_em,
+               proposta_recusada_em as recusada_em, proposta_motivo_recusa as motivo_recusa
+        FROM candidaturas WHERE id = $1
       `, [id]);
-      res.json({ proposta: rows[0] || null });
+      const row = rows[0];
+      const proposta = row && row.enviada_em ? {
+        candidatura_id: Number(id),
+        texto: row.texto,
+        arquivo_url: row.arquivo_url,
+        enviada_em: row.enviada_em,
+        aceita_em: row.aceita_em,
+        recusada_em: row.recusada_em,
+        motivo_recusa: row.motivo_recusa
+      } : null;
+      res.json({ proposta });
     } catch (e) {
       console.error('[EMPRESA PROPOSTA GET]', e);
       res.status(500).json({ erro: 'Erro ao buscar proposta' });
