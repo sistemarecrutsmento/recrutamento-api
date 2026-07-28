@@ -1451,118 +1451,7 @@ app.get('/api/candidato/candidaturas/:id/historico', authCandidato, async (req, 
 //                (proposta aguardando aceite, documentos reprovados pra reenviar)
 //   atualizacoes = timeline mesclada dos processos (últimos 30 eventos)
 // Cada item inclui id/nome da vaga pra renderizar link na UI.
-app.get('/api/candidato/notificacoes-legado', authCandidato, async (req, res) => {
-  try {
-    const { rows: c } = await pool.query('SELECT id FROM candidatos WHERE email = $1', [req.user.email]);
-    if (c.length === 0) return res.json({ aguardando: [], atualizacoes: [] });
-    const candidatoId = c[0].id;
-
-    // Traz todas as candidaturas ativas (não encerradas) + nome da vaga
-    const { rows: cands } = await pool.query(`
-      SELECT cand.id, cand.status, cand.etapa_atual, cand.historico,
-             cand.proposta_enviada_em, cand.proposta_aceita_em, cand.proposta_recusada_em,
-             v.titulo AS vaga_titulo, v.id AS vaga_id
-      FROM candidaturas cand
-      JOIN vagas v ON v.id = cand.vaga_id
-      WHERE cand.candidato_id = $1
-        AND cand.status NOT IN ('rejeitado', 'reprovado', 'cancelado')
-      ORDER BY cand.atualizada_em DESC
-    `, [candidatoId]);
-
-    const aguardando = [];
-    const atualizacoes = [];
-
-    for (const cand of cands) {
-      const linkVaga = `/candidato/inscricao.html?id=${cand.id}`;
-
-      // === AGUARDANDO AÇÃO ===
-      // 1) Proposta aguardando aceite
-      if (cand.proposta_enviada_em && !cand.proposta_aceita_em && !cand.proposta_recusada_em) {
-        aguardando.push({
-          tipo: 'proposta_pendente',
-          icone: '📨',
-          titulo: 'Proposta aguardando seu aceite',
-          descricao: `A empresa enviou uma proposta para "${cand.vaga_titulo}". Aceite ou recuse para continuar.`,
-          link: linkVaga,
-          linkTexto: 'Ver proposta',
-          data: cand.proposta_enviada_em,
-          vaga: cand.vaga_titulo
-        });
-      }
-      // 2) Documentos reprovados
-      const { rows: docsReprovados } = await pool.query(
-        `SELECT COUNT(*)::int AS total
-         FROM documentos_candidatura
-         WHERE candidatura_id = $1 AND status = 'reprovado'`,
-        [cand.id]
-      );
-      if (docsReprovados[0]?.total > 0) {
-        aguardando.push({
-          tipo: 'doc_reprovado',
-          icone: '📄',
-          titulo: `${docsReprovados[0].total} documento(s) precisam de reenvio`,
-          descricao: `Em "${cand.vaga_titulo}", alguns documentos foram reprovados. Envie novamente para liberar a próxima etapa.`,
-          link: `/candidato/documentos.html?cand=${cand.id}`,
-          linkTexto: 'Reenviar documentos',
-          data: new Date().toISOString(),
-          vaga: cand.vaga_titulo
-        });
-      }
-      // 3) Aguardando preenchimento do perfil (etapa 0 sem documentos)
-      if ((cand.etapa_atual || 0) === 0) {
-        aguardando.push({
-          tipo: 'perfil_incompleto',
-          icone: '👤',
-          titulo: 'Complete seu perfil',
-          descricao: `Em "${cand.vaga_titulo}", finalize seu cadastro para avançar.`,
-          link: '/candidato/perfil.html',
-          linkTexto: 'Completar perfil',
-          data: new Date().toISOString(),
-          vaga: cand.vaga_titulo
-        });
-      }
-
-      // === TIMELINE DE ATUALIZAÇÕES ===
-      const hist = Array.isArray(cand.historico) ? cand.historico : [];
-      hist.forEach(h => {
-        atualizacoes.push({
-          vaga: cand.vaga_titulo,
-          vaga_id: cand.vaga_id,
-          candidatura_id: cand.id,
-          etapa: h.etapa,
-          status: h.status,
-          acao: h.acao,
-          mensagem: h.mensagem,
-          por: h.por,
-          data: h.data,
-          link: linkVaga,
-          // emoji por tipo de ação
-          icone: (() => {
-            if (h.acao === 'aprovar_docs') return '✅';
-            if (h.acao === 'reprovar_docs') return '❌';
-            if (h.acao === 'reprovar') return '🚫';
-            if (h.acao === 'reabrir') return '🔄';
-            if (h.acao === 'enviar_proposta') return '📨';
-            if (h.acao === 'aceitar_proposta') return '🤝';
-            if (h.acao === 'recusar_proposta') return '⛔';
-            if (h.status === 'contratado') return '🎉';
-            if (h.acao === 'avancar') return '⬆️';
-            return '📌';
-          })()
-        });
-      });
-    }
-
-    // Ordena timeline mais recente primeiro; limita a 30
-    atualizacoes.sort((a, b) => new Date(b.data) - new Date(a.data));
-    atualizacoes.splice(30);
-
-    res.json({ aguardando, atualizacoes });
-  } catch (e) {
-    console.error('[CANDIDATO NOTIFICACOES]', e);
-    return erroInterno(req, res, e, 'api-candidato-notificacoes');
-  }
-});
+// [Fase 8] Rota /api/candidato/notificacoes-legado removida (substituída por /api/notificacoes Fase 7)
 
 // Lista as CONVERSAS do candidato logado (estilo WhatsApp)
 // Critérios (regra aprovada 22/07/2026):
@@ -5725,14 +5614,7 @@ app.post('/api/empresa/candidatura/:id/acao', requireRecrutadorOuAdmin, async (r
       [JSON.stringify(hist), novoStatus, novaEtapa, id]
     );
 
-    // Loga notificação (pra histórico, e-mail pode ser enviado depois)
-    try {
-      await pool.query(
-        `INSERT INTO empresa_notificacoes (empresa_id, candidatura_id, tipo, assunto, corpo)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [empresa_id, id, acao, `Empresa ${acao} em candidatura #${id}`, `Empresa ${empresa_nome} executou ${acao} na etapa ${cand.etapa_atual}`]
-      );
-    } catch (_) { /* não bloquear se log falhar */ }
+    // [Fase 8] empresa_notificacoes substituída por notificacoes (Fase 7) — INSERT removido.
 
     // Log de auditoria da ação da empresa
     await audit(req, 'empresa.candidatura.action', { resource_type: 'candidatura', resource_id: Number(id), metadata: { acao, empresa_nome, de_etapa: cand.etapa_atual, para_etapa: novaEtapa, parecer: parecer || null } });
