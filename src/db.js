@@ -404,11 +404,66 @@ async function init() {
       console.error('[MIGRATION 004] Erro não tratado (mas segui):', migrationErr.message);
     }
 
-    console.log('Tabelas criadas/verificadas + migrations Fase 1 + 002 + 003 + 004 aplicadas');
+    // Migration 005 (28/07/2026) — tabela `notificacoes` (Fase 7 — feed global).
+    try {
+      const { aplicar: aplicarMigration005 } = require('./migrations/005_notificacoes_fase7');
+      const r5 = await aplicarMigration005();
+      if (!r5.ok) {
+        console.error('[MIGRATION 005] Falha (mas segui):', r5.erro);
+      }
+    } catch (migrationErr) {
+      console.error('[MIGRATION 005] Erro não tratado (mas segui):', migrationErr.message);
+    }
+
+    console.log('Tabelas criadas/verificadas + migrations Fase 1 + 002 + 003 + 004 + 005 aplicadas');
   } finally {
     client.release();
   }
 }
 
-module.exports = { pool, init };
-// (redeploy trigger 23:30)
+module.exports = { pool, init, inserirNotificacao };
+
+// =====================================================
+// FASE 7 — Helper: inserir notificação no feed global
+// =====================================================
+// Falha silenciosamente — notificações são best-effort, NÃO devem
+// derrubar a request principal. Loga o erro pra debug.
+//
+// Parâmetros:
+//   client              pool/client do pg
+//   empresa_id          ID da empresa (multi-tenant)
+//   tipo                string do enum (ex: 'candidatura_criada')
+//   titulo              linha principal (ex: 'Nova candidatura: João')
+//   opts (opcional):
+//     vaga_id, candidatura_id, resumo, link, actor_id, actor_tipo,
+//     actor_nome, actor_role, metadata
+async function inserirNotificacao(client, empresa_id, tipo, titulo, opts = {}) {
+  if (!empresa_id || !tipo || !titulo) return { ok: false, erro: 'params inválidos' };
+  try {
+    const r = await client.query(
+      `INSERT INTO notificacoes
+         (empresa_id, vaga_id, candidatura_id, tipo, titulo, resumo, link,
+          actor_id, actor_tipo, actor_nome, actor_role, metadata)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+       RETURNING id`,
+      [
+        empresa_id,
+        opts.vaga_id || null,
+        opts.candidatura_id || null,
+        tipo,
+        titulo,
+        opts.resumo || null,
+        opts.link || null,
+        opts.actor_id || null,
+        opts.actor_tipo || 'sistema',
+        opts.actor_nome || null,
+        opts.actor_role || null,
+        JSON.stringify(opts.metadata || {}),
+      ]
+    );
+    return { ok: true, id: r.rows[0]?.id };
+  } catch (e) {
+    console.error('[notificacao] Falha ao inserir:', e.message);
+    return { ok: false, erro: e.message };
+  }
+}
