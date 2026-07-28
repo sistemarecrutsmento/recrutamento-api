@@ -464,6 +464,16 @@ app.get('/api/_debug/fase7-status', async (req, res) => {
   }
 });
 
+// DEBUG: limpa tabela (uso em testes)
+app.get('/api/_debug/fase7-limpar', async (req, res) => {
+  try {
+    await pool.query('DELETE FROM notificacoes');
+    res.json({ ok: true, msg: 'notificacoes limpas' });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
 app.get('/api/_debug/fase6', async (req, res) => {
   try {
     const cols = await pool.query(
