@@ -6375,3 +6375,17 @@ process.on('unhandledRejection', (e) => {
     process.exit(1);
   }
 })();
+
+// ============= DEBUG FASE 6 — checa estrutura tabela
+app.get('/api/_debug/fase6-tabela', async (req, res) => {
+  try {
+    const cols = await pool.query(
+      `SELECT column_name, data_type FROM information_schema.columns
+       WHERE table_schema='public' AND table_name='candidatura_historico'
+       ORDER BY ordinal_position`
+    );
+    res.json({ ok: true, colunas: cols.rows });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
