@@ -5948,6 +5948,7 @@ process.on('unhandledRejection', (e) => {
       }
     });
 
+    // ping test: 1785206962.7014055
     // FIX C3 (2026-07-27): rota /api/_teste/email REMOVIDA.
     // Era pública sem auth — atacante podia mandar e-mail arbitrário pelo nosso domínio.
     // Pra testar envio de e-mail em prod, use uma rota admin com auth + restrição por domínio.
