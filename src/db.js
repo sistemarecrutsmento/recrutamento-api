@@ -463,7 +463,15 @@ async function init() {
       console.error('[MIGRATION 009] Erro não tratado (mas segui):', migrationErr.message);
     }
 
-    console.log('Tabelas criadas/verificadas + migrations Fase 1-009 aplicadas');
+    // Migration 010 (28/07/2026) — Fase 13: E-mail transacional (preferências + outbox)
+    try {
+      const { up: migration010 } = require('./migrations/010_email_fase13');
+      await migration010();
+    } catch (migrationErr) {
+      console.error('[MIGRATION 010] Erro não tratado (mas segui):', migrationErr.message);
+    }
+
+    console.log('Tabelas criadas/verificadas + migrations Fase 1-010 aplicadas');
   } finally {
     client.release();
   }
