@@ -6719,6 +6719,67 @@ process.on('unhandledRejection', (e) => {
   // Agora a empresa cliente também consome /api/empresa/* com filtro de tenant.
   // IMPORTANTE: registrado ANTES do handler 404 global (linha abaixo), senão as rotas
   // novas nunca são alcançadas — Express processa middlewares em ordem.
+// POST /api/empresa/candidatura/:id/proposta — Envia proposta ao candidato
+app.post('/api/empresa/candidatura/:id/proposta', requireRecrutadorOuAdmin, async (req, res) => {
+  const { empresa_id } = req.user;
+  const candId = Number(req.params.id);
+  try {
+    const { texto, pdf_url, pdf_public_id } = req.body || {};
+    if (!texto && !pdf_url) {
+      return res.status(400).json({ erro: 'Envie um texto ou uma URL do PDF da proposta' });
+    }
+    const { rows: c } = await pool.query(`
+      SELECT c.*, v.titulo, cd.nome, cd.email, cd.id AS candidato_id_full
+      FROM candidaturas c
+      JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.empresa_id = $1
+      JOIN vagas v ON v.id = c.vaga_id
+      JOIN candidatos cd ON cd.id = c.candidato_id
+      WHERE c.id = $2
+    `, [empresa_id, candId]);
+    if (c.length === 0) return res.status(403).json({ erro: 'Sem acesso a esta candidatura' });
+    const cand = c[0];
+    if (cand.proposta_enviada_em) return res.status(409).json({ erro: 'Proposta já enviada para este candidato' });
+    if (['contratado','rejeitado','reprovado'].includes(cand.status)) {
+      return res.status(409).json({ erro: `Candidatura já está "${cand.status}"` });
+    }
+    const historico = Array.isArray(cand.historico) ? [...cand.historico] : [];
+    historico.push({
+      etapa: cand.etapa_atual, status: 'proposta_enviada', acao: 'enviar_proposta',
+      mensagem: 'Proposta enviada ao candidato pela empresa',
+      data: new Date().toISOString(),
+      por: `empresa:${req.user.nome || empresa_id}`
+    });
+    await pool.query(
+      `UPDATE candidaturas
+       SET proposta_texto=$1, proposta_pdf_url=$2, proposta_pdf_public_id=$3,
+           proposta_enviada_em=NOW(), historico=$4, atualizada_em=NOW()
+       WHERE id=$5`,
+      [texto||null, pdf_url||null, pdf_public_id||null, JSON.stringify(historico), candId]
+    );
+    // Notificação candidato
+    inserirNotificacao(pool, 'candidato', cand.candidato_id, 'proposta_enviada',
+      `Voce recebeu uma proposta — ${cand.titulo}`,
+      'Acesse sua candidatura para visualizar e responder',
+      { referencia_tipo: 'candidatura', referencia_id: candId }
+    );
+    // E-mail background
+    try {
+      enviarEmailBg(enviarEmailProposta, cand.email, cand.nome, cand.titulo, pdf_url||null);
+      emailSvc.bgPropostaEnviada({
+        candidato_id: cand.candidato_id, email: cand.email, nome: cand.nome,
+        vaga_titulo: cand.titulo, empresa_nome: cand.empresa || req.user.empresa_nome || 'Empresa',
+        resumo: texto ? texto.substring(0,200) : null, candidatura_id: candId
+      });
+    } catch (e) { console.error('[empresa proposta email]', e.message); }
+    await audit(req, 'empresa.proposta.sent', { resource_type: 'candidatura', resource_id: candId });
+    analytics.bg({ evento: 'proposta_enviada', user_type: 'empresa', empresa_id, candidatura_id: candId, ...analytics.fromReq(req) });
+    res.json({ ok: true, proposta: { texto, pdf_url: pdf_url||null } });
+  } catch (e) {
+    return erroInterno(req, res, e, 'api-empresa-candidatura-proposta');
+  }
+});
+
+
   const { registrar: registrarEmpresaExtra } = require('./routes/empresa_extra');
   registrarEmpresaExtra(app, { pool });
 
