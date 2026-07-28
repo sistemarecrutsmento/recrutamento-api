@@ -487,18 +487,7 @@ app.post('/api/ci/admin-token', async (req, res) => {
 });
 
 // DEBUG FASE 6 — versão top-level (não depende do wrapper async)
-app.get('/api/_debug/fase6', async (req, res) => {
-  try {
-    const cols = await pool.query(
-      `SELECT column_name FROM information_schema.columns
-       WHERE table_schema='public' AND table_name='candidatura_historico'
-       ORDER BY ordinal_position`
-    );
-    res.json({ ok: true, build: 'top-level', colunas: cols.rows.map(r => r.column_name) });
-  } catch (e) {
-    res.status(500).json({ erro: e.message });
-  }
-});
+// /api/_debug/fase6 removido (dados internos de schema)
 
 // ETAPA 2: rota pública para diagnóstico de deploy (sem info sensível)
 app.get('/api/_build', (req, res) => res.json({
