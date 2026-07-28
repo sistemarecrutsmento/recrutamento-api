@@ -1,49 +1,136 @@
-# Recrutamento e Seleção — Backend
+# Vagas.io — Backend API
 
-API em Node.js + Express + PostgreSQL.
+Sistema de recrutamento B2B SaaS multi-tenant. Conecta empresas a candidatos com fluxo completo de seleção.
 
-## Variáveis de ambiente (.env)
+## Stack
 
-- `PORT` — porta (Render define automático)
-- `DATABASE_URL` — string de conexão do Postgres (Render fornece)
-- `JWT_SECRET` — chave aleatória longa
-- `EMAIL_FROM` — e-mail remetente
-- `EMAIL_APP_PASSWORD` — senha de app do Gmail
-- `SISTEMA_NOME` — nome exibido nos e-mails
-- `CORS_ORIGIN` — origens permitidas (separadas por vírgula)
-- `ADMIN_SENHA` — senha inicial do admin (criado no primeiro start)
+- **Runtime:** Node.js 18.20.4
+- **Framework:** Express 4.x
+- **Banco:** PostgreSQL (Render Managed)
+- **Auth:** JWT + Refresh Tokens + 2FA (admin) + OTP e-mail (candidato) + TOTP (empresa)
+- **E-mail:** Resend API
+- **Upload:** Cloudinary
+- **Video/Meet:** Google Calendar API
 
-## Endpoints principais
+## Arquitetura
 
-### Candidato
-- `POST /api/candidato/iniciar` — { email } → envia código
-- `POST /api/candidato/verificar` — { email, codigo } → devolve token
-- `POST /api/candidato/cadastrar` — salva perfil completo
-- `GET /api/candidato/perfil` — pega perfil
-- `GET /api/candidato/candidaturas` — lista candidaturas
-- `POST /api/candidato/candidatar/:vagaId` — se candidata
+```
+/api/candidato/*    candidato autenticado
+/api/empresa/*      empresa (admin, recrutador, viewer)
+/api/saas/*         SaaS admin global
+/api/admin/*        admin legado + operações gerais
+/api/public/*       portal público (sem auth)
+/api/analytics/*    eventos analytics
+/api/notificacoes/* notificações in-app
+/api/auth/*         login empresa + refresh tokens
+/api/saude          health check + DB status
+/api/ci/*           CI bypass (apenas NODE_ENV != production)
+```
 
-### Vagas (público)
-- `GET /api/vagas` — lista (filtros: cidade, area, tipo, nivel, busca)
-- `GET /api/vagas/:id` — detalhe
+## Fases implementadas
 
-### Admin/Recrutador
-- `POST /api/admin/login` — { email, senha }
-- `GET /api/admin/dashboard` — KPIs + processos + ranking
-- `POST /api/admin/vagas` — cria vaga
-- `GET /api/admin/vagas` — lista vagas
-- `GET /api/admin/candidatos` — lista candidatos
-- `GET /api/admin/candidaturas` — lista candidaturas
-- `GET /api/admin/candidatura/:id` — detalhe
-- `POST /api/admin/candidatura/:id/status` — atualiza status
-- `POST /api/admin/recrutadores` — cria recrutador
-- `GET /api/admin/recrutadores` — lista recrutadores
+| Fase | Descrição |
+|------|-----------|
+| 1 | Multi-tenant, isolamento por empresa |
+| 2 | RBAC (admin_empresa, recrutador, viewer) |
+| 3 | Vagas + candidaturas básicas |
+| 4 | RBAC refinado + testes E2E |
+| 5 | Portal público (slug, vagas públicas) |
+| 6 | Fluxo de candidatura com timeline |
+| 7 | Notificações in-app |
+| 8 | Multi-tenant completo |
+| 9 | Planos + onboarding |
+| 10 | Auth avançado (refresh, sessões, 2FA) |
+| 11 | Busca + tags + favoritos + match |
+| 12 | Chat em processo |
+| 13 | E-mail transacional (Resend) |
+| 14 | Analytics + auditoria + PWA |
+| 15 | CI/CD + documentação + qualidade |
 
-### Util
-- `GET /api/saude` — health check
-- `GET /api/cep/:cep` — busca CEP (ViaCEP)
- 
----
-Updated: Fri Jul 17 03:37:39 UTC 2026
+## Instalação local
 
-<!-- rebuild trigger -->
+```bash
+git clone https://github.com/sistemarecrutsmento/recrutamento-api
+cd recrutamento-api
+npm ci
+cp .env.example .env
+# Preencher .env com valores reais
+npm start
+```
+
+## Variáveis de ambiente
+
+Ver `.env.example` para lista completa.
+
+Obrigatórias:
+- `DATABASE_URL` — PostgreSQL connection string
+- `JWT_SECRET` — chave aleatória 64+ chars
+- `RESEND_API_KEY` — envio de e-mails
+- `NODE_ENV` — `development` ou `production`
+
+## Testes
+
+```bash
+# A partir do workspace raiz (não do repo)
+python3 _scripts/test_fase8.py
+python3 _scripts/test_fase9.py
+python3 _scripts/test_fase10.py
+python3 _scripts/test_fase11.py
+python3 _scripts/test_fase13.py
+python3 _scripts/test_fase14.py
+python3 _scripts/test_migrations.py
+bash   _scripts/test_fase15.sh
+
+# Detector de rotas duplicadas
+python3 _scripts/check_routes.py
+```
+
+Para testes com admin token sem 2FA (CI):
+```bash
+export CI_ADMIN_SECRET=<segredo>
+python3 _scripts/test_fase14.py
+```
+
+## Deploy
+
+Ver `docs/deploy.md`.
+
+## Documentação
+
+| Arquivo | Descrição |
+|---------|-----------|
+| `docs/api.md` | Referência de endpoints (202 rotas) |
+| `docs/rbac.md` | Matriz de permissões por papel |
+| `docs/deploy.md` | Guia de deploy (Render + GitHub Pages) |
+| `docs/database.md` | Entidades e relacionamentos |
+
+## CI/CD
+
+GitHub Actions em `.github/workflows/ci.yml`.
+
+Jobs:
+- `syntax` — sintaxe JS + rotas duplicadas + npm audit
+- `tests` — E2E Fases 8-15 (usa `CI_ADMIN_SECRET` para eliminar skips de 2FA)
+- `smoke` — health check de produção (apenas push em `main`)
+
+Secret necessário no GitHub: `CI_ADMIN_SECRET`
+
+## Estrutura
+
+```
+src/
+  server.js           app principal (202 rotas)
+  auth.js             middlewares de autenticação
+  token.js            JWT + refresh tokens
+  db.js               pool PostgreSQL + 11 migrations
+  audit.js            logs imutáveis
+  twoFactor.js        2FA por e-mail
+  totp.js             TOTP (app autenticador)
+  analyticsService.js eventos analytics
+  email.js            e-mail SMTP
+  email/
+    emailService.js   Resend + templates
+    templates.js      HTML templates
+  migrations/
+    001 a 011         migrations idempotentes
+```
