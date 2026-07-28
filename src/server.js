@@ -6578,7 +6578,127 @@ process.on('unhandledRejection', (e) => {
   const { registrar: registrarEmpresaExtra } = require('./routes/empresa_extra');
   registrarEmpresaExtra(app, { pool });
 
+  // =========================================================================
+  // FASE 9 — Rotas de planos (público), perfil empresa (tenant) e onboarding
+  // =========================================================================
 
+  // GET /api/planos — lista pública de planos ativos
+  app.get('/api/planos', async (req, res) => {
+    try {
+      const { rows } = await pool.query(
+        `SELECT id, slug, nome, descricao, preco_mensal,
+                limite_vagas, limite_usuarios, limite_candidaturas_mes, destaque
+         FROM planos WHERE ativo = true ORDER BY preco_mensal ASC`
+      );
+      res.json({ planos: rows });
+    } catch (e) {
+      console.error('[PLANOS]', e);
+      res.status(500).json({ erro: 'Erro ao listar planos' });
+    }
+  });
+
+  // GET /api/empresa/minha-empresa — perfil completo da empresa logada
+  app.get('/api/empresa/minha-empresa', requireEmpresaViewer, async (req, res) => {
+    try {
+      const { empresa_id } = req.user;
+      const { rows } = await pool.query(
+        `SELECT e.id, e.nome, e.slug, e.cnpj, e.email_principal, e.telefone,
+                e.descricao, e.cidade, e.estado, e.site, e.setor, e.tamanho,
+                e.logo_url, e.cor_destaque, e.ativo, e.criado_em,
+                e.onboarding_step,
+                p.id AS plano_id, p.slug AS plano_slug, p.nome AS plano_nome,
+                p.preco_mensal, p.limite_vagas, p.limite_usuarios,
+                p.limite_candidaturas_mes
+         FROM empresas e
+         LEFT JOIN planos p ON p.id = e.plano_id
+         WHERE e.id = $1`, [empresa_id]
+      );
+      if (rows.length === 0) return res.status(404).json({ erro: 'Empresa não encontrada' });
+      res.json({ empresa: rows[0] });
+    } catch (e) {
+      console.error('[MINHA-EMPRESA GET]', e);
+      res.status(500).json({ erro: 'Erro ao buscar empresa' });
+    }
+  });
+
+  // PUT /api/empresa/minha-empresa — atualiza perfil da empresa logada
+  app.put('/api/empresa/minha-empresa', requireRecrutadorOuAdmin, async (req, res) => {
+    try {
+      const { empresa_id } = req.user;
+      const {
+        nome, descricao, cidade, estado, site, setor, tamanho,
+        telefone, email_principal, logo_url, cor_destaque
+      } = req.body || {};
+      const { rows } = await pool.query(
+        `UPDATE empresas SET
+          nome            = COALESCE($1, nome),
+          descricao       = COALESCE($2, descricao),
+          cidade          = COALESCE($3, cidade),
+          estado          = COALESCE($4, estado),
+          site            = COALESCE($5, site),
+          setor           = COALESCE($6, setor),
+          tamanho         = COALESCE($7, tamanho),
+          telefone        = COALESCE($8, telefone),
+          email_principal = COALESCE($9, email_principal),
+          logo_url        = COALESCE($10, logo_url),
+          cor_destaque    = COALESCE($11, cor_destaque)
+         WHERE id = $12
+         RETURNING id, nome, slug, descricao, cidade, estado, site, setor, tamanho,
+                   logo_url, cor_destaque, email_principal, telefone, onboarding_step`,
+        [nome, descricao, cidade, estado, site, setor, tamanho,
+         telefone, email_principal, logo_url, cor_destaque, empresa_id]
+      );
+      res.json({ ok: true, empresa: rows[0] });
+    } catch (e) {
+      console.error('[MINHA-EMPRESA PUT]', e);
+      res.status(500).json({ erro: 'Erro ao atualizar empresa' });
+    }
+  });
+
+  // POST /api/empresa/onboarding/step — avança o step de onboarding da empresa
+  app.post('/api/empresa/onboarding/step', requireRecrutadorOuAdmin, async (req, res) => {
+    try {
+      const { empresa_id } = req.user;
+      const { step } = req.body || {};
+      if (typeof step !== 'number') return res.status(400).json({ erro: 'step inválido' });
+      await pool.query(
+        `UPDATE empresas SET onboarding_step = GREATEST(onboarding_step, $1) WHERE id = $2`,
+        [step, empresa_id]
+      );
+      res.json({ ok: true, step });
+    } catch (e) {
+      res.status(500).json({ erro: 'Erro ao avançar onboarding' });
+    }
+  });
+
+  // POST /api/candidato/onboarding/step — avança step de onboarding do candidato
+  app.post('/api/candidato/onboarding/step', authCandidato, async (req, res) => {
+    try {
+      const { step } = req.body || {};
+      if (typeof step !== 'number') return res.status(400).json({ erro: 'step inválido' });
+      const { rows: c } = await pool.query('SELECT id FROM candidatos WHERE email = $1', [req.user.email]);
+      if (c.length === 0) return res.status(404).json({ erro: 'Candidato não encontrado' });
+      await pool.query(
+        `UPDATE candidatos SET onboarding_step = GREATEST(onboarding_step, $1) WHERE id = $2`,
+        [step, c[0].id]
+      );
+      res.json({ ok: true, step });
+    } catch (e) {
+      res.status(500).json({ erro: 'Erro ao avançar onboarding' });
+    }
+  });
+
+  // GET /api/candidato/onboarding — retorna step atual do candidato
+  app.get('/api/candidato/onboarding', authCandidato, async (req, res) => {
+    try {
+      const { rows } = await pool.query(
+        'SELECT onboarding_step FROM candidatos WHERE email = $1', [req.user.email]
+      );
+      res.json({ step: rows[0]?.onboarding_step ?? 0 });
+    } catch (e) {
+      res.status(500).json({ erro: 'Erro' });
+    }
+  });
 
   const port = process.env.PORT || 10000;
 
