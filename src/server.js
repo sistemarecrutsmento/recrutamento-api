@@ -6703,6 +6703,56 @@ process.on('unhandledRejection', (e) => {
     }
   });
 
+  // ─── SaaS Admin: Gestão Global de Empresas ────────────────────────────────
+
+  // GET /api/saas/empresas — lista todas as empresas (admin global)
+  app.get('/api/saas/empresas', authAdmin, async (req, res) => {
+    try {
+      const { rows } = await pool.query(`
+        SELECT e.id, e.nome, e.slug, e.cnpj, e.email_principal, e.telefone,
+               e.ativo, e.plano, e.plano_id, e.onboarding_step, e.criado_em,
+               p.nome AS plano_nome, p.slug AS plano_slug,
+               COUNT(DISTINCT v.id) FILTER (WHERE v.status='publicada') AS total_vagas,
+               COUNT(DISTINCT c.id) AS total_candidaturas
+        FROM empresas e
+        LEFT JOIN planos p ON p.id = e.plano_id
+        LEFT JOIN vagas v ON v.empresa_id = e.id
+        LEFT JOIN candidaturas c ON c.vaga_id = v.id
+        GROUP BY e.id, p.id
+        ORDER BY e.criado_em DESC
+      `);
+      res.json({ empresas: rows });
+    } catch (e) {
+      console.error('[SAAS/EMPRESAS GET]', e);
+      res.status(500).json({ erro: 'Erro ao listar empresas' });
+    }
+  });
+
+  // PUT /api/saas/empresas/:id — atualiza empresa (admin global)
+  app.put('/api/saas/empresas/:id', authAdmin, async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { ativo, plano, plano_id } = req.body || {};
+      const updates = [];
+      const vals = [];
+      let idx = 1;
+      if (typeof ativo === 'boolean') { updates.push(`ativo = $${idx++}`); vals.push(ativo); }
+      if (plano !== undefined) { updates.push(`plano = $${idx++}`); vals.push(plano); }
+      if (plano_id !== undefined) { updates.push(`plano_id = $${idx++}`); vals.push(plano_id); }
+      if (updates.length === 0) return res.status(400).json({ erro: 'Nada a atualizar' });
+      vals.push(id);
+      const { rows } = await pool.query(
+        `UPDATE empresas SET ${updates.join(', ')} WHERE id = $${idx} RETURNING id, nome, ativo, plano`,
+        vals
+      );
+      if (rows.length === 0) return res.status(404).json({ erro: 'Empresa não encontrada' });
+      res.json({ ok: true, empresa: rows[0] });
+    } catch (e) {
+      console.error('[SAAS/EMPRESAS PUT]', e);
+      res.status(500).json({ erro: 'Erro ao atualizar empresa' });
+    }
+  });
+
   const port = process.env.PORT || 10000;
 
   // =========================================================================
