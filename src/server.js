@@ -1658,6 +1658,29 @@ app.post('/api/candidato/candidatar/:vagaId', authCandidato, async (req, res) =>
       console.error('[candidatar] Falha ao enviar e-mail de inscrição:', e.message);
     }
     await audit(req, 'candidatura.created', { resource_type: 'candidatura', resource_id: rows[0].id, metadata: { vaga_id: req.params.vagaId, etapa: 0 } });
+
+    // FASE 7 — notificação no feed global (nova candidatura)
+    try {
+      const { rows: v } = await pool.query(
+        'SELECT titulo, empresa_id FROM vagas WHERE id = $1', [req.params.vagaId]
+      );
+      if (v.length > 0) {
+        const { rows: cd } = await pool.query('SELECT nome FROM candidatos WHERE id = $1', [c[0].id]);
+        inserirNotificacao(pool, v[0].empresa_id, 'candidatura_criada',
+          `🆕 Nova candidatura: ${cd[0]?.nome || 'Candidato'}`,
+          {
+            vaga_id: req.params.vagaId, candidatura_id: rows[0].id,
+            resumo: v[0].titulo ? `Vaga: ${v[0].titulo}` : null,
+            link: `analisar.html?id=${rows[0].id}`,
+            actor_id: c[0].id, actor_tipo: 'candidato',
+            actor_nome: req.user.email, actor_role: 'candidato'
+          }
+        );
+      }
+    } catch (e) {
+      console.error('[FASE7] Falha ao criar notificação de candidatura:', e.message);
+    }
+
     res.json({ ok: true, candidatura: rows[0] });
   } catch (e) {
     if (e.code === '23505') return res.status(400).json({ erro: 'Você já se candidatou a esta vaga' });
@@ -3192,6 +3215,19 @@ app.post('/api/admin/candidatura/:id/aprovar-documentos', authAdmin, async (req,
       [novoStatus, novaEtapa, JSON.stringify(historico), candId]
     );
 
+    // FASE 7 — notificação no feed global
+    inserirNotificacao(pool, cand.empresa_id, 'docs_aprovados',
+      `Documentação aprovada${novoStatus === 'contratado' ? ' — candidato CONTRATADO' : ' — avançou etapa'}`,
+      {
+        vaga_id: cand.vaga_id, candidatura_id: candId,
+        resumo: `${cand.nome || 'Candidato'} · etapa ${novaEtapa}`,
+        link: `analisar.html?id=${candId}`,
+        actor_id: req.user.id, actor_tipo: 'empresa',
+        actor_nome: req.user.nome, actor_role: req.user.role,
+        metadata: { etapa_nova: novaEtapa, status_novo: novoStatus }
+      }
+    );
+
     // 6) Notificar candidato (em background — não trava a resposta)
     try {
       // Pega o nome da etapa atual da vaga
@@ -3609,6 +3645,29 @@ app.post('/api/admin/candidatura/:id/status', authAdmin, async (req, res) => {
     'UPDATE candidaturas SET status = $1, etapa_atual = $2, historico = $3, observacoes_etapas = $4 WHERE id = $5',
     [novoStatus, novaEtapa, JSON.stringify(historico), JSON.stringify(observacoes), req.params.id]
   );
+
+  // FASE 7 — notificação no feed global (ação manual do admin/recrutador)
+  {
+    const tipoNotif =
+      acao === 'reprovar' ? 'candidato_reprovado' :
+      acao === 'reabrir'  ? 'candidato_reaberto'  :
+      novoStatus === 'contratado' ? 'candidato_contratado' :
+      etapaMudou ? 'etapa_avancada' : 'status_alterado';
+    const tituloNotif =
+      acao === 'reprovar' ? `❌ ${cand.nome || 'Candidato'} foi reprovado` :
+      acao === 'reabrir'  ? `🔓 ${cand.nome || 'Candidato'} foi reaberto` :
+      novoStatus === 'contratado' ? `🎉 ${cand.nome || 'Candidato'} CONTRATADO` :
+      etapaMudou ? `⬆ ${cand.nome || 'Candidato'} avançou para etapa ${novaEtapa + 1}` :
+      `🔄 Status alterado: ${cand.nome || 'Candidato'} → ${novoStatus}`;
+    inserirNotificacao(pool, cand.empresa_id, tipoNotif, tituloNotif, {
+      vaga_id: cand.vaga_id, candidatura_id: req.params.id,
+      resumo: cand.titulo ? `${cand.titulo} · etapa ${novaEtapa}` : null,
+      link: `analisar.html?id=${req.params.id}`,
+      actor_id: req.user.id, actor_tipo: 'empresa',
+      actor_nome: req.user.nome, actor_role: req.user.role,
+      metadata: { acao, etapa_anterior: cand.etapa_atual, etapa_nova: novaEtapa, status_anterior: cand.status, status_novo: novoStatus }
+    });
+  }
 
   if (mensagem) {
     await pool.query(
@@ -4031,6 +4090,19 @@ app.post('/api/admin/candidatura/:id/enviar-proposta', authAdmin, async (req, re
     [texto || null, pdfFinalUrl, pdfFinalId, JSON.stringify(historico), req.params.id]
   );
 
+  // FASE 7 — notificação no feed global
+  inserirNotificacao(pool, cand.empresa_id, 'proposta_enviada',
+    `📨 Proposta enviada: ${cand.nome || 'Candidato'}`,
+    {
+      vaga_id: cand.vaga_id, candidatura_id: req.params.id,
+      resumo: cand.titulo ? `Vaga: ${cand.titulo}` : null,
+      link: `analisar.html?id=${req.params.id}`,
+      actor_id: req.user.id, actor_tipo: 'empresa',
+      actor_nome: req.user.nome, actor_role: req.user.role,
+      metadata: { tem_pdf: !!pdfFinalUrl }
+    }
+  );
+
   // Notifica o candidato por e-mail (em background — não trava a resposta)
   try {
     enviarEmailBg(enviarEmailProposta, cand.email, cand.nome, cand.titulo, pdfFinalUrl);
@@ -4098,6 +4170,19 @@ app.post('/api/candidato/aceitar-proposta/:candidaturaId', authCandidato, async 
     [JSON.stringify(historico), req.params.candidaturaId]
   );
 
+  // FASE 7 — notificação no feed global
+  inserirNotificacao(pool, cand.empresa_id, 'proposta_aceita',
+    `✅ ${cand.nome || 'Candidato'} ACEITOU a proposta`,
+    {
+      vaga_id: cand.vaga_id, candidatura_id: req.params.candidaturaId,
+      resumo: `Próxima etapa: Coleta de Documentos`,
+      link: `analisar.html?id=${req.params.candidaturaId}`,
+      actor_id: null, actor_tipo: 'candidato',
+      actor_nome: cand.cand_email, actor_role: 'candidato',
+      metadata: { etapa_anterior: 5, etapa_nova: 6 }
+    }
+  );
+
   // Notifica o candidato por e-mail (em background)
   try {
     enviarEmailBg(enviarEmailAtualizacao, cand.cand_email, 'Candidato', cand.titulo, {
@@ -4161,6 +4246,18 @@ app.post('/api/candidatura/:id/desistir', authCandidato, async (req, res) => {
     [JSON.stringify(historico), req.params.id]
   );
 
+  // FASE 7 — notificação no feed global
+  inserirNotificacao(pool, cand.empresa_id, 'candidato_desistiu',
+    `🚪 ${cand.nome || 'Candidato'} desistiu da vaga`,
+    {
+      vaga_id: cand.vaga_id, candidatura_id: req.params.id,
+      resumo: cand.titulo ? `Vaga: ${cand.titulo}` : null,
+      link: `analisar.html?id=${req.params.id}`,
+      actor_id: null, actor_tipo: 'candidato',
+      actor_nome: cand.cand_email, actor_role: 'candidato'
+    }
+  );
+
   res.json({ ok: true, mensagem: 'Você desistiu da vaga com sucesso.' });
 });
 
@@ -4199,6 +4296,19 @@ app.post('/api/candidato/recusar-proposta/:candidaturaId', authCandidato, async 
          historico = $2
      WHERE id = $3`,
     [motivo || null, JSON.stringify(historico), req.params.candidaturaId]
+  );
+
+  // FASE 7 — notificação no feed global
+  inserirNotificacao(pool, cand.empresa_id, 'proposta_recusada',
+    `❌ ${cand.nome || 'Candidato'} RECUSOU a proposta`,
+    {
+      vaga_id: cand.vaga_id, candidatura_id: req.params.candidaturaId,
+      resumo: motivo ? `Motivo: ${motivo}` : null,
+      link: `analisar.html?id=${req.params.candidaturaId}`,
+      actor_id: null, actor_tipo: 'candidato',
+      actor_nome: cand.cand_email, actor_role: 'candidato',
+      metadata: { motivo }
+    }
   );
 
   // Notifica o candidato por e-mail (em background)
@@ -5827,6 +5937,85 @@ app.get('/api/empresa/candidaturas/:id/historico', requireEmpresaViewer, async (
   } catch (e) {
     console.error('[empresa/candidaturas/:id/historico]', e);
     res.status(500).json({ erro: 'Erro ao buscar histórico' });
+  }
+});
+
+// ============= NOTIFICAÇÕES GLOBAIS (FASE 7) =============
+// Feed da empresa logada + 4 KPIs.
+// Cada KPI é um link inteligente (?tipo=X) que filtra o feed por tipo.
+// KPIS: candidatura_criada (novos candidatos), etapa_avancada (movimentações),
+//       proposta_aceita, proposta_recusada (decisões sobre propostas).
+app.get('/api/admin/notificacoes', authAdmin, async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+    const { tipo, limit: limitQ } = req.query;
+    const limit = Math.min(parseInt(limitQ) || 30, 100);
+
+    // 1) Feed filtrado
+    const params = [empresa_id];
+    let sql = `
+      SELECT n.id, n.tipo, n.titulo, n.resumo, n.link, n.criado_em,
+             n.actor_tipo, n.actor_nome, n.actor_role, n.lida_em,
+             n.candidatura_id, n.vaga_id,
+             v.titulo AS vaga_titulo,
+             c.nome AS candidato_nome
+        FROM notificacoes n
+        LEFT JOIN vagas v ON v.id = n.vaga_id
+        LEFT JOIN candidaturas cu ON cu.id = n.candidatura_id
+        LEFT JOIN candidatos c ON c.id = cu.candidato_id
+       WHERE n.empresa_id = $1
+    `;
+    if (tipo) { params.push(tipo); sql += ` AND n.tipo = $${params.length}`; }
+    sql += ` ORDER BY n.criado_em DESC LIMIT ${limit}`;
+    const { rows: feed } = await pool.query(sql, params);
+
+    // 2) KPIs (contadores totais por tipo, sem filtro de lida)
+    const kpiParams = [empresa_id];
+    const kpiSql = `
+      SELECT n.tipo, COUNT(*)::int AS total
+        FROM notificacoes n
+       WHERE n.empresa_id = $1
+       GROUP BY n.tipo
+    `;
+    const { rows: kpis } = await pool.query(kpiSql, kpiParams);
+
+    const mapa = Object.fromEntries(kpis.map(k => [k.tipo, k.total]));
+    const resultado = {
+      feed,
+      kpis: {
+        novos_candidatos: mapa.candidatura_criada || 0,
+        movimentos: (mapa.etapa_avancada || 0) + (mapa.docs_aprovados || 0) + (mapa.status_alterado || 0),
+        propostas_aceitas: mapa.proposta_aceita || 0,
+        propostas_recusadas: mapa.proposta_recusada || 0,
+        // Links inteligentes que o frontend usa
+        links: {
+          novos_candidatos:   'notificacoes.html?tipo=candidatura_criada',
+          movimentos:         'notificacoes.html?tipo=etapa_avancada',
+          propostas_aceitas:  'notificacoes.html?tipo=proposta_aceita',
+          propostas_recusadas:'notificacoes.html?tipo=proposta_recusada'
+        }
+      },
+      empresa_id
+    };
+    res.json(resultado);
+  } catch (e) {
+    console.error('[admin/notificacoes]', e);
+    res.status(500).json({ erro: 'Erro ao carregar notificações' });
+  }
+});
+
+// Marca todas as notificações da empresa como lidas
+app.post('/api/admin/notificacoes/marcar-lidas', authAdmin, async (req, res) => {
+  try {
+    const r = await pool.query(
+      `UPDATE notificacoes SET lida_em = NOW()
+        WHERE empresa_id = $1 AND lida_em IS NULL`,
+      [req.user.empresa_id]
+    );
+    res.json({ ok: true, marcadas: r.rowCount });
+  } catch (e) {
+    console.error('[admin/notificacoes/marcar-lidas]', e);
+    res.status(500).json({ erro: 'Erro ao marcar notificações como lidas' });
   }
 });
 
