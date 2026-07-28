@@ -179,8 +179,10 @@ async function metricasEmpresa({ empresa_id, periodo_inicio, periodo_fim, vaga_i
     pool.query(`SELECT COUNT(*) c ${base} AND evento = 'candidatura_enviada'${vagaFilter}`, argsVaga),
     pool.query(`
       SELECT ae.vaga_id, v.titulo, COUNT(*) cnt
-      ${base} AND ae.evento = 'vaga_visualizada' AND ae.vaga_id IS NOT NULL
+      FROM analytics_eventos ae
       LEFT JOIN vagas v ON v.id = ae.vaga_id
+      WHERE ae.empresa_id = $1 AND ae.criado_em BETWEEN $2 AND $3
+        AND ae.evento = 'vaga_visualizada' AND ae.vaga_id IS NOT NULL
       GROUP BY ae.vaga_id, v.titulo ORDER BY cnt DESC LIMIT 10
     `, args),
     pool.query(`
