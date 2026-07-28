@@ -392,7 +392,19 @@ async function init() {
       console.error('[MIGRATION 003] Erro não tratado (mas segui):', migrationErr.message);
     }
 
-    console.log('Tabelas criadas/verificadas + migrations Fase 1 + 002 + 003 aplicadas');
+    // Migration 004 (28/07/2026) — tabela append-only `candidatura_historico`
+    // (Fase 6 — fluxo completo + histórico de etapas).
+    try {
+      const { aplicar: aplicarMigration004 } = require('./migrations/004_candidatura_historico_fase6');
+      const r4 = await aplicarMigration004();
+      if (!r4.ok) {
+        console.error('[MIGRATION 004] Falha (mas segui):', r4.erro);
+      }
+    } catch (migrationErr) {
+      console.error('[MIGRATION 004] Erro não tratado (mas segui):', migrationErr.message);
+    }
+
+    console.log('Tabelas criadas/verificadas + migrations Fase 1 + 002 + 003 + 004 aplicadas');
   } finally {
     client.release();
   }
