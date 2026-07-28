@@ -5720,7 +5720,8 @@ app.patch('/api/empresa/candidaturas/:id/etapa', requireRecrutadorOuAdmin, async
     });
 
     // FASE 6 — Grava também na tabela append-only `candidatura_historico`
-    // (transação atômica: histórico + update)
+    // (transação atômica: histórico + update).
+    // etapa_nova e status_novo são NOT NULL — sempre populados (mesmo que iguais ao anterior).
     await pool.query('BEGIN');
     try {
       if (etapaMudou || statusMudou) {
@@ -5736,10 +5737,10 @@ app.patch('/api/empresa/candidaturas/:id/etapa', requireRecrutadorOuAdmin, async
             Number(id),
             cand.vaga_id,
             empresa_id,
-            etapaMudou ? cand.etapa_atual : null,
-            etapaMudou ? novaEtapa : null,
-            statusMudou ? cand.status : null,
-            statusMudou ? novoStatus : null,
+            etapaMudou ? cand.etapa_atual : cand.etapa_atual,        // sempre popula
+            etapaMudou ? novaEtapa : cand.etapa_atual,                // etapa_nova sempre preenchido
+            statusMudou ? cand.status : cand.status,                   // sempre popula
+            statusMudou ? novoStatus : cand.status,                    // status_novo sempre preenchido
             'empresa',
             req.user.id || null,
             empresa_nome || null,
