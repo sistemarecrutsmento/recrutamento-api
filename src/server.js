@@ -376,11 +376,11 @@ app.get('/api/public/empresa/:slug/vagas', async (req, res) => {
       `SELECT
          v.id, v.titulo, v.cidade, v.estado, v.tipo_contrato, v.nivel,
          v.area, v.salario_min, v.salario_max, v.descricao,
-         v.criada_em, v.atualizada_em
+         v.criada_em
        FROM vagas v
        WHERE v.empresa_id = $1
          AND v.status = 'publicada'
-       ORDER BY v.atualizada_em DESC NULLS LAST, v.id DESC`,
+       ORDER BY v.criada_em DESC, v.id DESC`,
       [empresa_id]
     );
 
@@ -412,7 +412,7 @@ app.get('/api/public/empresa/:slug/vagas/:id', async (req, res) => {
          v.id, v.titulo, v.cidade, v.estado, v.tipo_contrato, v.nivel,
          v.area, v.salario_min, v.salario_max,
          v.descricao, v.requisitos, v.beneficios,
-         v.criada_em, v.atualizada_em,
+         v.criada_em,
          e.slug AS empresa_slug, e.nome AS empresa_nome, e.logo_url
        FROM vagas v
        JOIN empresas e ON e.id = v.empresa_id
