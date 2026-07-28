@@ -165,17 +165,7 @@ function registrar(app, ctx) {
     }
   });
 
-  // ===========================================================
-  // GET /api/empresa/dashboard
-  // Dashboard tenant-isolado: KPIs das vagas DA EMPRESA.
-  // ===========================================================
-);
 
-  // ===========================================================
-  // GET /api/empresa/vagas-com-candidaturas
-  // Lista vagas da empresa com contagem de candidaturas.
-  // ===========================================================
-);
 
   // ===========================================================
   // GET /api/empresa/vagas-abertas-antigas
