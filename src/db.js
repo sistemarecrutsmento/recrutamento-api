@@ -415,7 +415,21 @@ async function init() {
       console.error('[MIGRATION 005] Erro não tratado (mas segui):', migrationErr.message);
     }
 
-    console.log('Tabelas criadas/verificadas + migrations Fase 1 + 002 + 003 + 004 + 005 aplicadas');
+    // Migration 006 (28/07/2026) — tabela `planos` + onboarding_step + drop empresa_notificacoes (Fase 9).
+    try {
+      const { aplicar: aplicarMigration006 } = require('./migrations/006_planos_onboarding_fase9');
+      const client6 = await pool.connect();
+      const logs6 = [];
+      try {
+        await aplicarMigration006(client6, (msg) => { logs6.push(msg); console.log('[MIGRATION 006]', msg); });
+      } finally {
+        client6.release();
+      }
+    } catch (migrationErr) {
+      console.error('[MIGRATION 006] Erro não tratado (mas segui):', migrationErr.message);
+    }
+
+    console.log('Tabelas criadas/verificadas + migrations Fase 1-006 aplicadas');
   } finally {
     client.release();
   }
