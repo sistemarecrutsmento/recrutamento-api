@@ -443,7 +443,17 @@ async function init() {
       console.error('[MIGRATION 007] Erro não tratado (mas segui):', migrationErr.message);
     }
 
-    console.log('Tabelas criadas/verificadas + migrations Fase 1-007 aplicadas');
+    // Migration 008 (28/07/2026) — Fase 11: vaga_tags, candidato_favoritos, candidatos.nivel_experiencia/competencias
+    try {
+      const { aplicar: aplicarMigration008 } = require('./migrations/008_busca_tags_favoritos_fase11');
+      const r8 = await aplicarMigration008();
+      if (!r8.ok) console.error('[MIGRATION 008] Falha (mas segui):', r8.erro);
+      else console.log('[MIGRATION 008] OK:', r8.log.join(' | '));
+    } catch (migrationErr) {
+      console.error('[MIGRATION 008] Erro não tratado (mas segui):', migrationErr.message);
+    }
+
+    console.log('Tabelas criadas/verificadas + migrations Fase 1-008 aplicadas');
   } finally {
     client.release();
   }
