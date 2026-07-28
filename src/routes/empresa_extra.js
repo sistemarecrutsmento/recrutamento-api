@@ -15,6 +15,7 @@ const { requireEmpresaViewer, requireRecrutadorOuAdmin } = require('../auth');
 
 function registrar(app, ctx) {
   const { pool } = ctx;
+  console.log('[FASE 8] Registrando 21 rotas /api/empresa/* complementares...');
 
   // ===========================================================
   // GET /api/empresa/candidatos
