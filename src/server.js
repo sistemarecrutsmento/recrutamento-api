@@ -447,6 +447,23 @@ app.get('/api/_debug/fase7-migrar', async (req, res) => {
   }
 });
 
+app.get('/api/_debug/fase7-status', async (req, res) => {
+  try {
+    const cols = await pool.query(
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_schema='public' AND table_name='notificacoes'
+       ORDER BY ordinal_position`
+    );
+    const count = await pool.query('SELECT COUNT(*)::int AS n FROM notificacoes');
+    const sample = await pool.query(
+      'SELECT id, user_type, user_id, tipo, titulo, referencia_tipo, referencia_id, criada_em FROM notificacoes ORDER BY id DESC LIMIT 5'
+    );
+    res.json({ colunas: cols.rows.map(r => r.column_name), total: count.rows[0].n, ultimas: sample.rows });
+  } catch (e) {
+    res.status(500).json({ erro: e.message });
+  }
+});
+
 app.get('/api/_debug/fase6', async (req, res) => {
   try {
     const cols = await pool.query(
