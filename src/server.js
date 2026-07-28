@@ -375,7 +375,7 @@ app.get('/api/public/empresa/:slug/vagas', async (req, res) => {
     const { rows } = await pool.query(
       `SELECT
          v.id, v.titulo, v.cidade, v.estado, v.tipo_contrato, v.nivel,
-         v.area, v.salario_min, v.salario_max, v.modalidade, v.descricao,
+         v.area, v.salario_min, v.salario_max, v.descricao,
          v.criada_em, v.atualizada_em
        FROM vagas v
        WHERE v.empresa_id = $1
@@ -410,7 +410,7 @@ app.get('/api/public/empresa/:slug/vagas/:id', async (req, res) => {
     const { rows } = await pool.query(
       `SELECT
          v.id, v.titulo, v.cidade, v.estado, v.tipo_contrato, v.nivel,
-         v.area, v.salario_min, v.salario_max, v.modalidade,
+         v.area, v.salario_min, v.salario_max,
          v.descricao, v.requisitos, v.beneficios,
          v.criada_em, v.atualizada_em,
          e.slug AS empresa_slug, e.nome AS empresa_nome, e.logo_url
