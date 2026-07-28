@@ -1,0 +1,180 @@
+name: CI — Vagas.io
+
+on:
+  push:
+    branches: [main, develop, "fase-*"]
+  pull_request:
+    branches: [main]
+
+defaults:
+  run:
+    working-directory: .
+
+jobs:
+  # ──────────────────────────────────────────────────────────────
+  # JOB 1: Sintaxe + Qualidade (sem BD, rápido)
+  # ──────────────────────────────────────────────────────────────
+  syntax:
+    name: Sintaxe & Qualidade
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Node.js 18.20.4
+        uses: actions/setup-node@v4
+        with:
+          node-version: "18.20.4"
+          cache: "npm"
+          cache-dependency-path: package-lock.json
+
+      - name: Instalar dependências (npm ci — reprodutível)
+        run: npm ci
+
+      - name: Verificar sintaxe de todos os arquivos JS
+        run: |
+          echo "Verificando sintaxe..."
+          find src -name "*.js" | while read f; do
+            node --check "$f" || { echo "ERRO SINTAXE: $f"; exit 1; }
+          done
+          echo "Sintaxe OK"
+
+      - name: Verificar requires locais existem
+        run: |
+          node -e "
+          const fs=require('fs'), path=require('path');
+          const content=fs.readFileSync('src/server.js','utf8');
+          const reqs=[...content.matchAll(/require\(['\"](\\.[^'\"]+)['\"]\\)/g)].map(m=>m[1]);
+          let ok=true;
+          for(const r of reqs){
+            const base=path.resolve('src',r);
+            const ex=fs.existsSync(base)||fs.existsSync(base+'.js');
+            if(!ex){console.error('FALTA:',r);ok=false;}
+          }
+          if(!ok)process.exit(1);
+          console.log('Requires OK ('+reqs.length+')');
+          "
+
+      - name: Detector de rotas duplicadas
+        run: |
+          python3 -c "
+          import re,sys,collections
+          with open('src/server.js') as f: lines=f.readlines()
+          pat=re.compile(r\"app\\.(get|post|put|delete|patch)\\s*\\(\\s*['\\\"]([^'\\\"]+)['\\\"]\")
+          seen=collections.defaultdict(list)
+          for i,line in enumerate(lines,1):
+              m=pat.search(line)
+              if m: seen[(m.group(1).upper(),m.group(2))].append(i)
+          dups={k:v for k,v in seen.items() if len(v)>1}
+          print(f'Rotas: {len(seen)} | Duplicadas: {len(dups)}')
+          [print(f'  DUP: {m} {p} linhas {l}') for (m,p),l in dups.items()]
+          sys.exit(1 if dups else 0)
+          "
+
+      - name: npm audit (vulnerabilidades críticas)
+        run: npm audit --audit-level=critical
+        continue-on-error: true
+
+  # ──────────────────────────────────────────────────────────────
+  # JOB 2: Testes E2E (Fases 4–15)
+  # ──────────────────────────────────────────────────────────────
+  tests:
+    name: Testes E2E — Fases 4–15
+    runs-on: ubuntu-latest
+    needs: syntax
+    env:
+      API_URL: ${{ vars.API_URL || 'https://recrutamento-api-novo.onrender.com' }}
+      CI_ADMIN_SECRET: ${{ secrets.CI_ADMIN_SECRET }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Aguardar API disponível
+        run: |
+          for i in $(seq 1 6); do
+            S=$(curl -s -o /dev/null -w "%{http_code}" "${API_URL:-https://recrutamento-api-novo.onrender.com}/api/saude")
+            [ "$S" = "200" ] && echo "API ok" && break
+            echo "Tentativa $i status $S, aguardando 15s..."
+            sleep 15
+          done
+          [ "$S" = "200" ] || { echo "API nao respondeu"; exit 1; }
+        env:
+          API_URL: ${{ env.API_URL }}
+
+      - name: Fase 8 — Multi-tenant
+        run: python3 _scripts/test_fase8.py
+        env:
+          API_URL: ${{ env.API_URL }}
+
+      - name: Fase 9 — Planos e Onboarding
+        run: python3 _scripts/test_fase9.py
+        env:
+          API_URL: ${{ env.API_URL }}
+
+      - name: Fase 10 — Auth avançado
+        run: python3 _scripts/test_fase10.py
+        env:
+          API_URL: ${{ env.API_URL }}
+
+      - name: Fase 11 — Busca, Tags e Favoritos
+        run: python3 _scripts/test_fase11.py
+        env:
+          API_URL: ${{ env.API_URL }}
+
+      - name: Fase 13 — E-mail transacional
+        run: python3 _scripts/test_fase13.py
+        env:
+          API_URL: ${{ env.API_URL }}
+
+      - name: Fase 14 — Analytics, Auditoria e PWA
+        run: python3 _scripts/test_fase14.py
+        env:
+          API_URL: ${{ env.API_URL }}
+          CI_ADMIN_SECRET: ${{ secrets.CI_ADMIN_SECRET }}
+
+      - name: Fase 15 — CI/CD e Qualidade
+        run: bash _scripts/test_fase15.sh
+        env:
+          API_URL: ${{ env.API_URL }}
+
+      - name: Migrations — Estrutura e Idempotência
+        run: python3 _scripts/test_migrations.py
+        env:
+          API_URL: ${{ env.API_URL }}
+
+  # ──────────────────────────────────────────────────────────────
+  # JOB 3: Smoke test de produção (push em main apenas)
+  # ──────────────────────────────────────────────────────────────
+  smoke:
+    name: Smoke Test — Produção
+    runs-on: ubuntu-latest
+    needs: tests
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+
+    steps:
+      - name: Health check (API + DB)
+        run: |
+          RESP=$(curl -s "https://recrutamento-api-novo.onrender.com/api/saude")
+          echo "$RESP"
+          python3 -c "
+          import json,sys
+          d=json.loads('$RESP')
+          assert d.get('ok'), 'ok=false'
+          print('API ok, db=' + str(d.get('db')))
+          "
+
+      - name: Portal público acessível
+        run: |
+          S=$(curl -s -o /dev/null -w "%{http_code}" "https://sistemarecrutsmento.github.io/vagas/candidato/")
+          [ "$S" = "200" ] && echo "GitHub Pages ok" || { echo "status $S"; exit 1; }
+
+      - name: Endpoint CI bloqueado em producao
+        run: |
+          S=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+            "https://recrutamento-api-novo.onrender.com/api/ci/admin-token" \
+            -H "Content-Type: application/json" -d '{"secret":"test"}')
+          echo "Status (esperado 404): $S"
+          [ "$S" = "404" ] || { echo "CRITICO: /api/ci/admin-token exposto em producao!"; exit 1; }
+          echo "Endpoint CI bloqueado corretamente"
