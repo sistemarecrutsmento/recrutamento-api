@@ -33,7 +33,8 @@ if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'sua_chave_secreta_aqu
 const { pool, init, inserirNotificacao } = require('./db');
 const { enviarCodigo, enviarNotificacaoStatus, enviarEmailProposta, enviarEmailBg, enviarEmailAtualizacao, enviarEmail, enviarEmailInscricao, getResendKey } = require('./email');
 // Fase 13 — Serviço central de e-mail (usa os mesmos provedores, acrescenta templates, preferências, dedup)
-const emailSvc = require('./email/emailService');
+const emailSvc     = require('./email/emailService');
+const analytics    = require('./analyticsService');
 const meet = require('./meet');
 const { criarAccessToken, criarRefreshToken, persistirRefresh, consumirRefresh, revogarRefresh, revogarTodosPorUsuario, listarSessoes, revogarSessaoById, revogarOutrasSessoes } = require('./token');
 
@@ -941,6 +942,7 @@ app.post('/api/candidato/cadastro', rateLimitLogin, async (req, res) => {
     await persistirRefresh('candidato', rows[0].id, emailLower, refresh, req, { user_role: 'candidato' });
     // Fase 13 — E-mail de boas-vindas (não bloqueia resposta)
     emailSvc.bgBoasVindasCandidato({ candidato_id: rows[0].id, email: emailLower, nome: rows[0].nome });
+    analytics.bg({ evento: 'cadastro_candidato_concluido', user_type: 'candidato', user_id: rows[0].id, ...analytics.fromReq(req) });
     res.json({ ok: true, token: accessToken, refreshToken: refresh, candidato: rows[0] });
   } catch (e) {
     console.error('[CADASTRO ERRO]', e);
@@ -987,6 +989,7 @@ app.post('/api/candidato/login', rateLimitLogin, async (req, res) => {
   const refresh = criarRefreshToken();
   await persistirRefresh('candidato', cand.id, emailLower, refresh, req, { user_role: 'candidato' });
   await audit(req, 'login.success', { resource_type: 'candidato', resource_id: cand.id, user_email: cand.email });
+  analytics.bg({ evento: 'login_candidato', user_type: 'candidato', user_id: cand.id, ...analytics.fromReq(req) });
   res.json({
     ok: true,
     token: accessToken,
@@ -1566,6 +1569,9 @@ app.post('/api/candidato/candidatar/:vagaId', authCandidato, async (req, res) =>
       console.error('[candidatar] Falha ao enviar e-mail de inscrição:', e.message);
     }
     await audit(req, 'candidatura.created', { resource_type: 'candidatura', resource_id: rows[0].id, metadata: { vaga_id: req.params.vagaId, etapa: 0 } });
+    analytics.bg({ evento: 'candidatura_enviada', user_type: 'candidato', user_id: vd[0].cand_id,
+      vaga_id: parseInt(req.params.vagaId), candidatura_id: rows[0].id,
+      empresa_id: vd[0].empresa_id || null, ...analytics.fromReq(req) });
 
     // FASE 7 — notificação no feed global (nova candidatura)
     try {
@@ -3315,6 +3321,9 @@ app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
         });
       }
     } catch (e) { console.error('[entrevista email]', e.message); }
+    analytics.bg({ evento: 'entrevista_agendada', user_type: 'admin',
+      candidatura_id: candidatura_id, vaga_id: entrevista.vaga_id || null,
+      empresa_id: entrevista.empresa_id || null, ...analytics.fromReq(req) });
 
     res.json({ ok: true, entrevista, googleEventId, meetHtmlLink });
   } catch (e) {
@@ -4086,6 +4095,8 @@ app.post('/api/admin/candidatura/:id/enviar-proposta', authAdmin, async (req, re
   } catch (e) {
     console.error('Falha ao agendar e-mail de proposta:', e.message);
   }
+  analytics.bg({ evento: 'proposta_enviada', user_type: 'admin',
+    candidatura_id: parseInt(req.params.id), empresa_id: cand.empresa_id || null, ...analytics.fromReq(req) });
 
   res.json({ ok: true, proposta: { texto, pdf_url: pdfFinalUrl } });
 });
@@ -4185,6 +4196,8 @@ app.post('/api/candidato/aceitar-proposta/:candidaturaId', authCandidato, async 
     console.error('Falha ao notificar aceite de proposta:', e.message);
   }
 
+  analytics.bg({ evento: 'proposta_aceita', user_type: 'candidato', user_id: req.user?.id || null,
+    candidatura_id: parseInt(req.params.candidaturaId), empresa_id: cand.empresa_id || null, ...analytics.fromReq(req) });
   res.json({ ok: true, msg: 'Proposta aceita! Próxima etapa: Coleta de documentos.' });
 });
 
@@ -4310,6 +4323,8 @@ app.post('/api/candidato/recusar-proposta/:candidaturaId', authCandidato, async 
     console.error('Falha ao notificar recusa de proposta:', e.message);
   }
 
+  analytics.bg({ evento: 'proposta_recusada', user_type: 'candidato', user_id: req.user?.id || null,
+    candidatura_id: parseInt(req.params.candidaturaId), empresa_id: cand.empresa_id || null, ...analytics.fromReq(req) });
   res.json({ ok: true, msg: 'Proposta recusada.' });
 });
 
@@ -4915,6 +4930,7 @@ app.post('/api/auth/login-empresa', rateLimitLogin, async (req, res) => {
       user_empresa_id: u.empresa_id
     });
     await audit(req, 'login.success', { resource_type: 'empresa', resource_id: u.id, user_email: u.email, metadata: { empresa_id: u.empresa_id } });
+    analytics.bg({ evento: 'empresa_login', user_type: 'empresa', user_id: u.id, empresa_id: u.empresa_id, ...analytics.fromReq(req) });
     res.json({
       ok: true,
       token: accessToken,
@@ -5024,6 +5040,8 @@ app.post('/api/empresa/vagas', requireRecrutadorOuAdmin, async (req, res) => {
       resource_id: vaga.id,
       metadata: { titulo: v.titulo, empresa_id }
     });
+    analytics.bg({ evento: 'vaga_criada', user_type: 'empresa', user_id: req.user?.id || null,
+      empresa_id, vaga_id: vaga.id, ...analytics.fromReq(req) });
 
     res.status(201).json({ ok: true, vaga });
   } catch (e) {
@@ -8346,6 +8364,164 @@ process.on('unhandledRejection', (e) => {
     } catch (e) {
       res.status(500).json({ ok: false, erro: e.message });
     }
+  });
+
+  // =========================================================================
+  // FASE 14 — Analytics + Auditoria Visual
+  // =========================================================================
+
+  // ── POST /api/analytics/eventos ──────────────────────────────────────────
+  // Aceita eventos de candidato, empresa ou anônimo (vaga_visualizada).
+  // user_type / user_id são derivados do token, nunca do body.
+  app.post('/api/analytics/eventos', async (req, res) => {
+    const { evento, vaga_id, candidatura_id, sessao_id, anonimo_id, metadata } = req.body || {};
+    if (!analytics.EVENTOS_VALIDOS.includes(evento)) {
+      return res.status(400).json({ erro: `Evento inválido. Permitidos: ${analytics.EVENTOS_VALIDOS.join(', ')}` });
+    }
+    // Metadados limitados
+    if (metadata) {
+      try {
+        const raw = JSON.stringify(metadata);
+        if (raw.length > 2048) return res.status(400).json({ erro: 'metadata excede 2048 bytes' });
+      } catch (_) { return res.status(400).json({ erro: 'metadata inválido' }); }
+    }
+
+    // Resolve identidade do solicitante (pode ser anônimo — não exige auth)
+    let user_type = null, user_id = null, empresa_id = null;
+    const header = req.headers.authorization;
+    if (header && header.startsWith('Bearer ')) {
+      try {
+        const payload = jwt.verify(
+          header.replace('Bearer ', ''),
+          process.env.JWT_SECRET,
+          { algorithms: ['HS256'] }
+        );
+        if (payload && typeof payload.tipo === 'string') {
+          user_type  = payload.tipo;
+          user_id    = payload.id || null;
+          empresa_id = payload.empresa_id || null;
+        }
+      } catch (_) { /* token inválido — trata como anônimo */ }
+    }
+
+    // Candidatos só podem gerar eventos de seu próprio contexto
+    const EVENTOS_CANDIDATO = ['login_candidato','cadastro_candidato_concluido','inicio_cadastro_candidato',
+      'candidatura_iniciada','candidatura_enviada','vaga_favoritada','vaga_desfavoritada',
+      'match_visualizado','chat_aberto_candidato','mensagem_enviada_candidato'];
+    const EVENTOS_EMPRESA = ['empresa_login','vaga_criada','vaga_publicada','candidato_visualizado',
+      'candidato_contatado','chat_aberto_empresa','mensagem_enviada_empresa',
+      'entrevista_agendada','proposta_enviada','proposta_aceita','proposta_recusada'];
+
+    if (user_type === 'candidato' && EVENTOS_EMPRESA.includes(evento)) {
+      return res.status(403).json({ erro: 'Evento não permitido para candidato' });
+    }
+    if (user_type === 'empresa' && EVENTOS_CANDIDATO.includes(evento)) {
+      return res.status(403).json({ erro: 'Evento não permitido para empresa' });
+    }
+
+    try {
+      await analytics.registrar({
+        evento, user_type, user_id, empresa_id,
+        vaga_id:        vaga_id        ? parseInt(vaga_id)        : null,
+        candidatura_id: candidatura_id ? parseInt(candidatura_id) : null,
+        sessao_id:      sessao_id      ? String(sessao_id).substring(0, 128)  : null,
+        anonimo_id:     anonimo_id     ? String(anonimo_id).substring(0, 128) : null,
+        metadata:       analytics.sanitizarMetadata(metadata),
+        ...analytics.fromReq(req)
+      });
+      res.status(201).json({ ok: true });
+    } catch (e) {
+      console.error('[analytics registro]', e.message);
+      res.status(500).json({ ok: false });
+    }
+  });
+
+  // ── GET /api/saas/analytics — métricas globais (admin) ───────────────────
+  app.get('/api/saas/analytics', authAdmin, async (req, res) => {
+    try {
+      const { periodo, vaga_id } = req.query;
+      const data = await analytics.metricasSaas({ periodo, vaga_id: vaga_id ? parseInt(vaga_id) : null });
+      res.json(data);
+    } catch (e) {
+      console.error('[saas analytics]', e.message);
+      res.status(500).json({ erro: 'Erro ao consultar analytics' });
+    }
+  });
+
+  // ── GET /api/empresa/analytics — métricas do tenant ──────────────────────
+  app.get('/api/empresa/analytics', requireEmpresaViewer, async (req, res) => {
+    try {
+      const empresa_id = req.user.empresa_id;
+      if (!empresa_id) return res.status(403).json({ erro: 'empresa_id não identificado' });
+      const { periodo, vaga_id } = req.query;
+      const data = await analytics.metricasEmpresa({
+        empresa_id,
+        periodo,
+        vaga_id: vaga_id ? parseInt(vaga_id) : null
+      });
+      res.json(data);
+    } catch (e) {
+      console.error('[empresa analytics]', e.message);
+      res.status(500).json({ erro: 'Erro ao consultar analytics' });
+    }
+  });
+
+  // ── GET /api/saas/auditoria — logs de auditoria (admin) ──────────────────
+  // Reutiliza tabela audit_logs existente. Somente leitura. Nunca DELETE/PUT/PATCH.
+  app.get('/api/saas/auditoria', authAdmin, async (req, res) => {
+    try {
+      const {
+        usuario, empresa_id, acao, recurso,
+        periodo_inicio, periodo_fim,
+        pagina = '1', limite = '50'
+      } = req.query;
+
+      const pg   = Math.max(1, parseInt(pagina) || 1);
+      const lim  = Math.min(200, Math.max(1, parseInt(limite) || 50));
+      const offs = (pg - 1) * lim;
+
+      const wheres = [];
+      const vals   = [];
+      const addV   = (sql, v) => { vals.push(v); wheres.push(sql.replace('?', `$${vals.length}`)); };
+
+      if (usuario) {
+        vals.push(`%${usuario}%`, usuario);
+        wheres.push(`(user_email ILIKE $${vals.length - 1} OR user_id::text = $${vals.length})`);
+      }
+      if (acao)           addV('action ILIKE ?', `%${acao}%`);
+      if (recurso)        addV('resource_type = ?', recurso);
+      if (periodo_inicio) addV('created_at >= ?', periodo_inicio);
+      if (periodo_fim)    addV('created_at <= ?', periodo_fim);
+      const whereClause = wheres.length ? 'WHERE ' + wheres.join(' AND ') : '';
+
+      const cnt  = await pool.query(`SELECT COUNT(*) FROM audit_logs ${whereClause}`, vals);
+      const { rows } = await pool.query(
+        `SELECT id, created_at, user_id, user_type, user_email, action,
+                resource_type, resource_id, ip, result, metadata
+         FROM audit_logs ${whereClause}
+         ORDER BY created_at DESC
+         LIMIT $${vals.length + 1} OFFSET $${vals.length + 2}`,
+        [...vals, lim, offs]
+      );
+      const total = parseInt(cnt.rows[0].count);
+      res.json({
+        logs: rows,
+        paginacao: { total, pagina: pg, limite: lim, paginas: Math.ceil(total / lim) }
+      });
+    } catch (e) {
+      console.error('[saas auditoria]', e.message);
+      res.status(500).json({ erro: 'Erro ao consultar logs' });
+    }
+  });
+
+  // ── EXPLICITAMENTE PROIBIR mutações nos logs de auditoria ─────────────────
+  ['delete', 'put', 'patch'].forEach(m => {
+    app[m]('/api/saas/auditoria', (req, res) =>
+      res.status(405).json({ erro: 'Não permitido. Logs de auditoria são somente leitura.' }));
+    app[m]('/api/saas/auditoria/:id', (req, res) =>
+      res.status(405).json({ erro: 'Não permitido. Logs de auditoria são somente leitura.' }));
+    app[m]('/api/admin/audit-logs', (req, res) =>
+      res.status(405).json({ erro: 'Não permitido. Logs de auditoria são somente leitura.' }));
   });
 
   // FIX Etapa 2 (2026-07-27): HANDLER GLOBAL 404 — JSON seguro, sem stack.
