@@ -436,7 +436,54 @@ app.get('/api/public/empresa/:slug/vagas/:id', async (req, res) => {
   }
 });
 
-app.get('/api/saude', (req, res) => res.json({ ok: true, sistema: process.env.SISTEMA_NOME, hora: new Date().toISOString() }));
+app.get('/api/saude', async (req, res) => {
+  let db_ok = false;
+  try {
+    await pool.query('SELECT 1');
+    db_ok = true;
+  } catch (_) {}
+  res.status(db_ok ? 200 : 503).json({
+    ok: db_ok,
+    sistema: process.env.SISTEMA_NOME,
+    hora: new Date().toISOString(),
+    db: db_ok ? 'ok' : 'unavailable'
+  });
+});
+
+// ── CI: token admin sem 2FA ─────────────────────────────────────────────────
+// Ativo SOMENTE quando CI_ADMIN_SECRET está definido E NODE_ENV !== 'production'.
+// Se NODE_ENV === 'production', retorna 404 independente de qualquer header.
+// Nunca expor em produção. Usado exclusivamente pelo GitHub Actions.
+app.post('/api/ci/admin-token', async (req, res) => {
+  // Proteção em profundidade: bloquear em produção (hard block — não depende de flag)
+  if (process.env.NODE_ENV === 'production') {
+    return res.status(404).json({ erro: 'Not found' });
+  }
+  const ciSecret = process.env.CI_ADMIN_SECRET;
+  if (!ciSecret) {
+    return res.status(404).json({ erro: 'Not found' });
+  }
+  const { secret } = req.body || {};
+  if (!secret || secret !== ciSecret) {
+    return res.status(401).json({ erro: 'Não autorizado' });
+  }
+  try {
+    // Busca admin SaaS real — não cria usuário fantasma
+    const { rows } = await pool.query(
+      `SELECT id, email, nome, role FROM admin_users WHERE is_saas = true ORDER BY id LIMIT 1`
+    );
+    if (!rows.length) return res.status(404).json({ erro: 'Admin SaaS não encontrado' });
+    const admin = rows[0];
+    const token = criarAccessToken({
+      id: admin.id, email: admin.email, nome: admin.nome, tipo: 'admin',
+      role: admin.role || 'admin', is_saas: true, _ci: true
+    });
+    res.json({ ok: true, token, admin: { id: admin.id, email: admin.email } });
+  } catch (e) {
+    console.error('[CI TOKEN]', e.message);
+    res.status(500).json({ erro: 'Erro interno' });
+  }
+});
 
 // DEBUG FASE 6 — versão top-level (não depende do wrapper async)
 app.get('/api/_debug/fase6', async (req, res) => {
