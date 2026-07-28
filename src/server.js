@@ -1654,7 +1654,8 @@ app.get('/api/vagas/:id', async (req, res) => {
     const { rows } = await pool.query(
       `SELECT id, titulo, empresa, descricao, requisitos, beneficios, salario_min, salario_max,
               tipo_contrato, nivel, area, cidade, estado, etapas,
-              CASE WHEN status = 'publicada' THEN 'publicada' ELSE NULL END as status
+              CASE WHEN status = 'publicada' THEN 'publicada' ELSE NULL END as status,
+              ARRAY(SELECT tag FROM vaga_tags WHERE vaga_id = vagas.id ORDER BY criado_em) AS tags
        FROM vagas WHERE id = $1 AND status = 'publicada'`,
       [id]
     );
@@ -7184,6 +7185,512 @@ process.on('unhandledRejection', (e) => {
   // Helper: respostas 500 seguras (log interno + mensagem genérica pro cliente).
   // Substitui o padrão `res.status(500).json({ erro: e.message })` que vaza SQL/Express/etc.
   // NÃO usar em rotas /_debug/* (precisam do erro real pro Fabio).
+  // ═══════════════════════════════════════════════════════════════════════════
+  // FASE 11 — Busca avançada, Tags de Vaga, Favoritos, Score de Match
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // ── HELPERS DE MATCH ───────────────────────────────────────────────────────
+
+  /**
+   * Calcula score de compatibilidade candidato × vaga (0-100, determinístico).
+   *
+   * Pesos:
+   *   área compatível        → até 30 pts
+   *   cidade/estado          → até 20 pts (10 cidade + 10 estado; só estado = 10)
+   *   nível de experiência   → até 20 pts
+   *   tags/competências      → até 30 pts
+   *
+   * Retorna { score, detalhes[] } onde cada detalhe tem { criterio, pontos, max, ok }
+   */
+  function calcularMatch(candidato, vaga, vagaTags) {
+    const detalhes = [];
+    let total = 0;
+
+    // 1. Área (30 pts)
+    const areaVaga = (vaga.area || '').toLowerCase().trim();
+    const areasInteresse = Array.isArray(candidato.areas_interesse)
+      ? candidato.areas_interesse.map(a => String(a).toLowerCase().trim())
+      : [];
+    const competencias = Array.isArray(candidato.competencias)
+      ? candidato.competencias.map(c => String(c).toLowerCase().trim())
+      : [];
+
+    const areaOk = areaVaga && areasInteresse.some(a => a && (a.includes(areaVaga) || areaVaga.includes(a)));
+    const ptArea = areaOk ? 30 : 0;
+    total += ptArea;
+    detalhes.push({ criterio: 'área compatível', pontos: ptArea, max: 30, ok: areaOk });
+
+    // 2. Localização (20 pts)
+    const cidadeVaga  = (vaga.cidade  || '').toLowerCase().trim();
+    const estadoVaga  = (vaga.estado  || '').toLowerCase().trim();
+    const cidadeCand  = (candidato.cidade  || '').toLowerCase().trim();
+    const estadoCand  = (candidato.estado  || '').toLowerCase().trim();
+    const cidadeOk = cidadeVaga && cidadeCand && cidadeVaga === cidadeCand;
+    const estadoOk = estadoVaga && estadoCand && estadoVaga === estadoCand;
+    const ptLocal = cidadeOk ? 20 : estadoOk ? 10 : 0;
+    total += ptLocal;
+    detalhes.push({
+      criterio: 'localização compatível',
+      pontos: ptLocal, max: 20,
+      ok: ptLocal > 0,
+      detalhe: cidadeOk ? 'mesma cidade' : estadoOk ? 'mesmo estado' : 'diferente'
+    });
+
+    // 3. Nível de experiência (20 pts)
+    const nivelVaga = (vaga.nivel || '').toLowerCase().trim();
+    const nivelCand = (candidato.nivel_experiencia || '').toLowerCase().trim();
+    let ptNivel = 0;
+    let nivelDetalhe = 'não informado';
+    if (nivelVaga && nivelCand) {
+      if (nivelVaga === nivelCand) {
+        ptNivel = 20; nivelDetalhe = 'exato';
+      } else {
+        const ordem = ['estágio','júnior','pleno','sênior','especialista','gerente'];
+        const iV = ordem.findIndex(n => nivelVaga.includes(n));
+        const iC = ordem.findIndex(n => nivelCand.includes(n));
+        if (iV >= 0 && iC >= 0) {
+          const diff = Math.abs(iV - iC);
+          ptNivel = diff === 1 ? 10 : diff === 0 ? 20 : 0;
+          nivelDetalhe = diff === 0 ? 'exato' : diff === 1 ? 'parcial' : 'distante';
+        }
+      }
+    }
+    total += ptNivel;
+    detalhes.push({ criterio: 'nível de experiência', pontos: ptNivel, max: 20, ok: ptNivel >= 10, detalhe: nivelDetalhe });
+
+    // 4. Tags/competências (30 pts)
+    const tags = (vagaTags || []).map(t => t.toLowerCase().trim()).filter(Boolean);
+    if (tags.length === 0 && competencias.length === 0) {
+      detalhes.push({ criterio: 'competências compatíveis', pontos: 0, max: 30, ok: false, detalhe: 'sem dados' });
+    } else if (tags.length === 0) {
+      detalhes.push({ criterio: 'competências compatíveis', pontos: 0, max: 30, ok: false, detalhe: 'vaga sem tags' });
+    } else {
+      const matches = tags.filter(tag =>
+        competencias.some(c => c.includes(tag) || tag.includes(c)) ||
+        areasInteresse.some(a => a.includes(tag) || tag.includes(a))
+      );
+      const ratio = matches.length / tags.length;
+      const ptTags = Math.round(ratio * 30);
+      total += ptTags;
+      detalhes.push({
+        criterio: 'competências compatíveis',
+        pontos: ptTags, max: 30, ok: ptTags > 0,
+        detalhe: `${matches.length}/${tags.length} correspondências`
+      });
+    }
+
+    return { score: Math.min(100, total), detalhes };
+  }
+
+  // ── 1. BUSCA AVANÇADA DE CANDIDATOS — /api/empresa/candidatos ─────────────
+
+  app.get('/api/empresa/candidatos', requireEmpresaViewer, async (req, res) => {
+    try {
+      const { q, cidade, estado, area, vaga_id, status, pagina = 1, limite = 20 } = req.query;
+      const emp = req.user.empresa_id;
+      const pg  = Math.max(1, parseInt(pagina) || 1);
+      const lim = Math.min(100, Math.max(1, parseInt(limite) || 20));
+      const offset = (pg - 1) * lim;
+
+      // Base: candidatos que têm candidatura em vagas desta empresa
+      // Permite filtrar por qualquer combinação de campos existentes
+      let where = [`eva.empresa_id = $1`];
+      const params = [emp];
+
+      if (q) {
+        params.push(`%${q.toLowerCase()}%`);
+        where.push(`(lower(c.nome) LIKE $${params.length} OR lower(c.email) LIKE $${params.length})`);
+      }
+      if (cidade) {
+        params.push(cidade.toLowerCase());
+        where.push(`lower(c.cidade) = $${params.length}`);
+      }
+      if (estado) {
+        params.push(estado.toLowerCase());
+        where.push(`lower(c.estado) = $${params.length}`);
+      }
+      if (area) {
+        params.push(JSON.stringify([area]));
+        where.push(`c.areas_interesse @> $${params.length}::jsonb`);
+      }
+      if (vaga_id) {
+        params.push(parseInt(vaga_id));
+        where.push(`can.vaga_id = $${params.length}`);
+      }
+      if (status) {
+        params.push(status);
+        where.push(`can.status = $${params.length}`);
+      }
+
+      const whereSql = where.join(' AND ');
+
+      // Contagem total
+      const { rows: cnt } = await pool.query(`
+        SELECT COUNT(DISTINCT c.id) AS total
+        FROM candidatos c
+        JOIN candidaturas can ON can.candidato_id = c.id
+        JOIN vagas v          ON v.id = can.vaga_id
+        JOIN empresa_vaga_acesso eva ON eva.vaga_id = v.id
+        WHERE ${whereSql}
+      `, params);
+      const total = parseInt(cnt[0].total);
+
+      // Resultados paginados
+      params.push(lim, offset);
+      const { rows } = await pool.query(`
+        SELECT DISTINCT ON (c.id)
+               c.id, c.nome, c.email, c.cidade, c.estado,
+               c.areas_interesse, c.nivel_experiencia, c.competencias,
+               c.foto_url, c.criado_em,
+               can.status AS ultimo_status,
+               can.id     AS ultima_candidatura_id,
+               can.etapa_atual AS ultima_etapa,
+               v.titulo   AS ultima_vaga_titulo,
+               v.id       AS ultima_vaga_id
+        FROM candidatos c
+        JOIN candidaturas can ON can.candidato_id = c.id
+        JOIN vagas v          ON v.id = can.vaga_id
+        JOIN empresa_vaga_acesso eva ON eva.vaga_id = v.id
+        WHERE ${whereSql}
+        ORDER BY c.id, can.criada_em DESC
+        LIMIT $${params.length - 1} OFFSET $${params.length}
+      `, params);
+
+      res.json({
+        candidatos: rows,
+        paginacao: { total, pagina: pg, limite: lim, paginas: Math.ceil(total / lim) }
+      });
+    } catch (e) {
+      console.error('[empresa/candidatos]', e);
+      res.status(500).json({ erro: 'Erro ao buscar candidatos' });
+    }
+  });
+
+  // ── 2. TAGS DE VAGA ───────────────────────────────────────────────────────
+
+  // GET /api/empresa/vagas/:id/tags
+  app.get('/api/empresa/vagas/:id/tags', requireEmpresaViewer, async (req, res) => {
+    try {
+      const vagaId = parseInt(req.params.id);
+      const emp = req.user.empresa_id;
+      // Verifica acesso da empresa à vaga
+      const { rows: acesso } = await pool.query(
+        `SELECT 1 FROM empresa_vaga_acesso WHERE empresa_id = $1 AND vaga_id = $2`, [emp, vagaId]
+      );
+      if (!acesso.length) return res.status(403).json({ erro: 'Sem acesso a esta vaga' });
+
+      const { rows } = await pool.query(
+        `SELECT id, tag, criado_em FROM vaga_tags WHERE vaga_id = $1 ORDER BY criado_em`, [vagaId]
+      );
+      res.json({ tags: rows });
+    } catch (e) {
+      console.error('[tags GET]', e);
+      res.status(500).json({ erro: 'Erro ao buscar tags' });
+    }
+  });
+
+  // POST /api/empresa/vagas/:id/tags — adiciona uma tag
+  app.post('/api/empresa/vagas/:id/tags', requireRecrutadorOuAdmin, async (req, res) => {
+    try {
+      const vagaId = parseInt(req.params.id);
+      const emp = req.user.empresa_id;
+      const tag = String(req.body?.tag || '').trim().toLowerCase();
+
+      if (!tag || tag.length < 1 || tag.length > 60) {
+        return res.status(400).json({ erro: 'Tag inválida (1–60 caracteres)' });
+      }
+      const { rows: acesso } = await pool.query(
+        `SELECT 1 FROM empresa_vaga_acesso WHERE empresa_id = $1 AND vaga_id = $2`, [emp, vagaId]
+      );
+      if (!acesso.length) return res.status(403).json({ erro: 'Sem acesso a esta vaga' });
+
+      const { rows } = await pool.query(
+        `INSERT INTO vaga_tags (vaga_id, tag) VALUES ($1, $2)
+         ON CONFLICT ON CONSTRAINT vaga_tags_unique DO NOTHING
+         RETURNING id, tag, criado_em`,
+        [vagaId, tag]
+      );
+      if (!rows.length) return res.status(409).json({ erro: 'Tag já existe nesta vaga' });
+      res.status(201).json({ tag: rows[0] });
+    } catch (e) {
+      console.error('[tags POST]', e);
+      res.status(500).json({ erro: 'Erro ao adicionar tag' });
+    }
+  });
+
+  // DELETE /api/empresa/vagas/:id/tags/:tag
+  app.delete('/api/empresa/vagas/:id/tags/:tag', requireRecrutadorOuAdmin, async (req, res) => {
+    try {
+      const vagaId = parseInt(req.params.id);
+      const tag = decodeURIComponent(req.params.tag).trim().toLowerCase();
+      const emp = req.user.empresa_id;
+
+      const { rows: acesso } = await pool.query(
+        `SELECT 1 FROM empresa_vaga_acesso WHERE empresa_id = $1 AND vaga_id = $2`, [emp, vagaId]
+      );
+      if (!acesso.length) return res.status(403).json({ erro: 'Sem acesso a esta vaga' });
+
+      const { rowCount } = await pool.query(
+        `DELETE FROM vaga_tags WHERE vaga_id = $1 AND tag = $2`, [vagaId, tag]
+      );
+      if (rowCount === 0) return res.status(404).json({ erro: 'Tag não encontrada' });
+      res.json({ ok: true });
+    } catch (e) {
+      console.error('[tags DELETE]', e);
+      res.status(500).json({ erro: 'Erro ao remover tag' });
+    }
+  });
+
+  // PUT /api/empresa/vagas/:id/tags — substitui lista completa de tags
+  app.put('/api/empresa/vagas/:id/tags', requireRecrutadorOuAdmin, async (req, res) => {
+    try {
+      const vagaId = parseInt(req.params.id);
+      const emp = req.user.empresa_id;
+      const { tags } = req.body || {};
+
+      if (!Array.isArray(tags)) return res.status(400).json({ erro: 'tags deve ser array' });
+      const tagsList = [...new Set(tags.map(t => String(t).trim().toLowerCase()).filter(t => t.length > 0 && t.length <= 60))];
+
+      const { rows: acesso } = await pool.query(
+        `SELECT 1 FROM empresa_vaga_acesso WHERE empresa_id = $1 AND vaga_id = $2`, [emp, vagaId]
+      );
+      if (!acesso.length) return res.status(403).json({ erro: 'Sem acesso a esta vaga' });
+
+      // Substitui atomicamente
+      await pool.query('BEGIN');
+      await pool.query(`DELETE FROM vaga_tags WHERE vaga_id = $1`, [vagaId]);
+      for (const t of tagsList) {
+        await pool.query(`INSERT INTO vaga_tags (vaga_id, tag) VALUES ($1, $2)`, [vagaId, t]);
+      }
+      await pool.query('COMMIT');
+
+      const { rows } = await pool.query(
+        `SELECT id, tag, criado_em FROM vaga_tags WHERE vaga_id = $1 ORDER BY criado_em`, [vagaId]
+      );
+      res.json({ tags: rows });
+    } catch (e) {
+      await pool.query('ROLLBACK');
+      console.error('[tags PUT]', e);
+      res.status(500).json({ erro: 'Erro ao atualizar tags' });
+    }
+  });
+
+  // GET /api/public/vagas — adicionar tags quando buscar vagas públicas (patch da rota existente)
+  // NOTA: A rota /api/public/vagas já existe. Criamos a rota de tags por vaga individual.
+
+  // GET /api/public/vagas/:id/tags — tags visíveis no portal público
+  app.get('/api/public/vagas/:id/tags', async (req, res) => {
+    try {
+      const { rows } = await pool.query(
+        `SELECT t.tag FROM vaga_tags t
+         JOIN vagas v ON v.id = t.vaga_id
+         WHERE t.vaga_id = $1 AND v.status = 'publicada'
+         ORDER BY t.criado_em`, [parseInt(req.params.id)]
+      );
+      res.json({ tags: rows.map(r => r.tag) });
+    } catch (e) {
+      res.status(500).json({ erro: 'Erro ao buscar tags' });
+    }
+  });
+
+  // Filtrar vagas por tag (público)
+  app.get('/api/public/vagas/por-tag/:tag', async (req, res) => {
+    try {
+      const tag = decodeURIComponent(req.params.tag).trim().toLowerCase();
+      const { rows } = await pool.query(`
+        SELECT v.id, v.titulo, v.empresa, v.cidade, v.estado, v.tipo_contrato, v.nivel, v.area,
+               v.salario_min, v.salario_max, v.descricao, v.status, v.criada_em
+        FROM vagas v
+        JOIN vaga_tags t ON t.vaga_id = v.id
+        WHERE t.tag = $1 AND v.status = 'publicada'
+        ORDER BY v.criada_em DESC
+        LIMIT 50
+      `, [tag]);
+      res.json({ vagas: rows, tag });
+    } catch (e) {
+      res.status(500).json({ erro: 'Erro ao buscar vagas por tag' });
+    }
+  });
+
+  // ── 3. FAVORITOS DO CANDIDATO ────────────────────────────────────────────
+
+  // GET /api/candidato/favoritos
+  app.get('/api/candidato/favoritos', authCandidato, async (req, res) => {
+    try {
+      const candId = req.user.id;
+      const { rows } = await pool.query(`
+        SELECT f.id AS favorito_id, f.criado_em AS favoritado_em,
+               v.id, v.titulo, v.empresa, v.cidade, v.estado,
+               v.tipo_contrato, v.nivel, v.area, v.status,
+               v.salario_min, v.salario_max,
+               ARRAY(SELECT tag FROM vaga_tags WHERE vaga_id = v.id ORDER BY criado_em) AS tags,
+               (SELECT id FROM candidaturas WHERE candidato_id = $1 AND vaga_id = v.id LIMIT 1) AS candidatura_id
+        FROM candidato_favoritos f
+        JOIN vagas v ON v.id = f.vaga_id
+        WHERE f.candidato_id = $1
+        ORDER BY f.criado_em DESC
+      `, [candId]);
+      res.json({ favoritos: rows });
+    } catch (e) {
+      console.error('[favoritos GET]', e);
+      res.status(500).json({ erro: 'Erro ao buscar favoritos' });
+    }
+  });
+
+  // POST /api/candidato/favoritos/:vaga_id
+  app.post('/api/candidato/favoritos/:vaga_id', authCandidato, async (req, res) => {
+    try {
+      const candId = req.user.id;
+      const vagaId = parseInt(req.params.vaga_id);
+      if (!vagaId) return res.status(400).json({ erro: 'vaga_id inválido' });
+
+      // Verifica se vaga existe e está publicada
+      const { rows: vaga } = await pool.query(
+        `SELECT id, titulo, status FROM vagas WHERE id = $1`, [vagaId]
+      );
+      if (!vaga.length) return res.status(404).json({ erro: 'Vaga não encontrada' });
+      if (!['publicada','ativa'].includes(vaga[0].status)) {
+        return res.status(422).json({ erro: 'Vaga não está disponível para favoritar' });
+      }
+
+      const { rows } = await pool.query(
+        `INSERT INTO candidato_favoritos (candidato_id, vaga_id)
+         VALUES ($1, $2)
+         ON CONFLICT ON CONSTRAINT candidato_favoritos_unique DO NOTHING
+         RETURNING id, criado_em`,
+        [candId, vagaId]
+      );
+      if (!rows.length) return res.status(409).json({ erro: 'Vaga já está nos favoritos' });
+      res.status(201).json({ ok: true, favorito_id: rows[0].id, vaga_titulo: vaga[0].titulo });
+    } catch (e) {
+      console.error('[favoritos POST]', e);
+      res.status(500).json({ erro: 'Erro ao favoritar vaga' });
+    }
+  });
+
+  // DELETE /api/candidato/favoritos/:vaga_id
+  app.delete('/api/candidato/favoritos/:vaga_id', authCandidato, async (req, res) => {
+    try {
+      const candId = req.user.id;
+      const vagaId = parseInt(req.params.vaga_id);
+      const { rowCount } = await pool.query(
+        `DELETE FROM candidato_favoritos WHERE candidato_id = $1 AND vaga_id = $2`,
+        [candId, vagaId]
+      );
+      if (rowCount === 0) return res.status(404).json({ erro: 'Favorito não encontrado' });
+      res.json({ ok: true });
+    } catch (e) {
+      console.error('[favoritos DELETE]', e);
+      res.status(500).json({ erro: 'Erro ao desfavoritar vaga' });
+    }
+  });
+
+  // ── 4. SCORE DE MATCH ────────────────────────────────────────────────────
+
+  // GET /api/empresa/vagas/:id/matches — candidatos ordenados por score
+  app.get('/api/empresa/vagas/:id/matches', requireEmpresaViewer, async (req, res) => {
+    try {
+      const vagaId = parseInt(req.params.id);
+      const emp = req.user.empresa_id;
+
+      // Verifica acesso da empresa à vaga
+      const { rows: vagaRows } = await pool.query(`
+        SELECT v.id, v.titulo, v.area, v.cidade, v.estado, v.nivel
+        FROM vagas v
+        JOIN empresa_vaga_acesso eva ON eva.vaga_id = v.id
+        WHERE v.id = $1 AND eva.empresa_id = $2
+      `, [vagaId, emp]);
+      if (!vagaRows.length) return res.status(404).json({ erro: 'Vaga não encontrada ou sem acesso' });
+      const vaga = vagaRows[0];
+
+      // Tags da vaga
+      const { rows: tagRows } = await pool.query(
+        `SELECT tag FROM vaga_tags WHERE vaga_id = $1`, [vagaId]
+      );
+      const vagaTags = tagRows.map(r => r.tag);
+
+      // Candidatos com candidatura nesta vaga
+      const { rows: candidatos } = await pool.query(`
+        SELECT c.id, c.nome, c.email, c.cidade, c.estado,
+               c.areas_interesse, c.nivel_experiencia, c.competencias, c.foto_url,
+               can.id AS candidatura_id, can.status, can.etapa_atual
+        FROM candidatos c
+        JOIN candidaturas can ON can.candidato_id = c.id
+        WHERE can.vaga_id = $1
+        ORDER BY c.nome
+      `, [vagaId]);
+
+      // Calcular scores
+      const resultado = candidatos.map(c => {
+        const { score, detalhes } = calcularMatch(c, vaga, vagaTags);
+        return {
+          candidato_id: c.id,
+          nome: c.nome,
+          email: c.email,
+          cidade: c.cidade,
+          estado: c.estado,
+          foto_url: c.foto_url,
+          candidatura_id: c.candidatura_id,
+          status: c.status,
+          etapa_atual: c.etapa_atual,
+          score,
+          detalhes
+        };
+      }).sort((a, b) => b.score - a.score);
+
+      res.json({ vaga_id: vagaId, vaga_titulo: vaga.titulo, matches: resultado });
+    } catch (e) {
+      console.error('[empresa matches]', e);
+      res.status(500).json({ erro: 'Erro ao calcular matches' });
+    }
+  });
+
+  // GET /api/candidato/vagas/:id/match — score do próprio candidato naquela vaga
+  app.get('/api/candidato/vagas/:id/match', authCandidato, async (req, res) => {
+    try {
+      const vagaId = parseInt(req.params.id);
+      const candId = req.user.id;
+
+      // Vaga deve existir e estar publicada
+      const { rows: vagaRows } = await pool.query(
+        `SELECT id, titulo, area, cidade, estado, nivel FROM vagas WHERE id = $1 AND status = 'publicada'`,
+        [vagaId]
+      );
+      if (!vagaRows.length) return res.status(404).json({ erro: 'Vaga não encontrada' });
+      const vaga = vagaRows[0];
+
+      // Perfil do candidato
+      const { rows: candRows } = await pool.query(
+        `SELECT id, nome, cidade, estado, areas_interesse, nivel_experiencia, competencias
+         FROM candidatos WHERE id = $1`,
+        [candId]
+      );
+      if (!candRows.length) return res.status(404).json({ erro: 'Perfil não encontrado' });
+
+      // Tags da vaga
+      const { rows: tagRows } = await pool.query(
+        `SELECT tag FROM vaga_tags WHERE vaga_id = $1`, [vagaId]
+      );
+      const vagaTags = tagRows.map(r => r.tag);
+
+      const { score, detalhes } = calcularMatch(candRows[0], vaga, vagaTags);
+
+      res.json({
+        vaga_id: vagaId,
+        vaga_titulo: vaga.titulo,
+        score,
+        nivel: score >= 70 ? 'alto' : score >= 40 ? 'médio' : 'baixo',
+        detalhes,
+        aviso: 'Pontuação indicativa. Não representa decisão de contratação.'
+      });
+    } catch (e) {
+      console.error('[candidato match]', e);
+      res.status(500).json({ erro: 'Erro ao calcular match' });
+    }
+  });
+
+  // ── FIM FASE 11 ──────────────────────────────────────────────────────────
+
   function erroInterno(req, res, e, contexto) {
     console.error(`[ERRO ${contexto}]`, e && (e.stack || e.message || e));
     return res.status(500).json({ erro: 'Erro interno do servidor' });
