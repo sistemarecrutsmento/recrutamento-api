@@ -6688,6 +6688,14 @@ process.on('unhandledRejection', (e) => {
     }
   });
 
+  // ===== FASE 8 — Registra rotas /api/empresa/* complementares (ANTES do 404 global) =====
+  // Paridade multi-tenant: antes só existia em /api/admin/* (visão SaaS).
+  // Agora a empresa cliente também consome /api/empresa/* com filtro de tenant.
+  // IMPORTANTE: registrado ANTES do handler 404 global (linha abaixo), senão as rotas
+  // novas nunca são alcançadas — Express processa middlewares em ordem.
+  const { registrar: registrarEmpresaExtra } = require('./routes/empresa_extra');
+  registrarEmpresaExtra(app, { pool });
+
 
 
   const port = process.env.PORT || 10000;
@@ -6727,12 +6735,6 @@ process.on('unhandledRejection', (e) => {
     console.error(`[ERRO ${contexto}]`, e && (e.stack || e.message || e));
     return res.status(500).json({ erro: 'Erro interno do servidor' });
   }
-
-  // ===== FASE 8 — Registra rotas /api/empresa/* complementares =====
-  // Paridade multi-tenant: antes só existia em /api/admin/* (visão SaaS).
-  // Agora a empresa cliente também consome /api/empresa/* com filtro de tenant.
-  const { registrar: registrarEmpresaExtra } = require('./routes/empresa_extra');
-  registrarEmpresaExtra(app, { pool });
 
   app.listen(port, () => console.log('API rodando na porta ' + port));
   } catch (e) {
