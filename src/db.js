@@ -421,43 +421,35 @@ async function init() {
   }
 }
 
-module.exports = { pool, init, inserirNotificacao };
+module.exports = { pool, init };
 
 // =====================================================
-// FASE 7 — Helper: inserir notificação no feed global
+// FASE 7 — Helper: inserir notificação (empresa ou candidato)
 // =====================================================
 // Falha silenciosamente — notificações são best-effort, NÃO devem
 // derrubar a request principal. Loga o erro pra debug.
 //
 // Parâmetros:
-//   client              pool/client do pg
-//   empresa_id          ID da empresa (multi-tenant)
-//   tipo                string do enum (ex: 'candidatura_criada')
-//   titulo              linha principal (ex: 'Nova candidatura: João')
-//   opts (opcional):
-//     vaga_id, candidatura_id, resumo, link, actor_id, actor_tipo,
-//     actor_nome, actor_role, metadata
-async function inserirNotificacao(client, empresa_id, tipo, titulo, opts = {}) {
-  if (!empresa_id || !tipo || !titulo) return { ok: false, erro: 'params inválidos' };
+//   client          pool/client do pg
+//   user_type       'empresa' | 'candidato'
+//   user_id         ID do destinatário (empresa_id OU candidato_id)
+//   tipo            string (ex: 'candidatura_criada')
+//   titulo          linha principal
+//   mensagem        texto secundário (opcional)
+//   opts:
+//     referencia_tipo, referencia_id, metadata
+async function inserirNotificacao(client, user_type, user_id, tipo, titulo, mensagem, opts = {}) {
+  if (!user_type || !user_id || !tipo || !titulo) return { ok: false, erro: 'params inválidos' };
+  if (!['empresa', 'candidato'].includes(user_type)) return { ok: false, erro: 'user_type inválido' };
   try {
     const r = await client.query(
       `INSERT INTO notificacoes
-         (empresa_id, vaga_id, candidatura_id, tipo, titulo, resumo, link,
-          actor_id, actor_tipo, actor_nome, actor_role, metadata)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+         (user_type, user_id, tipo, titulo, mensagem, referencia_tipo, referencia_id, metadata)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
        RETURNING id`,
       [
-        empresa_id,
-        opts.vaga_id || null,
-        opts.candidatura_id || null,
-        tipo,
-        titulo,
-        opts.resumo || null,
-        opts.link || null,
-        opts.actor_id || null,
-        opts.actor_tipo || 'sistema',
-        opts.actor_nome || null,
-        opts.actor_role || null,
+        user_type, user_id, tipo, titulo, mensagem || null,
+        opts.referencia_tipo || null, opts.referencia_id || null,
         JSON.stringify(opts.metadata || {}),
       ]
     );
