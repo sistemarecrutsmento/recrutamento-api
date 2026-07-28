@@ -7155,37 +7155,6 @@ process.on('unhandledRejection', (e) => {
   const port = process.env.PORT || 10000;
 
   // =========================================================================
-  // FIX Etapa 2 (2026-07-27): HANDLER GLOBAL 404 — JSON seguro, sem stack.
-  // =========================================================================
-  // Impede que Express retorne HTML "<pre>Cannot GET ...</pre>" em rotas inexistentes.
-  // Aplica para qualquer método (GET/POST/PUT/DELETE/OPTIONS) em qualquer rota não casada.
-  app.use((req, res, next) => {
-    res.status(404).json({
-      ok: false,
-      error: 'NOT_FOUND',
-      message: 'Rota não encontrada'
-    });
-  });
-
-  // =========================================================================
-  // FIX Etapa 2 (2026-07-27): HANDLER GLOBAL DE ERRO — sem vazar stack/Express/SQL.
-  // =========================================================================
-  // 4 args = Express reconhece como error handler. SEMPRE no final.
-  app.use((err, req, res, next) => {
-    // Log interno com detalhes
-    console.error('[UNHANDLED]', err && (err.stack || err.message || err));
-    // Resposta genérica pro cliente (sem detalhes de implementação)
-    res.status(err.status || 500).json({
-      ok: false,
-      error: 'INTERNAL_ERROR',
-      message: 'Ocorreu um erro interno. Tente novamente em instantes.'
-    });
-  });
-
-  // Helper: respostas 500 seguras (log interno + mensagem genérica pro cliente).
-  // Substitui o padrão `res.status(500).json({ erro: e.message })` que vaza SQL/Express/etc.
-  // NÃO usar em rotas /_debug/* (precisam do erro real pro Fabio).
-  // ═══════════════════════════════════════════════════════════════════════════
   // FASE 11 — Busca avançada, Tags de Vaga, Favoritos, Score de Match
   // ═══════════════════════════════════════════════════════════════════════════
 
@@ -7690,6 +7659,37 @@ process.on('unhandledRejection', (e) => {
   });
 
   // ── FIM FASE 11 ──────────────────────────────────────────────────────────
+  // FIX Etapa 2 (2026-07-27): HANDLER GLOBAL 404 — JSON seguro, sem stack.
+  // =========================================================================
+  // Impede que Express retorne HTML "<pre>Cannot GET ...</pre>" em rotas inexistentes.
+  // Aplica para qualquer método (GET/POST/PUT/DELETE/OPTIONS) em qualquer rota não casada.
+  app.use((req, res, next) => {
+    res.status(404).json({
+      ok: false,
+      error: 'NOT_FOUND',
+      message: 'Rota não encontrada'
+    });
+  });
+
+  // =========================================================================
+  // FIX Etapa 2 (2026-07-27): HANDLER GLOBAL DE ERRO — sem vazar stack/Express/SQL.
+  // =========================================================================
+  // 4 args = Express reconhece como error handler. SEMPRE no final.
+  app.use((err, req, res, next) => {
+    // Log interno com detalhes
+    console.error('[UNHANDLED]', err && (err.stack || err.message || err));
+    // Resposta genérica pro cliente (sem detalhes de implementação)
+    res.status(err.status || 500).json({
+      ok: false,
+      error: 'INTERNAL_ERROR',
+      message: 'Ocorreu um erro interno. Tente novamente em instantes.'
+    });
+  });
+
+  // Helper: respostas 500 seguras (log interno + mensagem genérica pro cliente).
+  // Substitui o padrão `res.status(500).json({ erro: e.message })` que vaza SQL/Express/etc.
+  // NÃO usar em rotas /_debug/* (precisam do erro real pro Fabio).
+  // ═══════════════════════════════════════════════════════════════════════════
 
   function erroInterno(req, res, e, contexto) {
     console.error(`[ERRO ${contexto}]`, e && (e.stack || e.message || e));
