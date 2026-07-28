@@ -14,6 +14,8 @@
 // Schema:
 //   id              BIGSERIAL PRIMARY KEY
 //   candidatura_id  BIGINT NOT NULL FK -> candidaturas(id)
+//   vaga_id         BIGINT NOT NULL FK -> vagas(id) (desnormalizado p/ tenant query)
+//   empresa_id      BIGINT NOT NULL FK -> empresas(id) (desnormalizado p/ tenant query)
 //   etapa_anterior  INT (nullable)
 //   etapa_nova      INT NOT NULL
 //   status_anterior VARCHAR(40)
@@ -44,6 +46,8 @@ async function aplicar() {
       CREATE TABLE IF NOT EXISTS candidatura_historico (
         id BIGSERIAL PRIMARY KEY,
         candidatura_id BIGINT NOT NULL REFERENCES candidaturas(id) ON DELETE CASCADE,
+        vaga_id BIGINT,
+        empresa_id BIGINT,
         etapa_anterior INT,
         etapa_nova INT NOT NULL,
         status_anterior VARCHAR(40),
@@ -58,6 +62,11 @@ async function aplicar() {
         criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW()
       )
     `);
+    // Garante colunas vaga_id / empresa_id caso a tabela já exista sem elas
+    await client.query(`ALTER TABLE candidatura_historico ADD COLUMN IF NOT EXISTS vaga_id BIGINT`);
+    await client.query(`ALTER TABLE candidatura_historico ADD COLUMN IF NOT EXISTS empresa_id BIGINT`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_cand_hist_vaga_id ON candidatura_historico (vaga_id)`);
+    await client.query(`CREATE INDEX IF NOT EXISTS idx_cand_hist_empresa_id ON candidatura_historico (empresa_id)`);
     escreve('Tabela candidatura_historico pronta (idempotente)');
 
     // 2. Índices (idempotentes)
