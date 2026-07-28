@@ -6389,3 +6389,4 @@ app.get('/api/_debug/fase6-tabela', async (req, res) => {
     res.status(500).json({ erro: e.message });
   }
 });
+// 1785206197
