@@ -471,7 +471,14 @@ async function init() {
       console.error('[MIGRATION 010] Erro não tratado (mas segui):', migrationErr.message);
     }
 
-    console.log('Tabelas criadas/verificadas + migrations Fase 1-010 aplicadas');
+    try {
+      const { up: migration011 } = require('./migrations/011_analytics_pwa_fase14');
+      await migration011();
+    } catch (migrationErr) {
+      console.error('[MIGRATION 011] Erro não tratado (mas segui):', migrationErr.message);
+    }
+
+    console.log('Tabelas criadas/verificadas + migrations Fase 1-011 aplicadas');
   } finally {
     client.release();
   }
