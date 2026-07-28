@@ -436,6 +436,7 @@ app.get('/api/public/empresa/:slug/vagas/:id', async (req, res) => {
   }
 });
 
+app.get('/api/_version', (req,res) => res.json({commit:'22f61ca41a', ts:new Date().toISOString()}));
 app.get('/api/saude', async (req, res) => {
   let db_ok = false;
   try {
