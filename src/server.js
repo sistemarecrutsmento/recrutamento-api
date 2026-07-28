@@ -32,6 +32,8 @@ if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'sua_chave_secreta_aqu
 
 const { pool, init, inserirNotificacao } = require('./db');
 const { enviarCodigo, enviarNotificacaoStatus, enviarEmailProposta, enviarEmailBg, enviarEmailAtualizacao, enviarEmail, enviarEmailInscricao, getResendKey } = require('./email');
+// Fase 13 — Serviço central de e-mail (usa os mesmos provedores, acrescenta templates, preferências, dedup)
+const emailSvc = require('./email/emailService');
 const meet = require('./meet');
 const { criarAccessToken, criarRefreshToken, persistirRefresh, consumirRefresh, revogarRefresh, revogarTodosPorUsuario, listarSessoes, revogarSessaoById, revogarOutrasSessoes } = require('./token');
 
@@ -937,6 +939,8 @@ app.post('/api/candidato/cadastro', rateLimitLogin, async (req, res) => {
     const accessToken = criarAccessToken({ id: rows[0].id, email: emailLower, tipo: 'candidato' });
     const refresh = criarRefreshToken();
     await persistirRefresh('candidato', rows[0].id, emailLower, refresh, req, { user_role: 'candidato' });
+    // Fase 13 — E-mail de boas-vindas (não bloqueia resposta)
+    emailSvc.bgBoasVindasCandidato({ candidato_id: rows[0].id, email: emailLower, nome: rows[0].nome });
     res.json({ ok: true, token: accessToken, refreshToken: refresh, candidato: rows[0] });
   } catch (e) {
     console.error('[CADASTRO ERRO]', e);
@@ -1539,11 +1543,24 @@ app.post('/api/candidato/candidatar/:vagaId', authCandidato, async (req, res) =>
     // E-mail de boas-vindas: inscrição recebida (em background, não trava a response)
     try {
       const { rows: vd } = await pool.query(
-        'SELECT v.titulo, v.empresa, cd.nome FROM vagas v, candidatos cd WHERE v.id = $1 AND cd.id = $2',
+        'SELECT v.titulo, v.empresa, v.empresa_id, e.nome AS empresa_nome_real, cd.nome, cd.id AS cand_id FROM vagas v LEFT JOIN empresas e ON e.id = v.empresa_id, candidatos cd WHERE v.id = $1 AND cd.id = $2',
         [req.params.vagaId, c[0].id]
       );
       if (vd.length > 0) {
+        // Legado (mantido)
         enviarEmailBg(enviarEmailInscricao, req.user.email, vd[0].nome, vd[0].titulo, vd[0].empresa);
+        // Fase 13 — email confirmação candidato + notif empresa
+        const empresaNome = vd[0].empresa_nome_real || vd[0].empresa || 'Empresa';
+        emailSvc.bgCandidaturaConfirmada({
+          candidato_id: vd[0].cand_id, email: req.user.email, nome: vd[0].nome,
+          vaga_titulo: vd[0].titulo, empresa_nome: empresaNome, candidatura_id: rows[0].id
+        });
+        if (vd[0].empresa_id) {
+          emailSvc.bgNovaCandidaturaEmpresa({
+            empresa_id: vd[0].empresa_id, vaga_titulo: vd[0].titulo,
+            candidato_nome: vd[0].nome, candidatura_id: rows[0].id
+          });
+        }
       }
     } catch (e) {
       console.error('[candidatar] Falha ao enviar e-mail de inscrição:', e.message);
@@ -3281,6 +3298,24 @@ app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
       detalhes: `Data: ${dataFormatada}${linkGerado ? ` • Meet: ${linkGerado}` : ''}${local && !isOnline ? ` • ${local}` : ''}`
     }]), candidatura_id]);
 
+    // Fase 13 — E-mail entrevista agendada para candidato
+    try {
+      const { rows: cd } = await pool.query(
+        `SELECT cd.email, cd.nome, v.titulo AS vaga_titulo, v.empresa AS empresa_nome, v.empresa_id
+         FROM candidaturas c JOIN candidatos cd ON cd.id = c.candidato_id JOIN vagas v ON v.id = c.vaga_id
+         WHERE c.id = $1`, [candidatura_id]
+      );
+      if (cd.length > 0) {
+        emailSvc.bgEntrevistaAgendada({
+          candidato_id: cd[0].id, email: cd[0].email, nome: cd[0].nome,
+          vaga_titulo: cd[0].vaga_titulo, empresa_nome: cd[0].empresa_nome,
+          data_hora: dataHoraFinal, local: local || null,
+          link_reuniao: linkGerado || null, online: isOnline,
+          observacoes: observacoes || null, candidatura_id: candidatura_id
+        });
+      }
+    } catch (e) { console.error('[entrevista email]', e.message); }
+
     res.json({ ok: true, entrevista, googleEventId, meetHtmlLink });
   } catch (e) {
     console.error('[ENTREVISTA CRIAR ERRO]', e);
@@ -3330,6 +3365,21 @@ app.post('/api/admin/entrevista/:id/cancelar', authAdmin, async (req, res) => {
     }]), entrevista.candidatura_id]);
 
     res.json({ ok: true, entrevista_id: id, status: 'cancelada' });
+    // Fase 13 — E-mail entrevista cancelada
+    try {
+      const { rows: cd } = await pool.query(
+        `SELECT cd.email, cd.nome, v.titulo AS vaga_titulo, v.empresa AS empresa_nome
+         FROM candidaturas c JOIN candidatos cd ON cd.id = c.candidato_id JOIN vagas v ON v.id = c.vaga_id
+         WHERE c.id = $1`, [entrevista.candidatura_id]
+      );
+      if (cd.length > 0) {
+        emailSvc.bgEntrevistaCancelada({
+          candidato_id: null, email: cd[0].email, nome: cd[0].nome,
+          vaga_titulo: cd[0].vaga_titulo,
+          data_hora: entrevista.data_hora
+        });
+      }
+    } catch (e) { console.error('[entrevista cancelar email]', e.message); }
   } catch (e) {
     console.error('[ENTREVISTA CANCELAR ERRO]', e);
     return erroInterno(req, res, e, 'api-admin-entrevistas');
@@ -4026,6 +4076,13 @@ app.post('/api/admin/candidatura/:id/enviar-proposta', authAdmin, async (req, re
   // Notifica o candidato por e-mail (em background — não trava a resposta)
   try {
     enviarEmailBg(enviarEmailProposta, cand.email, cand.nome, cand.titulo, pdfFinalUrl);
+    // Fase 13 — email proposta com template visual e preferência
+    emailSvc.bgPropostaEnviada({
+      candidato_id: cand.candidato_id, email: cand.email, nome: cand.nome,
+      vaga_titulo: cand.titulo, empresa_nome: cand.empresa || cand.empresa_nome || 'Empresa',
+      resumo: texto ? texto.substring(0, 200) : null,
+      candidatura_id: req.params.id
+    });
   } catch (e) {
     console.error('Falha ao agendar e-mail de proposta:', e.message);
   }
@@ -4114,6 +4171,14 @@ app.post('/api/candidato/aceitar-proposta/:candidaturaId', authCandidato, async 
         acao: 'admin_candidato_aceitou',
         status: 'em_andamento',
         mensagemAdmin: `Candidato ${cand.cand_email} ACEITOU a proposta. Próxima etapa: Coleta de Documentos.`
+      });
+    }
+    // Fase 13 — notifica a empresa pelo emailService
+    if (cand.empresa_id) {
+      emailSvc.bgPropostaRespondida({
+        empresa_id: cand.empresa_id, candidato_nome: cand.nome,
+        vaga_titulo: cand.titulo, resposta: 'aceita',
+        candidatura_id: req.params.candidaturaId
       });
     }
   } catch (e) {
@@ -4231,6 +4296,14 @@ app.post('/api/candidato/recusar-proposta/:candidaturaId', authCandidato, async 
         acao: 'admin_candidato_recusou',
         status: 'rejeitado',
         mensagemAdmin: `Candidato ${cand.cand_email} RECUSOU a proposta${motivo ? '. Motivo: ' + motivo : ''}.`
+      });
+    }
+    // Fase 13 — notifica a empresa
+    if (cand.empresa_id) {
+      emailSvc.bgPropostaRespondida({
+        empresa_id: cand.empresa_id, candidato_nome: cand.nome,
+        vaga_titulo: cand.titulo, resposta: 'recusada', motivo: motivo || null,
+        candidatura_id: req.params.candidaturaId
       });
     }
   } catch (e) {
@@ -4777,6 +4850,11 @@ app.post('/api/empresa/cadastro', rateLimitByIp('cadastro-empresa'), async (req,
         slug: empresa.slug,
         criado_em: empresa.criado_em
       }
+    });
+    // Fase 13 — Boas-vindas empresa (não bloqueia resposta)
+    emailSvc.bgBoasVindasEmpresa({
+      empresa_id: empresa.id, empresa_nome: empresa.nome,
+      admin_email: adminUser.email, admin_nome: adminUser.nome
     });
   } catch (e) {
     return erroInterno(req, res, e, 'api-empresa-cadastro');
@@ -7955,6 +8033,15 @@ process.on('unhandledRejection', (e) => {
       `, [cid, remetente_nome || info.empresa_nome, texto, remetente_id || null]);
       // Notificar candidato (async, não bloqueia resposta)
       notificarCandidatoChat(cid, info.candidato_id, info.empresa_nome, info.vaga_titulo).catch(() => {});
+      // Fase 13 — e-mail para candidato (empresa enviou) com dedup
+      emailSvc.bgChatEmpresa({
+        candidato_id: info.candidato_id,
+        email: info.candidato_email,
+        nome: info.candidato_nome,
+        empresa_nome: info.empresa_nome,
+        vaga_titulo: info.vaga_titulo,
+        candidatura_id: cid
+      });
       res.json({ ok: true, mensagem: rows[0] });
     } catch (e) {
       console.error('[empresa chat enviar]', e);
@@ -8079,6 +8166,13 @@ process.on('unhandledRejection', (e) => {
       `, [cid, info.candidato_nome, texto, candId]);
       // Notificar empresa (async)
       notificarEmpresaChat(cid, info.empresa_id, info.candidato_nome, info.vaga_titulo).catch(() => {});
+      // Fase 13 — e-mail para empresa com dedup
+      emailSvc.bgChatCandidato({
+        empresa_id: info.empresa_id,
+        candidato_nome: info.candidato_nome,
+        vaga_titulo: info.vaga_titulo,
+        candidatura_id: cid
+      });
       res.json({ ok: true, mensagem: rows[0] });
     } catch (e) {
       console.error('[candidato chat enviar]', e);
@@ -8131,6 +8225,129 @@ process.on('unhandledRejection', (e) => {
   });
 
   // ── FIM FASE 12 ───────────────────────────────────────────────────────────
+
+  // =========================================================================
+  // FASE 13 — E-mail transacional: preferências + endpoint teste + digest
+  // =========================================================================
+
+  // Helper: resolve user_type + user_id de qualquer token autenticado
+  function resolveEmailUser(req) {
+    const tipo = req.user?.tipo || null;
+    if (tipo === 'candidato') {
+      const id = req.user?.id || req.user?.candidato_id || null;
+      return { user_type: 'candidato', user_id: id };
+    }
+    if (tipo === 'empresa') {
+      const id = req.user?.id || req.user?.empresa_usuario_id || null;
+      return { user_type: 'empresa', user_id: id };
+    }
+    return { user_type: null, user_id: null };
+  }
+  app.get('/api/email/preferencias', requireAuthAny, async (req, res) => {
+    try {
+      const { user_type, user_id } = resolveEmailUser(req);
+      if (!user_type) return res.status(401).json({ erro: 'Não autenticado' });
+      const prefs = await emailSvc.getPreferencias(user_type, user_id);
+      res.json({ preferencias: prefs });
+    } catch (e) {
+      console.error('[email pref GET]', e);
+      res.status(500).json({ erro: 'Erro ao buscar preferências' });
+    }
+  });
+
+  // PATCH /api/email/preferencias — altera uma ou mais categorias
+  app.patch('/api/email/preferencias', requireAuthAny, async (req, res) => {
+    try {
+      const { user_type, user_id } = resolveEmailUser(req);
+      if (!user_type) return res.status(401).json({ erro: 'Não autenticado' });
+
+      // Aceita array { preferencias: [{categoria, ativo}] } OU objeto { categoria, ativo }
+      let lista = [];
+      if (Array.isArray(req.body?.preferencias)) {
+        lista = req.body.preferencias;
+      } else if (req.body?.categoria !== undefined) {
+        lista = [{ categoria: req.body.categoria, ativo: req.body.ativo }];
+      } else if (req.body && Object.keys(req.body).length === 0) {
+        return res.status(400).json({ erro: 'Informe preferencias (array) ou categoria + ativo' });
+      } else {
+        // body existe mas não tem preferencias nem categoria
+        return res.status(400).json({ erro: 'Informe preferencias (array) ou categoria + ativo' });
+      }
+
+      if (lista.length === 0) {
+        return res.json({ ok: true, atualizadas: 0 });
+      }
+
+      const OBRIGATORIAS = ['seguranca', 'recuperacao_senha'];
+      for (const item of lista) {
+        const { categoria, ativo } = item;
+        if (!emailSvc.CATEGORIAS_VALIDAS.includes(categoria)) {
+          return res.status(400).json({ erro: `Categoria inválida: ${categoria}. Use: ${emailSvc.CATEGORIAS_VALIDAS.join(', ')}` });
+        }
+        if (OBRIGATORIAS.includes(categoria) && !ativo) {
+          return res.status(400).json({ erro: `Categoria "${categoria}" é obrigatória e não pode ser desativada.` });
+        }
+        if (typeof ativo !== 'boolean') {
+          return res.status(400).json({ erro: `"ativo" deve ser boolean para categoria "${categoria}"` });
+        }
+      }
+      for (const { categoria, ativo } of lista) {
+        await emailSvc.setPreferencia(user_type, user_id, categoria, ativo);
+      }
+      res.json({ ok: true, atualizadas: lista.length });
+    } catch (e) {
+      console.error('[email pref PATCH]', e);
+      res.status(500).json({ erro: 'Erro ao salvar preferência' });
+    }
+  });
+
+  // POST /api/saas/email/test — admin SaaS envia e-mail de teste (não público)
+  app.post('/api/saas/email/test', authAdmin, async (req, res) => {
+    if (!req.admin?.is_saas) return res.status(403).json({ erro: 'Apenas admin SaaS' });
+    const { destinatario, tipo } = req.body;
+    if (!destinatario) return res.status(400).json({ erro: 'destinatario obrigatório' });
+    try {
+      const tipoTest = tipo || 'boas_vindas_candidato';
+      let result;
+      if (tipoTest === 'boas_vindas_candidato') {
+        result = await emailSvc.boasVindasCandidato({
+          candidato_id: 0, email: destinatario, nome: 'Usuário Teste'
+        });
+      } else if (tipoTest === 'boas_vindas_empresa') {
+        result = await emailSvc.boasVindasEmpresa({
+          empresa_id: 0, empresa_nome: 'Empresa Teste',
+          user_id: 0, email: destinatario, nome: 'Admin Teste'
+        });
+      } else {
+        const { enviarEmail } = require('./email');
+        const { wrap, p } = require('./email/templates');
+        result = await enviarEmail({
+          to: destinatario,
+          subject: '[Teste] Vagas.io · E-mail de teste',
+          html: wrap({ titulo: 'E-mail de Teste',
+            conteudo: p('Este é um e-mail de teste enviado pelo painel admin Vagas.io.') +
+                   p('Se você recebeu isso, o serviço de e-mail está funcionando corretamente! ✅')
+          })
+        });
+      }
+      res.json({ ok: true, tipo: tipoTest, result });
+    } catch (e) {
+      res.status(500).json({ ok: false, erro: e.message });
+    }
+  });
+
+  // POST /api/saas/email/digest — dispara digest diário manualmente (admin SaaS)
+  app.post('/api/saas/email/digest', authAdmin, async (req, res) => {
+    if (!req.admin?.is_saas) return res.status(403).json({ erro: 'Apenas admin SaaS' });
+    try {
+      const { empresa_id } = req.body || {};
+      const result = await emailSvc.bgDigestDiario({ empresaId: empresa_id || null });
+      res.json({ ok: true, result });
+    } catch (e) {
+      res.status(500).json({ ok: false, erro: e.message });
+    }
+  });
+
   // FIX Etapa 2 (2026-07-27): HANDLER GLOBAL 404 — JSON seguro, sem stack.
   // =========================================================================
   // Impede que Express retorne HTML "<pre>Cannot GET ...</pre>" em rotas inexistentes.
