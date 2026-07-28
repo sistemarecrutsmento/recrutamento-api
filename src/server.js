@@ -8604,6 +8604,381 @@ process.on('unhandledRejection', (e) => {
     });
   });
 
+
+// ============================================================
+// FECHAMENTO FUNCIONAL — Bloco 1: Endpoints Empresa
+// Implementado: 28/07/2026
+// ============================================================
+
+// ── 1. GET /api/admin/me ─────────────────────────────────────
+app.get('/api/admin/me', authAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT id, nome, email, role FROM admins WHERE id = $1',
+      [req.user.id]
+    );
+    if (rows.length === 0) return res.status(404).json({ erro: 'Admin não encontrado' });
+    res.json({ id: rows[0].id, nome: rows[0].nome, email: rows[0].email, role: rows[0].role || 'admin' });
+  } catch (e) {
+    return erroInterno(req, res, e, 'api-admin-me');
+  }
+});
+
+// ── 2. POST /api/empresa/entrevista ──────────────────────────
+app.post('/api/empresa/entrevista', requireRecrutadorOuAdmin, async (req, res) => {
+  const { empresa_id, nome: empresa_nome } = req.user;
+  try {
+    const { candidatura_id, data_hora, tipo, observacoes, local, link_reuniao, duracao_minutos } = req.body || {};
+    if (!candidatura_id || !data_hora) {
+      return res.status(400).json({ erro: 'candidatura_id e data_hora são obrigatórios' });
+    }
+
+    // Valida ownership via empresa_vaga_acesso (anti-IDOR)
+    const { rows: acc } = await pool.query(`
+      SELECT c.id, c.etapa_atual, c.status, c.vaga_id,
+             cd.id AS candidato_id, cd.nome AS candidato_nome, cd.email AS candidato_email,
+             v.titulo AS vaga_titulo, v.empresa AS empresa_nome_vaga
+      FROM candidaturas c
+      JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.empresa_id = $1
+      JOIN candidatos cd ON cd.id = c.candidato_id
+      JOIN vagas v ON v.id = c.vaga_id
+      WHERE c.id = $2
+    `, [empresa_id, candidatura_id]);
+    if (acc.length === 0) return res.status(403).json({ erro: 'Sem acesso a esta candidatura' });
+    const cand = acc[0];
+
+    if (['contratado', 'rejeitado', 'reprovado'].includes(cand.status)) {
+      return res.status(409).json({ erro: `Candidatura já está "${cand.status}" — não é possível agendar entrevista` });
+    }
+
+    let dataHoraFinal;
+    try {
+      const d = new Date(data_hora);
+      if (isNaN(d.getTime())) throw new Error('inválida');
+      dataHoraFinal = d.toISOString();
+    } catch (_) {
+      return res.status(400).json({ erro: 'data_hora inválida. Use ISO 8601 (ex: 2026-09-01T10:00:00-03:00)' });
+    }
+
+    const etapa = 4;
+    const isOnline = !tipo || tipo === 'video' || tipo === 'online';
+    const linkFinal = link_reuniao || null;
+    const localFinal = local || null;
+
+    const { rows: eRows } = await pool.query(`
+      INSERT INTO entrevistas
+        (candidatura_id, etapa, data_hora, duracao_minutos, local, link_reuniao, observacoes, status)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, 'agendada')
+      RETURNING *
+    `, [candidatura_id, etapa, dataHoraFinal, duracao_minutos || 60, localFinal, linkFinal, observacoes || null]);
+    const entrevista = eRows[0];
+
+    const dataFormatada = new Date(dataHoraFinal).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
+    await pool.query(`
+      UPDATE candidaturas
+      SET historico = COALESCE(historico, '[]'::jsonb) || $1::jsonb, atualizada_em = NOW()
+      WHERE id = $2
+    `, [JSON.stringify([{
+      acao: `📅 Entrevista agendada pela empresa`,
+      etapa: etapa,
+      em: new Date().toISOString(),
+      tipo: 'entrevista',
+      data_hora: dataHoraFinal,
+      por: `empresa:${empresa_nome || empresa_id}`,
+      formato: isOnline ? 'online' : 'presencial',
+      detalhes: `Data: ${dataFormatada}${linkFinal ? ' • Link: ' + linkFinal : ''}${localFinal && !isOnline ? ' • ' + localFinal : ''}`
+    }]), candidatura_id]);
+
+    inserirNotificacao(pool, 'candidato', cand.candidato_id, 'entrevista_agendada',
+      `📅 Entrevista agendada — ${cand.vaga_titulo}`,
+      `Data: ${dataFormatada}`,
+      { referencia_tipo: 'candidatura', referencia_id: candidatura_id }
+    );
+
+    try {
+      emailSvc.bgEntrevistaAgendada({
+        candidato_id: cand.candidato_id,
+        email: cand.candidato_email,
+        nome: cand.candidato_nome,
+        vaga_titulo: cand.vaga_titulo,
+        empresa_nome: cand.empresa_nome_vaga || empresa_nome,
+        data_hora: dataHoraFinal,
+        local: localFinal,
+        link_reuniao: linkFinal,
+        online: isOnline,
+        observacoes: observacoes || null,
+        candidatura_id: candidatura_id
+      });
+    } catch (e) { console.error('[empresa entrevista email]', e.message); }
+
+    await audit(req, 'empresa.entrevista.created', {
+      resource_type: 'entrevista', resource_id: entrevista.id,
+      metadata: { candidatura_id, data_hora: dataHoraFinal, tipo: tipo || 'video' }
+    });
+    analytics.bg({ evento: 'entrevista_agendada', user_type: 'empresa',
+      empresa_id, candidatura_id, ...analytics.fromReq(req) });
+
+    res.status(201).json({ ok: true, entrevista });
+  } catch (e) {
+    return erroInterno(req, res, e, 'api-empresa-entrevista-post');
+  }
+});
+
+// ── 3. POST /api/empresa/candidatura/:id/proposta ────────────
+app.post('/api/empresa/candidatura/:id/proposta', requireRecrutadorOuAdmin, async (req, res) => {
+  const { empresa_id } = req.user;
+  const candId = Number(req.params.id);
+  try {
+    const { texto, pdf_url, pdf_public_id } = req.body || {};
+    if (!texto && !pdf_url) {
+      return res.status(400).json({ erro: 'Envie um texto ou uma URL do PDF da proposta' });
+    }
+
+    const { rows: c } = await pool.query(`
+      SELECT c.*, v.titulo, cd.nome, cd.email, cd.id AS candidato_id_full
+      FROM candidaturas c
+      JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.empresa_id = $1
+      JOIN vagas v ON v.id = c.vaga_id
+      JOIN candidatos cd ON cd.id = c.candidato_id
+      WHERE c.id = $2
+    `, [empresa_id, candId]);
+    if (c.length === 0) return res.status(403).json({ erro: 'Sem acesso a esta candidatura' });
+    const cand = c[0];
+
+    if (cand.proposta_enviada_em) {
+      return res.status(409).json({ erro: 'Proposta já enviada para este candidato' });
+    }
+    if (['contratado', 'rejeitado', 'reprovado'].includes(cand.status)) {
+      return res.status(409).json({ erro: `Candidatura já está "${cand.status}"` });
+    }
+
+    let pdfFinalUrl = pdf_url || null;
+    let pdfFinalId = pdf_public_id || null;
+    if (pdf_url && String(pdf_url).startsWith('data:application/pdf')) {
+      if (!process.env.CLOUDINARY_URL && !process.env.CLOUDINARY_CLOUD_NAME) {
+        return res.status(500).json({ erro: 'Cloudinary não configurado para receber PDF' });
+      }
+      try {
+        const up = await cloudinary.uploader.upload(pdf_url, {
+          folder: 'propostas', resource_type: 'raw',
+          public_id: `proposta_${candId}_${Date.now()}`
+        });
+        pdfFinalUrl = up.secure_url;
+        pdfFinalId = up.public_id;
+      } catch (e) {
+        console.error('[empresa proposta upload pdf]', e);
+        return erroInterno(req, res, e, 'empresa-proposta-upload-pdf');
+      }
+    }
+
+    const historico = Array.isArray(cand.historico) ? [...cand.historico] : [];
+    historico.push({
+      etapa: cand.etapa_atual,
+      status: 'proposta_enviada',
+      acao: 'enviar_proposta',
+      mensagem: 'Proposta enviada ao candidato pela empresa',
+      data: new Date().toISOString(),
+      por: `empresa:${req.user.nome || empresa_id}`
+    });
+
+    await pool.query(`
+      UPDATE candidaturas
+      SET proposta_texto = $1, proposta_pdf_url = $2, proposta_pdf_public_id = $3,
+          proposta_enviada_em = NOW(), historico = $4, atualizada_em = NOW()
+      WHERE id = $5
+    `, [texto || null, pdfFinalUrl, pdfFinalId, JSON.stringify(historico), candId]);
+
+    inserirNotificacao(pool, 'empresa', empresa_id, 'proposta_enviada',
+      `📨 Proposta enviada: ${cand.nome}`,
+      cand.titulo ? `Vaga: ${cand.titulo}` : null,
+      { referencia_tipo: 'candidatura', referencia_id: candId, metadata: { tem_pdf: !!pdfFinalUrl } }
+    );
+    inserirNotificacao(pool, 'candidato', cand.candidato_id, 'proposta_enviada',
+      `📨 Você recebeu uma proposta — ${cand.titulo}`,
+      'Acesse sua candidatura para visualizar e responder',
+      { referencia_tipo: 'candidatura', referencia_id: candId }
+    );
+
+    try {
+      enviarEmailBg(enviarEmailProposta, cand.email, cand.nome, cand.titulo, pdfFinalUrl);
+      emailSvc.bgPropostaEnviada({
+        candidato_id: cand.candidato_id,
+        email: cand.email, nome: cand.nome,
+        vaga_titulo: cand.titulo,
+        empresa_nome: cand.empresa || req.user.empresa_nome || 'Empresa',
+        resumo: texto ? texto.substring(0, 200) : null,
+        candidatura_id: candId
+      });
+    } catch (e) { console.error('[empresa proposta email]', e.message); }
+
+    await audit(req, 'empresa.proposta.sent', {
+      resource_type: 'candidatura', resource_id: candId,
+      metadata: { tem_pdf: !!pdfFinalUrl }
+    });
+    analytics.bg({ evento: 'proposta_enviada', user_type: 'empresa',
+      empresa_id, candidatura_id: candId, ...analytics.fromReq(req) });
+
+    res.json({ ok: true, proposta: { texto, pdf_url: pdfFinalUrl } });
+  } catch (e) {
+    return erroInterno(req, res, e, 'api-empresa-proposta-post');
+  }
+});
+
+// ── 4. POST /api/empresa/documento/:id/revisar ───────────────
+app.post('/api/empresa/documento/:id/revisar', requireRecrutadorOuAdmin, async (req, res) => {
+  const { empresa_id } = req.user;
+  try {
+    const docId = Number(req.params.id);
+    let { status, justificativa, acao } = req.body || {};
+
+    if (acao && !status) {
+      if (acao === 'aprovar') status = 'aprovado';
+      else if (acao === 'reprovar') status = 'reprovado';
+      else if (acao === 'retornar') status = 'retornado';
+      else if (acao === 'reverter') status = 'pendente';
+    }
+    if (!['aprovado', 'reprovado', 'retornado', 'pendente'].includes(status)) {
+      return res.status(400).json({ erro: 'status deve ser: aprovado, reprovado, retornado ou pendente' });
+    }
+
+    const { rows: docs } = await pool.query(`
+      SELECT d.id, d.tipo, d.status AS status_atual, d.candidatura_id,
+             c.candidato_id, c.etapa_atual
+      FROM documentos_candidatura d
+      JOIN candidaturas c ON c.id = d.candidatura_id
+      JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.empresa_id = $1
+      WHERE d.id = $2
+    `, [empresa_id, docId]);
+    if (docs.length === 0) return res.status(403).json({ erro: 'Sem acesso a este documento' });
+    const docInfo = docs[0];
+
+    await pool.query(`
+      UPDATE documentos_candidatura
+      SET status = $1, justificativa_admin = $2, revisado_em = NOW()
+      WHERE id = $3
+    `, [status, justificativa || null, docId]);
+
+    const acaoLabels = {
+      aprovado: '✅ Documento aprovado',
+      reprovado: '❌ Documento reprovado',
+      retornado: '↩️ Documento devolvido para correção',
+      pendente: '🔄 Documento revertido para pendente'
+    };
+
+    await pool.query(`
+      UPDATE candidaturas
+      SET historico = COALESCE(historico, '[]'::jsonb) || $1::jsonb, atualizada_em = NOW()
+      WHERE id = $2
+    `, [JSON.stringify([{
+      acao: (acaoLabels[status] || status) + ': ' + (docInfo.tipo || 'documento'),
+      em: new Date().toISOString(),
+      tipo: 'documento',
+      por: `empresa:${req.user.nome || empresa_id}`,
+      justificativa: justificativa || null
+    }]), docInfo.candidatura_id]);
+
+    if (status === 'retornado') {
+      await pool.query(`UPDATE candidaturas SET status = 'em_andamento' WHERE id = $1`, [docInfo.candidatura_id]);
+    }
+
+    const tipoNotif = status === 'aprovado' ? 'documento_aprovado' : status === 'reprovado' ? 'documento_reprovado' : 'documento_retornado';
+    const tituloNotif = status === 'aprovado' ? `✅ Documento aprovado: ${docInfo.tipo}` :
+                        status === 'reprovado' ? `❌ Documento reprovado: ${docInfo.tipo}` :
+                        `↩️ Corrija o documento: ${docInfo.tipo}`;
+    inserirNotificacao(pool, 'candidato', docInfo.candidato_id, tipoNotif,
+      tituloNotif, justificativa || null,
+      { referencia_tipo: 'candidatura', referencia_id: docInfo.candidatura_id }
+    );
+
+    await audit(req, 'empresa.documento.reviewed', {
+      resource_type: 'documento', resource_id: docId,
+      metadata: { status, candidatura_id: docInfo.candidatura_id }
+    });
+
+    res.json({ ok: true, status, documento: { id: docId, status, justificativa_admin: justificativa || null } });
+  } catch (e) {
+    return erroInterno(req, res, e, 'api-empresa-documento-revisar');
+  }
+});
+
+// ── 5. POST /api/empresa/candidatura/:id/aprovar-documentos ──
+app.post('/api/empresa/candidatura/:id/aprovar-documentos', requireRecrutadorOuAdmin, async (req, res) => {
+  const { empresa_id } = req.user;
+  const candId = Number(req.params.id);
+  try {
+    const { rows: cRows } = await pool.query(`
+      SELECT c.*, v.titulo, v.etapas, cd.nome, cd.email, cd.id AS candidato_id_full
+      FROM candidaturas c
+      JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.empresa_id = $1
+      JOIN vagas v ON v.id = c.vaga_id
+      JOIN candidatos cd ON cd.id = c.candidato_id
+      WHERE c.id = $2
+    `, [empresa_id, candId]);
+    if (cRows.length === 0) return res.status(403).json({ erro: 'Sem acesso a esta candidatura' });
+    const cand = cRows[0];
+
+    const { rows: docs } = await pool.query(
+      `SELECT id, tipo, status FROM documentos_candidatura WHERE candidatura_id = $1`, [candId]
+    );
+    const TIPOS_OBRIG = (DOCUMENTOS_OBRIGATORIOS || []).map(d => d.tipo);
+    const tiposEnviados = new Set(docs.map(d => d.tipo));
+    const tiposFaltando = TIPOS_OBRIG.filter(t => !tiposEnviados.has(t));
+    if (tiposFaltando.length > 0) {
+      return res.status(400).json({ erro: 'Candidato ainda não enviou todos os documentos obrigatórios.', detalhes: { faltando: tiposFaltando } });
+    }
+    const bloqueados = docs.filter(d => TIPOS_OBRIG.includes(d.tipo) && ['retornado', 'reprovado'].includes(d.status));
+    if (bloqueados.length > 0) {
+      return res.status(400).json({ erro: 'Há documentos para reenviar/reprovados.', detalhes: { bloqueados: bloqueados.length } });
+    }
+    if (docs.length === 0) return res.status(400).json({ erro: 'Nenhum documento enviado ainda.' });
+
+    await pool.query(`
+      UPDATE documentos_candidatura SET status = 'aprovado',
+        justificativa_admin = 'Aprovado em lote (empresa)', revisado_em = NOW()
+      WHERE candidatura_id = $1 AND status != 'aprovado'
+    `, [candId]);
+
+    let totalEtapas = 7;
+    try {
+      const arr = typeof cand.etapas === 'string' ? JSON.parse(cand.etapas) : cand.etapas;
+      if (Array.isArray(arr) && arr.length) totalEtapas = arr.length;
+    } catch (_) {}
+    const novaEtapa = (cand.etapa_atual || 0) + 1;
+    const novoStatus = novaEtapa >= totalEtapas ? 'contratado' : 'em_andamento';
+
+    const historico = Array.isArray(cand.historico) ? cand.historico : [];
+    historico.push({
+      acao: '✅ Documentos aprovados em lote — avançando etapa',
+      etapa: novaEtapa, em: new Date().toISOString(),
+      por: `empresa:${req.user.nome || empresa_id}`
+    });
+
+    await pool.query(`
+      UPDATE candidaturas SET etapa_atual = $1, status = $2, historico = $3, atualizada_em = NOW()
+      WHERE id = $4
+    `, [novaEtapa, novoStatus, JSON.stringify(historico), candId]);
+
+    inserirNotificacao(pool, 'candidato', cand.candidato_id, 'docs_aprovados',
+      '✅ Documentos aprovados!',
+      novoStatus === 'contratado' ? '🎉 Parabéns! Você foi contratado!' : 'Avançando para próxima etapa',
+      { referencia_tipo: 'candidatura', referencia_id: candId }
+    );
+
+    await audit(req, 'empresa.documentos.approved_batch', {
+      resource_type: 'candidatura', resource_id: candId,
+      metadata: { nova_etapa: novaEtapa, novo_status: novoStatus, total_docs: docs.length }
+    });
+    analytics.bg({ evento: 'documentos_aprovados', user_type: 'empresa',
+      empresa_id, candidatura_id: candId, ...analytics.fromReq(req) });
+
+    res.json({ ok: true, nova_etapa: novaEtapa, status: novoStatus });
+  } catch (e) {
+    return erroInterno(req, res, e, 'api-empresa-aprovar-docs');
+  }
+});
+
+// ── FIM FECHAMENTO FUNCIONAL ─────────────────────────────────
+
   // Helper: respostas 500 seguras (log interno + mensagem genérica pro cliente).
   // Substitui o padrão `res.status(500).json({ erro: e.message })` que vaza SQL/Express/etc.
   // NÃO usar em rotas /_debug/* (precisam do erro real pro Fabio).
