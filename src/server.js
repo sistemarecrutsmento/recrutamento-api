@@ -1451,7 +1451,7 @@ app.get('/api/candidato/candidaturas/:id/historico', authCandidato, async (req, 
 //                (proposta aguardando aceite, documentos reprovados pra reenviar)
 //   atualizacoes = timeline mesclada dos processos (últimos 30 eventos)
 // Cada item inclui id/nome da vaga pra renderizar link na UI.
-app.get('/api/candidato/notificacoes', authCandidato, async (req, res) => {
+app.get('/api/candidato/notificacoes-legado', authCandidato, async (req, res) => {
   try {
     const { rows: c } = await pool.query('SELECT id FROM candidatos WHERE email = $1', [req.user.email]);
     if (c.length === 0) return res.json({ aguardando: [], atualizacoes: [] });
@@ -1666,15 +1666,19 @@ app.post('/api/candidato/candidatar/:vagaId', authCandidato, async (req, res) =>
       );
       if (v.length > 0) {
         const { rows: cd } = await pool.query('SELECT nome FROM candidatos WHERE id = $1', [c[0].id]);
-        inserirNotificacao(pool, v[0].empresa_id, 'candidatura_criada',
+        inserirNotificacao(pool, 'empresa', v[0].empresa_id,
+          'candidatura_criada',
           `🆕 Nova candidatura: ${cd[0]?.nome || 'Candidato'}`,
-          {
-            vaga_id: req.params.vagaId, candidatura_id: rows[0].id,
-            resumo: v[0].titulo ? `Vaga: ${v[0].titulo}` : null,
-            link: `analisar.html?id=${rows[0].id}`,
-            actor_id: c[0].id, actor_tipo: 'candidato',
-            actor_nome: req.user.email, actor_role: 'candidato'
-          }
+          v[0].titulo ? `Vaga: ${v[0].titulo}` : null,
+          { referencia_tipo: 'candidatura', referencia_id: rows[0].id, metadata: { vaga_id: req.params.vagaId } }
+        );
+
+        // FASE 7 — também notifica o CANDIDATO (confirmação interna)
+        inserirNotificacao(pool, 'candidato', c[0].id,
+          'candidatura_recebida',
+          `✅ Sua candidatura para ${v[0].titulo || 'a vaga'} foi recebida`,
+          'Em breve você receberá atualizações pelo e-mail cadastrado.',
+          { referencia_tipo: 'candidatura', referencia_id: rows[0].id }
         );
       }
     } catch (e) {
@@ -3216,16 +3220,10 @@ app.post('/api/admin/candidatura/:id/aprovar-documentos', authAdmin, async (req,
     );
 
     // FASE 7 — notificação no feed global
-    inserirNotificacao(pool, cand.empresa_id, 'docs_aprovados',
+    inserirNotificacao(pool, 'empresa', cand.empresa_id, 'docs_aprovados',
       `Documentação aprovada${novoStatus === 'contratado' ? ' — candidato CONTRATADO' : ' — avançou etapa'}`,
-      {
-        vaga_id: cand.vaga_id, candidatura_id: candId,
-        resumo: `${cand.nome || 'Candidato'} · etapa ${novaEtapa}`,
-        link: `analisar.html?id=${candId}`,
-        actor_id: req.user.id, actor_tipo: 'empresa',
-        actor_nome: req.user.nome, actor_role: req.user.role,
-        metadata: { etapa_nova: novaEtapa, status_novo: novoStatus }
-      }
+      `${cand.nome || 'Candidato'} · etapa ${novaEtapa}`,
+      { referencia_tipo: 'candidatura', referencia_id: candId, metadata: { etapa_nova: novaEtapa, status_novo: novoStatus } }
     );
 
     // 6) Notificar candidato (em background — não trava a resposta)
@@ -3659,14 +3657,50 @@ app.post('/api/admin/candidatura/:id/status', authAdmin, async (req, res) => {
       novoStatus === 'contratado' ? `🎉 ${cand.nome || 'Candidato'} CONTRATADO` :
       etapaMudou ? `⬆ ${cand.nome || 'Candidato'} avançou para etapa ${novaEtapa + 1}` :
       `🔄 Status alterado: ${cand.nome || 'Candidato'} → ${novoStatus}`;
-    inserirNotificacao(pool, cand.empresa_id, tipoNotif, tituloNotif, {
-      vaga_id: cand.vaga_id, candidatura_id: req.params.id,
-      resumo: cand.titulo ? `${cand.titulo} · etapa ${novaEtapa}` : null,
-      link: `analisar.html?id=${req.params.id}`,
-      actor_id: req.user.id, actor_tipo: 'empresa',
-      actor_nome: req.user.nome, actor_role: req.user.role,
-      metadata: { acao, etapa_anterior: cand.etapa_atual, etapa_nova: novaEtapa, status_anterior: cand.status, status_novo: novoStatus }
-    });
+    inserirNotificacao(pool, 'empresa', cand.empresa_id, tipoNotif, tituloNotif,
+      cand.titulo ? `${cand.titulo} · etapa ${novaEtapa}` : null,
+      { referencia_tipo: 'candidatura', referencia_id: req.params.id, metadata: { acao, etapa_anterior: cand.etapa_atual, etapa_nova: novaEtapa, status_anterior: cand.status, status_novo: novoStatus } }
+    );
+
+    // FASE 7 — notificação também para o CANDIDATO (sem dados internos)
+    try {
+      const etapaNomeCand = (() => {
+        try {
+          const arr = typeof cand.etapas === 'string' ? JSON.parse(cand.etapas) : cand.etapas;
+          if (Array.isArray(arr) && arr[(novaEtapa || 0)]) {
+            const e = arr[(novaEtapa || 0)];
+            return typeof e === 'string' ? e : (e?.nome || null);
+          }
+        } catch (_) {}
+        return null;
+      })();
+      let tituloCand = '';
+      let msgCand = '';
+      if (novoStatus === 'contratado') {
+        tituloCand = `🎉 Parabéns! Você foi contratado(a) para ${cand.titulo || 'a vaga'}`;
+        msgCand = 'Entre em contato com a empresa para os próximos passos.';
+      } else if (acao === 'reprovar' || novoStatus === 'rejeitado') {
+        tituloCand = `Atualização na sua candidatura para ${cand.titulo || 'a vaga'}`;
+        msgCand = 'O processo seletivo não seguiu. Você pode conferir mais detalhes na sua área de candidato.';
+      } else if (acao === 'reabrir') {
+        tituloCand = `🔓 Sua candidatura para ${cand.titulo || 'a vaga'} foi reaberta`;
+        msgCand = etapaNomeCand ? `Avançou para ${etapaNomeCand}.` : null;
+      } else if (etapaMudou) {
+        tituloCand = `Sua candidatura para ${cand.titulo || 'a vaga'} avançou de etapa`;
+        msgCand = etapaNomeCand ? `Próxima etapa: ${etapaNomeCand}.` : null;
+      } else {
+        tituloCand = `Houve uma atualização na sua candidatura para ${cand.titulo || 'a vaga'}`;
+      }
+      inserirNotificacao(pool, 'candidato', cand.candidato_id,
+        tipoNotif === 'candidato_reprovado' ? 'candidatura_rejeitada' :
+        tipoNotif === 'candidato_contratado' ? 'candidatura_contratada' :
+        'etapa_alterada',
+        tituloCand, msgCand,
+        { referencia_tipo: 'candidatura', referencia_id: req.params.id }
+      );
+    } catch (e) {
+      console.error('[FASE7/candidato] falha ao notificar candidato:', e.message);
+    }
   }
 
   if (mensagem) {
@@ -4091,16 +4125,10 @@ app.post('/api/admin/candidatura/:id/enviar-proposta', authAdmin, async (req, re
   );
 
   // FASE 7 — notificação no feed global
-  inserirNotificacao(pool, cand.empresa_id, 'proposta_enviada',
+  inserirNotificacao(pool, 'empresa', cand.empresa_id, 'proposta_enviada',
     `📨 Proposta enviada: ${cand.nome || 'Candidato'}`,
-    {
-      vaga_id: cand.vaga_id, candidatura_id: req.params.id,
-      resumo: cand.titulo ? `Vaga: ${cand.titulo}` : null,
-      link: `analisar.html?id=${req.params.id}`,
-      actor_id: req.user.id, actor_tipo: 'empresa',
-      actor_nome: req.user.nome, actor_role: req.user.role,
-      metadata: { tem_pdf: !!pdfFinalUrl }
-    }
+    cand.titulo ? `Vaga: ${cand.titulo}` : null,
+    { referencia_tipo: 'candidatura', referencia_id: req.params.id, metadata: { tem_pdf: !!pdfFinalUrl } }
   );
 
   // Notifica o candidato por e-mail (em background — não trava a resposta)
@@ -4171,16 +4199,10 @@ app.post('/api/candidato/aceitar-proposta/:candidaturaId', authCandidato, async 
   );
 
   // FASE 7 — notificação no feed global
-  inserirNotificacao(pool, cand.empresa_id, 'proposta_aceita',
+  inserirNotificacao(pool, 'empresa', cand.empresa_id, 'proposta_aceita',
     `✅ ${cand.nome || 'Candidato'} ACEITOU a proposta`,
-    {
-      vaga_id: cand.vaga_id, candidatura_id: req.params.candidaturaId,
-      resumo: `Próxima etapa: Coleta de Documentos`,
-      link: `analisar.html?id=${req.params.candidaturaId}`,
-      actor_id: null, actor_tipo: 'candidato',
-      actor_nome: cand.cand_email, actor_role: 'candidato',
-      metadata: { etapa_anterior: 5, etapa_nova: 6 }
-    }
+    `Próxima etapa: Coleta de Documentos`,
+    { referencia_tipo: 'candidatura', referencia_id: req.params.candidaturaId, metadata: { etapa_anterior: 5, etapa_nova: 6 } }
   );
 
   // Notifica o candidato por e-mail (em background)
@@ -4247,15 +4269,10 @@ app.post('/api/candidatura/:id/desistir', authCandidato, async (req, res) => {
   );
 
   // FASE 7 — notificação no feed global
-  inserirNotificacao(pool, cand.empresa_id, 'candidato_desistiu',
+  inserirNotificacao(pool, 'empresa', cand.empresa_id, 'candidato_desistiu',
     `🚪 ${cand.nome || 'Candidato'} desistiu da vaga`,
-    {
-      vaga_id: cand.vaga_id, candidatura_id: req.params.id,
-      resumo: cand.titulo ? `Vaga: ${cand.titulo}` : null,
-      link: `analisar.html?id=${req.params.id}`,
-      actor_id: null, actor_tipo: 'candidato',
-      actor_nome: cand.cand_email, actor_role: 'candidato'
-    }
+    cand.titulo ? `Vaga: ${cand.titulo}` : null,
+    { referencia_tipo: 'candidatura', referencia_id: req.params.id }
   );
 
   res.json({ ok: true, mensagem: 'Você desistiu da vaga com sucesso.' });
@@ -4299,16 +4316,10 @@ app.post('/api/candidato/recusar-proposta/:candidaturaId', authCandidato, async 
   );
 
   // FASE 7 — notificação no feed global
-  inserirNotificacao(pool, cand.empresa_id, 'proposta_recusada',
+  inserirNotificacao(pool, 'empresa', cand.empresa_id, 'proposta_recusada',
     `❌ ${cand.nome || 'Candidato'} RECUSOU a proposta`,
-    {
-      vaga_id: cand.vaga_id, candidatura_id: req.params.candidaturaId,
-      resumo: motivo ? `Motivo: ${motivo}` : null,
-      link: `analisar.html?id=${req.params.candidaturaId}`,
-      actor_id: null, actor_tipo: 'candidato',
-      actor_nome: cand.cand_email, actor_role: 'candidato',
-      metadata: { motivo }
-    }
+    motivo ? `Motivo: ${motivo}` : null,
+    { referencia_tipo: 'candidatura', referencia_id: req.params.candidaturaId, metadata: { motivo } }
   );
 
   // Notifica o candidato por e-mail (em background)
@@ -5941,81 +5952,224 @@ app.get('/api/empresa/candidaturas/:id/historico', requireEmpresaViewer, async (
 });
 
 // ============= NOTIFICAÇÕES GLOBAIS (FASE 7) =============
-// Feed da empresa logada + 4 KPIs.
-// Cada KPI é um link inteligente (?tipo=X) que filtra o feed por tipo.
-// KPIS: candidatura_criada (novos candidatos), etapa_avancada (movimentações),
-//       proposta_aceita, proposta_recusada (decisões sobre propostas).
-app.get('/api/admin/notificacoes', requireEmpresaViewer, async (req, res) => {
+// Endpoints oficiais conforme spec:
+//   GET    /api/notificacoes                       — lista do usuário autenticado
+//   GET    /api/notificacoes/nao-lidas             — contagem
+//   PATCH  /api/notificacoes/:id/lida              — marca UMA como lida
+//   PATCH  /api/notificacoes/marcar-todas-lidas    — marca TODAS como lidas
+// Suporta tanto empresa quanto candidato (user_type do JWT).
+
+function userTypeFromReq(req) {
+  return req.user?.tipo || null;
+}
+// Middleware: aceita qualquer usuário autenticado (candidato, empresa, admin)
+// Usado pelos endpoints /api/notificacoes/* — a discriminação é feita
+// dentro do handler com base em req.user.tipo
+function requireAuthAny(req, res, next) {
+  return authMiddleware(req, res, () => {
+    if (!req.user?.tipo) return res.status(401).json({ erro: 'Token inválido' });
+    next();
+  });
+}
+// Candidato: o JWT guarda `email` (não id). Fazemos lookup por email sob demanda.
+// Empresa: o JWT guarda `empresa_id`.
+async function candidatoIdFromReq(req) {
+  if (req.user?.candidato_id) return req.user.candidato_id;
+  if (req.user?.email) {
+    const r = await pool.query('SELECT id FROM candidatos WHERE email = $1', [req.user.email]);
+    return r.rows[0]?.id || null;
+  }
+  return null;
+}
+function empresaIdFromReq(req) {
+  return req.user?.empresa_id || null;
+}
+
+// GET /api/notificacoes — lista do usuário autenticado (empresa OU candidato)
+app.get('/api/notificacoes', requireAuthAny, async (req, res) => {
+  if (!req.user) return res.status(401).json({ erro: 'Token obrigatório' });
+  const ut = userTypeFromReq(req);
+  // Pra empresa: notif é keyada por empresa_id (todos os usuários da mesma empresa compartilham o feed)
+  // Pra candidato: por candidato_id
+  let uid;
+  if (ut === 'candidato') uid = await candidatoIdFromReq(req);
+  else if (ut === 'empresa') uid = empresaIdFromReq(req);
+  else return res.status(403).json({ erro: 'Tipo de usuário não suportado' });
+  if (!uid) return res.status(401).json({ erro: 'Token inválido' });
+
+  const { tipo, lida, limit } = req.query;
+  const lim = Math.min(parseInt(limit) || 30, 100);
+  const params = [ut, uid];
+  let sql = `
+    SELECT id, user_type, user_id, tipo, titulo, mensagem,
+           referencia_tipo, referencia_id, lida_em, criada_em
+      FROM notificacoes
+     WHERE user_type = $1 AND user_id = $2
+  `;
+  if (tipo) { params.push(tipo); sql += ` AND tipo = $${params.length}`; }
+  if (lida === 'true')  sql += ` AND lida_em IS NOT NULL`;
+  if (lida === 'false') sql += ` AND lida_em IS NULL`;
+  sql += ` ORDER BY criada_em DESC LIMIT ${lim}`;
   try {
-    const empresa_id = req.user.empresa_id;
-    const { tipo, limit: limitQ } = req.query;
-    const limit = Math.min(parseInt(limitQ) || 30, 100);
-
-    // 1) Feed filtrado
-    const params = [empresa_id];
-    let sql = `
-      SELECT n.id, n.tipo, n.titulo, n.resumo, n.link, n.criado_em,
-             n.actor_tipo, n.actor_nome, n.actor_role, n.lida_em,
-             n.candidatura_id, n.vaga_id,
-             v.titulo AS vaga_titulo,
-             c.nome AS candidato_nome
-        FROM notificacoes n
-        LEFT JOIN vagas v ON v.id = n.vaga_id
-        LEFT JOIN candidaturas cu ON cu.id = n.candidatura_id
-        LEFT JOIN candidatos c ON c.id = cu.candidato_id
-       WHERE n.empresa_id = $1
-    `;
-    if (tipo) { params.push(tipo); sql += ` AND n.tipo = $${params.length}`; }
-    sql += ` ORDER BY n.criado_em DESC LIMIT ${limit}`;
-    const { rows: feed } = await pool.query(sql, params);
-
-    // 2) KPIs (contadores totais por tipo, sem filtro de lida)
-    const kpiParams = [empresa_id];
-    const kpiSql = `
-      SELECT n.tipo, COUNT(*)::int AS total
-        FROM notificacoes n
-       WHERE n.empresa_id = $1
-       GROUP BY n.tipo
-    `;
-    const { rows: kpis } = await pool.query(kpiSql, kpiParams);
-
-    const mapa = Object.fromEntries(kpis.map(k => [k.tipo, k.total]));
-    const resultado = {
-      feed,
-      kpis: {
-        novos_candidatos: mapa.candidatura_criada || 0,
-        movimentos: (mapa.etapa_avancada || 0) + (mapa.docs_aprovados || 0) + (mapa.status_alterado || 0),
-        propostas_aceitas: mapa.proposta_aceita || 0,
-        propostas_recusadas: mapa.proposta_recusada || 0,
-        // Links inteligentes que o frontend usa
-        links: {
-          novos_candidatos:   'notificacoes.html?tipo=candidatura_criada',
-          movimentos:         'notificacoes.html?tipo=etapa_avancada',
-          propostas_aceitas:  'notificacoes.html?tipo=proposta_aceita',
-          propostas_recusadas:'notificacoes.html?tipo=proposta_recusada'
-        }
-      },
-      empresa_id
-    };
-    res.json(resultado);
+    const { rows } = await pool.query(sql, params);
+    res.json({ ok: true, user_type: ut, notificacoes: rows, total: rows.length });
   } catch (e) {
-    console.error('[admin/notificacoes]', e);
-    res.status(500).json({ erro: 'Erro ao carregar notificações' });
+    console.error('[GET /api/notificacoes]', e);
+    res.status(500).json({ erro: 'Erro ao listar notificações' });
   }
 });
 
-// Marca todas as notificações da empresa como lidas
-app.post('/api/admin/notificacoes/marcar-lidas', requireEmpresaViewer, async (req, res) => {
+// GET /api/notificacoes/nao-lidas — contagem
+app.get('/api/notificacoes/nao-lidas', requireAuthAny, async (req, res) => {
+  if (!req.user) return res.status(401).json({ erro: 'Token obrigatório' });
+  const ut = userTypeFromReq(req);
+  let uid;
+  if (ut === 'candidato') uid = await candidatoIdFromReq(req);
+  else if (ut === 'empresa') uid = empresaIdFromReq(req);
+  else return res.status(403).json({ erro: 'Tipo de usuário não suportado' });
+  if (!uid) return res.status(401).json({ erro: 'Token inválido' });
+  try {
+    const r = await pool.query(
+      `SELECT COUNT(*)::int AS total FROM notificacoes
+        WHERE user_type = $1 AND user_id = $2 AND lida_em IS NULL`,
+      [ut, uid]
+    );
+    res.json({ ok: true, nao_lidas: r.rows[0].total });
+  } catch (e) {
+    console.error('[GET /api/notificacoes/nao-lidas]', e);
+    res.status(500).json({ erro: 'Erro ao contar notificações' });
+  }
+});
+
+// PATCH /api/notificacoes/:id/lida — marca UMA como lida (só do dono)
+app.patch('/api/notificacoes/:id/lida', requireAuthAny, async (req, res) => {
+  if (!req.user) return res.status(401).json({ erro: 'Token obrigatório' });
+  const id = parseInt(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ erro: 'ID inválido' });
+  const ut = userTypeFromReq(req);
+  let uid;
+  if (ut === 'candidato') uid = await candidatoIdFromReq(req);
+  else if (ut === 'empresa') uid = empresaIdFromReq(req);
+  else return res.status(403).json({ erro: 'Tipo de usuário não suportado' });
+  if (!uid) return res.status(401).json({ erro: 'Token inválido' });
   try {
     const r = await pool.query(
       `UPDATE notificacoes SET lida_em = NOW()
-        WHERE empresa_id = $1 AND lida_em IS NULL`,
-      [req.user.empresa_id]
+        WHERE id = $1 AND user_type = $2 AND user_id = $3
+        RETURNING id, lida_em`,
+      [id, ut, uid]
+    );
+    if (r.rowCount === 0) return res.status(404).json({ erro: 'Notificação não encontrada' });
+    res.json({ ok: true, id, lida_em: r.rows[0].lida_em });
+  } catch (e) {
+    console.error('[PATCH /api/notificacoes/:id/lida]', e);
+    res.status(500).json({ erro: 'Erro ao marcar notificação' });
+  }
+});
+
+// PATCH /api/notificacoes/marcar-todas-lidas — marca TODAS como lidas
+app.patch('/api/notificacoes/marcar-todas-lidas', requireAuthAny, async (req, res) => {
+  if (!req.user) return res.status(401).json({ erro: 'Token obrigatório' });
+  const ut = userTypeFromReq(req);
+  let uid;
+  if (ut === 'candidato') uid = await candidatoIdFromReq(req);
+  else if (ut === 'empresa') uid = empresaIdFromReq(req);
+  else return res.status(403).json({ erro: 'Tipo de usuário não suportado' });
+  if (!uid) return res.status(401).json({ erro: 'Token inválido' });
+  try {
+    const r = await pool.query(
+      `UPDATE notificacoes SET lida_em = NOW()
+        WHERE user_type = $1 AND user_id = $2 AND lida_em IS NULL`,
+      [ut, uid]
     );
     res.json({ ok: true, marcadas: r.rowCount });
   } catch (e) {
-    console.error('[admin/notificacoes/marcar-lidas]', e);
-    res.status(500).json({ erro: 'Erro ao marcar notificações como lidas' });
+    console.error('[PATCH /api/notificacoes/marcar-todas-lidas]', e);
+    res.status(500).json({ erro: 'Erro ao marcar notificações' });
+  }
+});
+
+// ============= KPIs — DASHBOARD EMPRESA (FASE 7) =============
+app.get('/api/empresa/dashboard/kpis', requireEmpresaViewer, async (req, res) => {
+  try {
+    const empresa_id = req.user.empresa_id;
+    // Query agregada ÚNICA — evita N+1
+    const { rows: vagasKpi } = await pool.query(`
+      SELECT
+        COUNT(*)::int AS total,
+        COUNT(*) FILTER (WHERE status = 'publicada')::int AS publicadas,
+        COUNT(*) FILTER (WHERE status = 'pausada')::int AS pausadas,
+        COUNT(*) FILTER (WHERE status = 'encerrada')::int AS encerradas,
+        COUNT(*) FILTER (WHERE status = 'rascunho' OR status IS NULL)::int AS rascunhos
+      FROM vagas WHERE empresa_id = $1
+    `, [empresa_id]);
+    const { rows: candKpi } = await pool.query(`
+      SELECT
+        COUNT(*)::int AS total,
+        COUNT(*) FILTER (WHERE c.status = 'em_analise' OR c.status = 'em_andamento')::int AS em_andamento,
+        COUNT(*) FILTER (WHERE c.status = 'contratado')::int AS contratados,
+        COUNT(*) FILTER (WHERE c.status = 'rejeitado')::int AS rejeitados
+      FROM candidaturas c JOIN vagas v ON v.id = c.vaga_id WHERE v.empresa_id = $1
+    `, [empresa_id]);
+    const { rows: etapasKpi } = await pool.query(`
+      SELECT v.titulo, v.id AS vaga_id, c.etapa_atual, COUNT(*)::int AS qtd
+        FROM candidaturas c JOIN vagas v ON v.id = c.vaga_id
+       WHERE v.empresa_id = $1
+       GROUP BY v.id, v.titulo, c.etapa_atual
+       ORDER BY v.id, c.etapa_atual
+    `, [empresa_id]);
+    // Candidaturas novas = criadas nos últimos 7 dias
+    const { rows: novasKpi } = await pool.query(`
+      SELECT COUNT(*)::int AS novas_7d
+        FROM candidaturas c JOIN vagas v ON v.id = c.vaga_id
+       WHERE v.empresa_id = $1 AND c.criada_em > NOW() - INTERVAL '7 days'
+    `, [empresa_id]);
+    res.json({
+      ok: true,
+      empresa_id,
+      vagas: vagasKpi[0],
+      candidaturas: { ...candKpi[0], novas_7d: novasKpi[0].novas_7d },
+      por_etapa: etapasKpi
+    });
+  } catch (e) {
+    console.error('[empresa/dashboard/kpis]', e);
+    res.status(500).json({ erro: 'Erro ao calcular KPIs' });
+  }
+});
+
+// ============= KPIs — CANDIDATO (FASE 7) =============
+app.get('/api/candidato/dashboard/kpis', authCandidato, async (req, res) => {
+  try {
+    const cid = await candidatoIdFromReq(req);
+    if (!cid) return res.status(401).json({ erro: 'Candidato não identificado' });
+    const { rows: cands } = await pool.query(`
+      SELECT
+        COUNT(*)::int AS total,
+        COUNT(*) FILTER (WHERE status = 'em_analise' OR status = 'em_andamento')::int AS em_andamento,
+        COUNT(*) FILTER (WHERE status = 'contratado')::int AS contratadas,
+        COUNT(*) FILTER (WHERE status = 'rejeitado')::int AS rejeitadas,
+        COUNT(*) FILTER (WHERE etapa_atual = 3 OR etapa_atual = 4)::int AS entrevistas
+      FROM candidaturas WHERE candidato_id = $1
+    `, [cid]);
+    const { rows: ult } = await pool.query(`
+      SELECT c.id, c.status, c.etapa_atual, c.atualizada_em, c.criada_em, v.titulo
+        FROM candidaturas c JOIN vagas v ON v.id = c.vaga_id
+       WHERE c.candidato_id = $1 ORDER BY c.atualizada_em DESC NULLS LAST, c.criada_em DESC LIMIT 5
+    `, [cid]);
+    const r = await pool.query(
+      `SELECT COUNT(*)::int AS n FROM notificacoes WHERE user_type='candidato' AND user_id=$1 AND lida_em IS NULL`,
+      [cid]
+    );
+    res.json({
+      ok: true,
+      candidato_id: cid,
+      candidaturas: cands[0],
+      ultimas: ult,
+      notificacoes_nao_lidas: r.rows[0].n
+    });
+  } catch (e) {
+    console.error('[candidato/dashboard/kpis]', e);
+    res.status(500).json({ erro: 'Erro ao calcular KPIs do candidato' });
   }
 });
 
