@@ -1261,12 +1261,12 @@ app.get('/api/candidato/candidaturas', authCandidato, async (req, res) => {
       const progresso = etapaTotal > 0 ? Math.min(1, etapaAtual / etapaTotal) : 0;
 
       // Remove campos internos antes de retornar
-      const { vaga_etapas, _empresa_id_interno, ...pub } = r;
+      const { vaga_etapas, ...pub } = r;
       return {
         ...pub,
-        vaga_etapa_total: etapaTotal,
-        vaga_etapa_nome: etapaNome,
-        vaga_etapa_label: `${Math.min(etapaAtual + 1, etapaTotal)}/${etapaTotal}`,
+        etapa_total: etapaTotal,
+        etapa_nome: etapaNome,
+        etapa_label: `${Math.min(etapaAtual + 1, etapaTotal)} de ${etapaTotal}`,
         progresso
       };
     });
