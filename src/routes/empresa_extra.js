@@ -169,82 +169,13 @@ function registrar(app, ctx) {
   // GET /api/empresa/dashboard
   // Dashboard tenant-isolado: KPIs das vagas DA EMPRESA.
   // ===========================================================
-  app.get('/api/empresa/dashboard', requireEmpresaViewer, async (req, res) => {
-    try {
-      const { empresa_id } = req.user;
-      const tenantWhere = `(v.criada_por = $1 OR v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2))`;
-      const kpis = await pool.query(`
-        SELECT
-          (SELECT COUNT(*) FROM vagas v WHERE ${tenantWhere} AND v.status = 'publicada')::int as vagas_ativas,
-          (SELECT COUNT(*) FROM vagas v WHERE ${tenantWhere} AND v.status = 'pausada')::int as vagas_pausadas,
-          (SELECT COUNT(*) FROM vagas v WHERE ${tenantWhere} AND v.status = 'fechada')::int as vagas_fechadas,
-          (SELECT COUNT(*) FROM candidaturas c JOIN vagas v ON v.id = c.vaga_id WHERE ${tenantWhere} AND c.status NOT IN ('reprovado','contratado'))::int as processos_ativos,
-          (SELECT COUNT(*) FROM candidaturas c JOIN vagas v ON v.id = c.vaga_id WHERE ${tenantWhere} AND c.status = 'contratado')::int as contratacoes_total,
-          (SELECT COUNT(*) FROM entrevistas e JOIN candidaturas c ON c.id = e.candidatura_id JOIN vagas v ON v.id = c.vaga_id WHERE ${tenantWhere} AND e.data_hora >= NOW() AND e.status = 'agendada')::int as entrevistas_agendadas,
-          (SELECT COUNT(DISTINCT c.candidato_id) FROM candidaturas c JOIN vagas v ON v.id = c.vaga_id WHERE ${tenantWhere})::int as candidatos_unicos
-      `, [req.user.id, empresa_id]);
-      const conv = await pool.query(`
-        SELECT
-          (SELECT COUNT(*) FROM candidaturas c JOIN vagas v ON v.id = c.vaga_id WHERE ${tenantWhere} AND c.status = 'contratado')::int as contratados,
-          (SELECT COUNT(*) FROM candidaturas c JOIN vagas v ON v.id = c.vaga_id WHERE ${tenantWhere} AND c.etapa_atual >= 3)::int as passaram_triagem
-      `, [req.user.id, empresa_id]);
-      const taxaConversao = conv.rows[0].passaram_triagem > 0
-        ? +(conv.rows[0].contratados / conv.rows[0].passaram_triagem * 100).toFixed(1)
-        : 0;
-      const proximas = await pool.query(`
-        SELECT e.id, e.candidatura_id, e.etapa, e.data_hora, e.duracao_minutos, e.local, e.link_reuniao, e.status,
-               c.vaga_id, v.titulo as vaga_titulo,
-               cd.id as candidato_id, cd.nome as candidato_nome, cd.foto_url
-        FROM entrevistas e
-        JOIN candidaturas c ON c.id = e.candidatura_id
-        JOIN vagas v ON v.id = c.vaga_id
-        JOIN candidatos cd ON cd.id = c.candidato_id
-        WHERE ${tenantWhere}
-          AND e.status = 'agendada'
-          AND e.data_hora >= NOW()
-          AND e.data_hora < NOW() + INTERVAL '7 days'
-        ORDER BY e.data_hora ASC
-        LIMIT 20
-      `, [req.user.id, empresa_id]);
-      res.json({
-        kpis: kpis.rows[0],
-        taxa_conversao: taxaConversao,
-        proximas_entrevistas: proximas.rows,
-        contratacoes: conv.rows[0],
-      });
-    } catch (e) {
-      console.error('[EMPRESA DASHBOARD]', e);
-      res.status(500).json({ erro: 'Erro ao carregar dashboard' });
-    }
-  });
+);
 
   // ===========================================================
   // GET /api/empresa/vagas-com-candidaturas
   // Lista vagas da empresa com contagem de candidaturas.
   // ===========================================================
-  app.get('/api/empresa/vagas-com-candidaturas', requireEmpresaViewer, async (req, res) => {
-    try {
-      const { empresa_id } = req.user;
-      const { rows } = await pool.query(`
-        SELECT v.id, v.titulo, v.empresa, v.cidade, v.estado, v.status, v.criada_em,
-               COUNT(c.id) FILTER (WHERE c.status NOT IN ('rejeitado','reprovado')) AS total_ativas,
-               COUNT(c.id) AS total_geral,
-               COUNT(c.id) FILTER (WHERE c.status = 'em_analise') AS em_analise,
-               COUNT(c.id) FILTER (WHERE c.status = 'em_andamento') AS em_andamento,
-               COUNT(c.id) FILTER (WHERE c.status = 'contratado') AS contratados
-        FROM vagas v
-        LEFT JOIN candidaturas c ON c.vaga_id = v.id
-        WHERE v.criada_por = $1 OR v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2)
-        GROUP BY v.id
-        HAVING COUNT(c.id) > 0
-        ORDER BY v.criada_em DESC
-      `, [req.user.id, empresa_id]);
-      res.json({ vagas: rows });
-    } catch (e) {
-      console.error('[EMPRESA VAGAS COM CANDIDATURAS]', e);
-      res.status(500).json({ erro: 'Erro ao listar vagas' });
-    }
-  });
+);
 
   // ===========================================================
   // GET /api/empresa/vagas-abertas-antigas
@@ -557,107 +488,15 @@ function registrar(app, ctx) {
     }
   });
 
-  // ===========================================================
-  // GET /api/empresa/candidatura/:id/documentos
-  // ===========================================================
-  app.get('/api/empresa/candidatura/:id/documentos', requireEmpresaViewer, async (req, res) => {
-    try {
-      const { empresa_id } = req.user;
-      const { id } = req.params;
-      const check = await pool.query(`
-        SELECT c.id FROM candidaturas c
-        JOIN vagas v ON v.id = c.vaga_id
-        WHERE c.id = $1 AND (v.criada_por = $2 OR v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3))
-      `, [id, req.user.id, empresa_id]);
-      if (check.rows.length === 0) return res.status(403).json({ erro: 'Candidatura não pertence a esta empresa' });
-      const { rows } = await pool.query(`
-        SELECT id, candidatura_id, tipo, nome_arquivo, arquivo_url, status, motivo_reprovacao,
-               enviado_em, revisado_em, revisado_por
-        FROM documentos_candidatura WHERE candidatura_id = $1 ORDER BY tipo
-      `, [id]);
-      res.json({ documentos: rows });
-    } catch (e) {
-      console.error('[EMPRESA DOCS GET]', e);
-      res.status(500).json({ erro: 'Erro ao listar documentos' });
-    }
-  });
+);
 
-  // ===========================================================
-  // GET /api/empresa/candidatura/:id
-  // ===========================================================
-  app.get('/api/empresa/candidatura/:id', requireEmpresaViewer, async (req, res) => {
-    try {
-      const { empresa_id } = req.user;
-      const { id } = req.params;
-      const { rows } = await pool.query(`
-        SELECT c.*, v.titulo as vaga_titulo, v.criada_por as vaga_criada_por, v.empresa as vaga_empresa,
-               cd.nome as candidato_nome, cd.email as candidato_email, cd.cpf as candidato_cpf,
-               cd.celular as candidato_celular, cd.foto_url as candidato_foto,
-               cd.cidade as candidato_cidade, cd.estado as candidato_estado
-        FROM candidaturas c
-        JOIN vagas v ON v.id = c.vaga_id
-        JOIN candidatos cd ON cd.id = c.candidato_id
-        WHERE c.id = $1
-      `, [id]);
-      if (rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
-      const cand = rows[0];
-      const acessOk = cand.vaga_criada_por === req.user.id ||
-        (await pool.query(`SELECT 1 FROM empresa_vaga_acesso WHERE vaga_id = $1 AND empresa_id = $2`, [cand.vaga_id, empresa_id])).rows.length > 0;
-      if (!acessOk) return res.status(403).json({ erro: 'Sem acesso a esta candidatura' });
-      delete cand.vaga_criada_por;
-      res.json({ candidatura: cand });
-    } catch (e) {
-      console.error('[EMPRESA CANDIDATURA GET]', e);
-      res.status(500).json({ erro: 'Erro ao buscar candidatura' });
-    }
-  });
+);
 
   // ===========================================================
   // POST /api/empresa/candidatura/:id/proposta
   // Envia proposta de emprego ao candidato
   // ===========================================================
-  app.post('/api/empresa/candidatura/:id/proposta', requireRecrutadorOuAdmin, async (req, res) => {
-    try {
-      const { empresa_id } = req.user;
-      const candId = Number(req.params.id);
-      const { texto, pdf_url, pdf_public_id } = req.body || {};
-      if (!texto && !pdf_url) {
-        return res.status(400).json({ erro: 'Envie um texto ou uma URL do PDF da proposta' });
-      }
-      // Validar ownership via empresa_vaga_acesso
-      const { rows: c } = await pool.query(`
-        SELECT c.*, v.titulo, cd.nome, cd.email, cd.id AS candidato_id_full
-        FROM candidaturas c
-        JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.empresa_id = $1
-        JOIN vagas v ON v.id = c.vaga_id
-        JOIN candidatos cd ON cd.id = c.candidato_id
-        WHERE c.id = $2
-      `, [empresa_id, candId]);
-      if (c.length === 0) return res.status(403).json({ erro: 'Sem acesso a esta candidatura' });
-      const cand = c[0];
-      if (cand.proposta_enviada_em) return res.status(409).json({ erro: 'Proposta já enviada para este candidato' });
-      if (['contratado', 'rejeitado', 'reprovado'].includes(cand.status)) {
-        return res.status(409).json({ erro: `Candidatura já está "${cand.status}"` });
-      }
-      const historico = Array.isArray(cand.historico) ? [...cand.historico] : [];
-      historico.push({
-        etapa: cand.etapa_atual, status: 'proposta_enviada', acao: 'enviar_proposta',
-        mensagem: 'Proposta enviada ao candidato pela empresa',
-        data: new Date().toISOString(),
-        por: `empresa:${req.user.nome || empresa_id}`
-      });
-      await pool.query(`
-        UPDATE candidaturas
-        SET proposta_texto = $1, proposta_pdf_url = $2, proposta_pdf_public_id = $3,
-            proposta_enviada_em = NOW(), historico = $4, atualizada_em = NOW()
-        WHERE id = $5
-      `, [texto || null, pdf_url || null, pdf_public_id || null, JSON.stringify(historico), candId]);
-      res.json({ ok: true, proposta: { texto, pdf_url: pdf_url || null } });
-    } catch (e) {
-      console.error('[EMPRESA PROPOSTA POST]', e);
-      res.status(500).json({ erro: 'Erro ao enviar proposta' });
-    }
-  });
+);
 
 }
 
