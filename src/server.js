@@ -7666,6 +7666,471 @@ process.on('unhandledRejection', (e) => {
   });
 
   // ── FIM FASE 11 ──────────────────────────────────────────────────────────
+
+  // =========================================================================
+  // FASE 12 — Chat Empresa ↔ Candidato
+  // =========================================================================
+  //
+  // Arquitetura:
+  //   - "Conversa" = candidatura (uma candidatura tem uma thread de chat)
+  //   - Tabela base: mensagens_processo (já existia, reutilizada)
+  //   - Novos campos via migration 009: lida_por_candidato_em, lida_por_empresa_em, remetente_id
+  //   - Tabela nova: chat_templates (templates de mensagem por empresa)
+  //
+  // Rotas empresa:
+  //   GET    /api/empresa/chat                        – lista conversas/candidaturas com mensagens
+  //   GET    /api/empresa/chat/:cid                   – abre conversa (candidatura_id)
+  //   POST   /api/empresa/chat/:cid/mensagens         – envia mensagem para candidato
+  //   PATCH  /api/empresa/chat/:cid/lidas             – marca mensagens do candidato como lidas
+  //   PATCH  /api/empresa/chat/:cid/encerrar          – encerra conversa (não bloqueia candidatura)
+  //   GET    /api/empresa/chat/templates              – lista templates da empresa
+  //   POST   /api/empresa/chat/templates              – cria template
+  //   DELETE /api/empresa/chat/templates/:tid         – remove template
+  //
+  // Rotas candidato:
+  //   GET    /api/candidato/chat                      – lista conversas com mensagens
+  //   GET    /api/candidato/chat/:cid                 – abre conversa
+  //   POST   /api/candidato/chat/:cid/mensagens       – envia mensagem para empresa
+  //   PATCH  /api/candidato/chat/:cid/lidas           – marca mensagens da empresa como lidas
+  //   PATCH  /api/candidato/chat/:cid/encerrar        – encerra conversa
+  //
+  // Segurança:
+  //   - empresa_id sempre do JWT (nunca do body)
+  //   - candidato_id sempre do JWT (resolveCandId)
+  //   - IDOR: verifica propriedade antes de qualquer acesso
+  //   - Viewer pode ler mas não enviar/mutar
+  //   - Rate limit no envio de mensagens (5/min por IP)
+  //   - Sanitização XSS em todo texto recebido
+  //   - Máximo 2000 chars por mensagem
+  // =========================================================================
+
+  // ── Helper: verifica se candidatura pertence à empresa ──────────────────
+  async function verificarAcessoEmpresaConversa(candidatura_id, empresa_id) {
+    const { rows } = await pool.query(`
+      SELECT c.id, c.candidato_id, c.vaga_id, c.status, c.etapa_atual,
+             cd.nome AS candidato_nome, cd.email AS candidato_email,
+             v.titulo AS vaga_titulo, v.cidade, v.estado,
+             e.nome AS empresa_nome,
+             (SELECT COUNT(*) FROM empresa_usuarios eu WHERE eu.empresa_id = $2) AS num_usuarios
+      FROM candidaturas c
+      JOIN candidatos cd ON cd.id = c.candidato_id
+      JOIN vagas v ON v.id = c.vaga_id
+      JOIN empresas e ON e.id = $2
+      WHERE c.id = $1
+        AND v.empresa_id = $2
+    `, [candidatura_id, empresa_id]);
+    return rows.length > 0 ? rows[0] : null;
+  }
+
+  // ── Helper: verifica se candidatura pertence ao candidato ───────────────
+  async function verificarAcessoCandidatoConversa(candidatura_id, candidato_id) {
+    const { rows } = await pool.query(`
+      SELECT c.id, c.candidato_id, c.vaga_id, c.status, c.etapa_atual,
+             cd.nome AS candidato_nome, cd.email AS candidato_email,
+             v.titulo AS vaga_titulo, v.empresa AS vaga_empresa_nome,
+             v.empresa_id,
+             (SELECT eu.id FROM empresa_usuarios eu
+              WHERE eu.empresa_id = v.empresa_id
+                AND eu.role IN ('admin_empresa','recrutador')
+                AND eu.ativo = true
+              LIMIT 1) AS contato_empresa_id
+      FROM candidaturas c
+      JOIN candidatos cd ON cd.id = c.candidato_id
+      JOIN vagas v ON v.id = c.vaga_id
+      WHERE c.id = $1
+        AND c.candidato_id = $2
+    `, [candidatura_id, candidato_id]);
+    return rows.length > 0 ? rows[0] : null;
+  }
+
+  // ── Helper: mensagens de uma conversa (candidatura) ─────────────────────
+  async function buscarMensagensConversa(candidatura_id) {
+    const { rows: msgs } = await pool.query(`
+      SELECT mp.id, mp.candidatura_id, mp.autor_tipo, mp.autor_nome,
+             mp.texto, mp.contexto, mp.criado_em,
+             mp.lida_por_candidato_em, mp.lida_por_empresa_em,
+             mp.remetente_id
+      FROM mensagens_processo mp
+      WHERE mp.candidatura_id = $1
+      ORDER BY mp.criado_em ASC
+      LIMIT 500
+    `, [candidatura_id]);
+    // Anexar arquivos
+    if (msgs.length > 0) {
+      const ids = msgs.map(m => m.id);
+      const { rows: arqs } = await pool.query(
+        `SELECT id, mensagem_id, nome_original, mime_type, tamanho_bytes
+         FROM chat_arquivos WHERE mensagem_id = ANY($1::int[])`,
+        [ids]
+      );
+      const arqMap = {};
+      arqs.forEach(a => { (arqMap[a.mensagem_id] = arqMap[a.mensagem_id] || []).push(a); });
+      msgs.forEach(m => { m.arquivos = arqMap[m.id] || []; });
+    } else {
+      msgs.forEach(m => { m.arquivos = []; });
+    }
+    return msgs;
+  }
+
+  // ── Helper: notificar candidato quando empresa envia msg ─────────────────
+  async function notificarCandidatoChat(candidatura_id, candidato_id, empresa_nome, vaga_titulo) {
+    inserirNotificacao(pool, 'candidato', candidato_id,
+      'nova_mensagem_empresa',
+      `💬 Nova mensagem de ${empresa_nome}`,
+      `Você recebeu uma mensagem sobre sua candidatura na vaga ${vaga_titulo}. Clique para abrir a conversa.`,
+      { referencia_tipo: 'candidatura', referencia_id: candidatura_id,
+        metadata: { candidatura_id, link: `/candidato/chat.html?c=${candidatura_id}` } }
+    );
+  }
+
+  // ── Helper: notificar empresa quando candidato envia msg ─────────────────
+  async function notificarEmpresaChat(candidatura_id, empresa_id, candidato_nome, vaga_titulo) {
+    inserirNotificacao(pool, 'empresa', empresa_id,
+      'nova_mensagem_candidato',
+      `💬 Nova mensagem de ${candidato_nome}`,
+      `${candidato_nome} enviou uma mensagem sobre a candidatura na vaga ${vaga_titulo}. Clique para abrir a conversa.`,
+      { referencia_tipo: 'candidatura', referencia_id: candidatura_id,
+        metadata: { candidatura_id, link: `/empresa/chat.html?c=${candidatura_id}` } }
+    );
+  }
+
+  // ── Rate limit específico para envio de mensagens de chat ────────────────
+  const rateLimitChat = rateLimitByIp('chat-msg'); // 5/min por IP
+
+  // =========================================================================
+  // ENDPOINTS EMPRESA
+  // =========================================================================
+
+  // GET /api/empresa/chat/templates  (antes das rotas com :cid para não colidir)
+  app.get('/api/empresa/chat/templates', requireEmpresaViewer, async (req, res) => {
+    const { empresa_id } = req.user;
+    try {
+      const { rows } = await pool.query(
+        `SELECT id, titulo, texto, criado_em FROM chat_templates
+         WHERE empresa_id = $1 OR empresa_id IS NULL
+         ORDER BY empresa_id NULLS FIRST, titulo`,
+        [empresa_id]
+      );
+      res.json({ templates: rows });
+    } catch (e) {
+      console.error('[chat templates listar]', e);
+      res.status(500).json({ erro: 'Erro ao listar templates' });
+    }
+  });
+
+  // POST /api/empresa/chat/templates
+  app.post('/api/empresa/chat/templates', requireRecrutadorOuAdmin, async (req, res) => {
+    const { empresa_id } = req.user;
+    let { titulo, texto } = req.body;
+    if (!titulo || !texto) return res.status(400).json({ erro: 'Título e texto são obrigatórios' });
+    titulo = sanitizeText(titulo.trim()).slice(0, 100);
+    texto  = sanitizeText(texto.trim()).slice(0, 2000);
+    try {
+      const { rows } = await pool.query(
+        `INSERT INTO chat_templates (empresa_id, titulo, texto) VALUES ($1,$2,$3)
+         RETURNING id, titulo, texto, criado_em`,
+        [empresa_id, titulo, texto]
+      );
+      res.status(201).json({ ok: true, template: rows[0] });
+    } catch (e) {
+      console.error('[chat templates criar]', e);
+      res.status(500).json({ erro: 'Erro ao criar template' });
+    }
+  });
+
+  // DELETE /api/empresa/chat/templates/:tid
+  app.delete('/api/empresa/chat/templates/:tid', requireRecrutadorOuAdmin, async (req, res) => {
+    const { empresa_id } = req.user;
+    const tid = parseInt(req.params.tid);
+    if (!tid) return res.status(400).json({ erro: 'ID inválido' });
+    try {
+      const { rowCount } = await pool.query(
+        `DELETE FROM chat_templates WHERE id = $1 AND empresa_id = $2`,
+        [tid, empresa_id]
+      );
+      if (rowCount === 0) return res.status(404).json({ erro: 'Template não encontrado' });
+      res.json({ ok: true });
+    } catch (e) {
+      console.error('[chat templates deletar]', e);
+      res.status(500).json({ erro: 'Erro ao deletar template' });
+    }
+  });
+
+  // GET /api/empresa/chat — lista conversas com filtros/paginação
+  app.get('/api/empresa/chat', requireEmpresaViewer, async (req, res) => {
+    const { empresa_id } = req.user;
+    const { q, vaga_id, candidato_id, status, pagina = 1, limite = 20 } = req.query;
+    const lim = Math.min(parseInt(limite) || 20, 100);
+    const offset = (Math.max(parseInt(pagina) || 1, 1) - 1) * lim;
+    try {
+      const params = [empresa_id];
+      let where = `v.empresa_id = $1 AND c.status NOT IN ('cancelado')`;
+      if (q) {
+        params.push(`%${q}%`);
+        where += ` AND (cd.nome ILIKE $${params.length} OR cd.email ILIKE $${params.length})`;
+      }
+      if (vaga_id) { params.push(parseInt(vaga_id)); where += ` AND v.id = $${params.length}`; }
+      if (candidato_id) { params.push(parseInt(candidato_id)); where += ` AND cd.id = $${params.length}`; }
+      if (status) { params.push(status); where += ` AND c.status = $${params.length}`; }
+
+      const countQ = await pool.query(
+        `SELECT COUNT(*) FROM candidaturas c
+         JOIN candidatos cd ON cd.id = c.candidato_id
+         JOIN vagas v ON v.id = c.vaga_id
+         WHERE ${where}`,
+        params
+      );
+      const total = parseInt(countQ.rows[0].count);
+
+      params.push(lim); params.push(offset);
+      const { rows } = await pool.query(`
+        SELECT c.id AS candidatura_id,
+               cd.id AS candidato_id, cd.nome AS candidato_nome, cd.email AS candidato_email,
+               v.id AS vaga_id, v.titulo AS vaga_titulo, c.status, c.etapa_atual,
+               (SELECT COUNT(*) FROM mensagens_processo mp
+                WHERE mp.candidatura_id = c.id
+                  AND mp.autor_tipo = 'candidato'
+                  AND mp.lida_por_empresa_em IS NULL) AS nao_lidas,
+               (SELECT mp.texto FROM mensagens_processo mp
+                WHERE mp.candidatura_id = c.id ORDER BY mp.criado_em DESC LIMIT 1) AS ultima_msg,
+               (SELECT mp.criado_em FROM mensagens_processo mp
+                WHERE mp.candidatura_id = c.id ORDER BY mp.criado_em DESC LIMIT 1) AS ultima_msg_em,
+               (SELECT mp.autor_tipo FROM mensagens_processo mp
+                WHERE mp.candidatura_id = c.id ORDER BY mp.criado_em DESC LIMIT 1) AS ultimo_autor_tipo,
+               (SELECT COUNT(*) FROM mensagens_processo mp WHERE mp.candidatura_id = c.id) AS total_msgs,
+               c.chat_encerrado_empresa_em
+        FROM candidaturas c
+        JOIN candidatos cd ON cd.id = c.candidato_id
+        JOIN vagas v ON v.id = c.vaga_id
+        WHERE ${where}
+        ORDER BY ultima_msg_em DESC NULLS LAST, c.criada_em DESC
+        LIMIT $${params.length - 1} OFFSET $${params.length}
+      `, params);
+      res.json({
+        conversas: rows,
+        paginacao: { total, pagina: parseInt(pagina) || 1, limite: lim, paginas: Math.ceil(total / lim) }
+      });
+    } catch (e) {
+      console.error('[empresa chat listar]', e);
+      res.status(500).json({ erro: 'Erro ao listar conversas' });
+    }
+  });
+
+  // GET /api/empresa/chat/:cid — abre conversa
+  app.get('/api/empresa/chat/:cid', requireEmpresaViewer, async (req, res) => {
+    const { empresa_id } = req.user;
+    const cid = parseInt(req.params.cid);
+    if (!cid) return res.status(400).json({ erro: 'ID inválido' });
+    try {
+      const info = await verificarAcessoEmpresaConversa(cid, empresa_id);
+      if (!info) return res.status(404).json({ erro: 'Conversa não encontrada' });
+      const mensagens = await buscarMensagensConversa(cid);
+      res.json({ conversa: info, mensagens });
+    } catch (e) {
+      console.error('[empresa chat abrir]', e);
+      res.status(500).json({ erro: 'Erro ao abrir conversa' });
+    }
+  });
+
+  // POST /api/empresa/chat/:cid/mensagens — envia mensagem para candidato
+  app.post('/api/empresa/chat/:cid/mensagens', requireRecrutadorOuAdmin, rateLimitChat, async (req, res) => {
+    const { empresa_id, nome: remetente_nome, id: remetente_id } = req.user;
+    const cid = parseInt(req.params.cid);
+    if (!cid) return res.status(400).json({ erro: 'ID inválido' });
+    let { texto } = req.body;
+    if (!texto || !texto.trim()) return res.status(400).json({ erro: 'Mensagem vazia' });
+    texto = sanitizeText(texto.trim());
+    if (texto.length > 2000) return res.status(400).json({ erro: 'Mensagem muito longa (máx 2000 chars)' });
+    try {
+      const info = await verificarAcessoEmpresaConversa(cid, empresa_id);
+      if (!info) return res.status(404).json({ erro: 'Conversa não encontrada' });
+      if (info.chat_encerrado_empresa_em) return res.status(409).json({ erro: 'Conversa encerrada' });
+      // Inserir mensagem
+      const { rows } = await pool.query(`
+        INSERT INTO mensagens_processo
+          (candidatura_id, autor_tipo, autor_nome, texto, contexto, remetente_id)
+        VALUES ($1, 'empresa', $2, $3, 'chat_empresa', $4)
+        RETURNING id, candidatura_id, autor_tipo, autor_nome, texto, criado_em,
+                  lida_por_candidato_em, lida_por_empresa_em, remetente_id
+      `, [cid, remetente_nome || info.empresa_nome, texto, remetente_id || null]);
+      // Notificar candidato (async, não bloqueia resposta)
+      notificarCandidatoChat(cid, info.candidato_id, info.empresa_nome, info.vaga_titulo).catch(() => {});
+      res.json({ ok: true, mensagem: rows[0] });
+    } catch (e) {
+      console.error('[empresa chat enviar]', e);
+      res.status(500).json({ erro: 'Erro ao enviar mensagem' });
+    }
+  });
+
+  // PATCH /api/empresa/chat/:cid/lidas — marca msgs do candidato como lidas pela empresa
+  app.patch('/api/empresa/chat/:cid/lidas', requireEmpresaViewer, async (req, res) => {
+    const { empresa_id } = req.user;
+    const cid = parseInt(req.params.cid);
+    if (!cid) return res.status(400).json({ erro: 'ID inválido' });
+    try {
+      const info = await verificarAcessoEmpresaConversa(cid, empresa_id);
+      if (!info) return res.status(404).json({ erro: 'Conversa não encontrada' });
+      const { rowCount } = await pool.query(
+        `UPDATE mensagens_processo
+         SET lida_por_empresa_em = NOW()
+         WHERE candidatura_id = $1
+           AND autor_tipo = 'candidato'
+           AND lida_por_empresa_em IS NULL`,
+        [cid]
+      );
+      res.json({ ok: true, atualizadas: rowCount });
+    } catch (e) {
+      console.error('[empresa chat lidas]', e);
+      res.status(500).json({ erro: 'Erro ao marcar como lidas' });
+    }
+  });
+
+  // PATCH /api/empresa/chat/:cid/encerrar — encerra thread de chat
+  app.patch('/api/empresa/chat/:cid/encerrar', requireRecrutadorOuAdmin, async (req, res) => {
+    const { empresa_id } = req.user;
+    const cid = parseInt(req.params.cid);
+    if (!cid) return res.status(400).json({ erro: 'ID inválido' });
+    try {
+      const info = await verificarAcessoEmpresaConversa(cid, empresa_id);
+      if (!info) return res.status(404).json({ erro: 'Conversa não encontrada' });
+      await pool.query(
+        `UPDATE candidaturas SET chat_encerrado_empresa_em = NOW() WHERE id = $1`,
+        [cid]
+      );
+      res.json({ ok: true });
+    } catch (e) {
+      console.error('[empresa chat encerrar]', e);
+      res.status(500).json({ erro: 'Erro ao encerrar conversa' });
+    }
+  });
+
+  // =========================================================================
+  // ENDPOINTS CANDIDATO
+  // =========================================================================
+
+  // GET /api/candidato/chat — lista conversas
+  app.get('/api/candidato/chat', authCandidato, async (req, res) => {
+    try {
+      const candId = await resolveCandId(req.user);
+      if (!candId) return res.status(404).json({ erro: 'Perfil não encontrado' });
+      const { rows } = await pool.query(`
+        SELECT c.id AS candidatura_id,
+               v.id AS vaga_id, v.titulo AS vaga_titulo, v.empresa AS vaga_empresa_nome,
+               c.status, c.etapa_atual, c.chat_encerrado_empresa_em,
+               (SELECT COUNT(*) FROM mensagens_processo mp
+                WHERE mp.candidatura_id = c.id
+                  AND mp.autor_tipo IN ('empresa','admin')
+                  AND mp.lida_por_candidato_em IS NULL) AS nao_lidas,
+               (SELECT mp.texto FROM mensagens_processo mp
+                WHERE mp.candidatura_id = c.id ORDER BY mp.criado_em DESC LIMIT 1) AS ultima_msg,
+               (SELECT mp.criado_em FROM mensagens_processo mp
+                WHERE mp.candidatura_id = c.id ORDER BY mp.criado_em DESC LIMIT 1) AS ultima_msg_em,
+               (SELECT mp.autor_tipo FROM mensagens_processo mp
+                WHERE mp.candidatura_id = c.id ORDER BY mp.criado_em DESC LIMIT 1) AS ultimo_autor_tipo,
+               (SELECT COUNT(*) FROM mensagens_processo mp WHERE mp.candidatura_id = c.id) AS total_msgs
+        FROM candidaturas c
+        JOIN vagas v ON v.id = c.vaga_id
+        WHERE c.candidato_id = $1
+        ORDER BY ultima_msg_em DESC NULLS LAST, c.criada_em DESC
+      `, [candId]);
+      res.json({ conversas: rows });
+    } catch (e) {
+      console.error('[candidato chat listar]', e);
+      res.status(500).json({ erro: 'Erro ao listar conversas' });
+    }
+  });
+
+  // GET /api/candidato/chat/:cid — abre conversa
+  app.get('/api/candidato/chat/:cid', authCandidato, async (req, res) => {
+    const cid = parseInt(req.params.cid);
+    if (!cid) return res.status(400).json({ erro: 'ID inválido' });
+    try {
+      const candId = await resolveCandId(req.user);
+      if (!candId) return res.status(404).json({ erro: 'Perfil não encontrado' });
+      const info = await verificarAcessoCandidatoConversa(cid, candId);
+      if (!info) return res.status(404).json({ erro: 'Conversa não encontrada' });
+      const mensagens = await buscarMensagensConversa(cid);
+      res.json({ conversa: info, mensagens });
+    } catch (e) {
+      console.error('[candidato chat abrir]', e);
+      res.status(500).json({ erro: 'Erro ao abrir conversa' });
+    }
+  });
+
+  // POST /api/candidato/chat/:cid/mensagens — envia mensagem para empresa
+  app.post('/api/candidato/chat/:cid/mensagens', authCandidato, rateLimitChat, async (req, res) => {
+    const cid = parseInt(req.params.cid);
+    if (!cid) return res.status(400).json({ erro: 'ID inválido' });
+    let { texto } = req.body;
+    if (!texto || !texto.trim()) return res.status(400).json({ erro: 'Mensagem vazia' });
+    texto = sanitizeText(texto.trim());
+    if (texto.length > 2000) return res.status(400).json({ erro: 'Mensagem muito longa (máx 2000 chars)' });
+    try {
+      const candId = await resolveCandId(req.user);
+      if (!candId) return res.status(404).json({ erro: 'Perfil não encontrado' });
+      const info = await verificarAcessoCandidatoConversa(cid, candId);
+      if (!info) return res.status(404).json({ erro: 'Conversa não encontrada' });
+      const { rows } = await pool.query(`
+        INSERT INTO mensagens_processo
+          (candidatura_id, autor_tipo, autor_nome, texto, contexto, remetente_id)
+        VALUES ($1, 'candidato', $2, $3, 'chat_candidato', $4)
+        RETURNING id, candidatura_id, autor_tipo, autor_nome, texto, criado_em,
+                  lida_por_candidato_em, lida_por_empresa_em, remetente_id
+      `, [cid, info.candidato_nome, texto, candId]);
+      // Notificar empresa (async)
+      notificarEmpresaChat(cid, info.empresa_id, info.candidato_nome, info.vaga_titulo).catch(() => {});
+      res.json({ ok: true, mensagem: rows[0] });
+    } catch (e) {
+      console.error('[candidato chat enviar]', e);
+      res.status(500).json({ erro: 'Erro ao enviar mensagem' });
+    }
+  });
+
+  // PATCH /api/candidato/chat/:cid/lidas — marca msgs da empresa como lidas
+  app.patch('/api/candidato/chat/:cid/lidas', authCandidato, async (req, res) => {
+    const cid = parseInt(req.params.cid);
+    if (!cid) return res.status(400).json({ erro: 'ID inválido' });
+    try {
+      const candId = await resolveCandId(req.user);
+      if (!candId) return res.status(404).json({ erro: 'Perfil não encontrado' });
+      const info = await verificarAcessoCandidatoConversa(cid, candId);
+      if (!info) return res.status(404).json({ erro: 'Conversa não encontrada' });
+      const { rowCount } = await pool.query(
+        `UPDATE mensagens_processo
+         SET lida_por_candidato_em = NOW()
+         WHERE candidatura_id = $1
+           AND autor_tipo IN ('empresa', 'admin')
+           AND lida_por_candidato_em IS NULL`,
+        [cid]
+      );
+      res.json({ ok: true, atualizadas: rowCount });
+    } catch (e) {
+      console.error('[candidato chat lidas]', e);
+      res.status(500).json({ erro: 'Erro ao marcar como lidas' });
+    }
+  });
+
+  // PATCH /api/candidato/chat/:cid/encerrar — encerra conversa pelo candidato
+  app.patch('/api/candidato/chat/:cid/encerrar', authCandidato, async (req, res) => {
+    const cid = parseInt(req.params.cid);
+    if (!cid) return res.status(400).json({ erro: 'ID inválido' });
+    try {
+      const candId = await resolveCandId(req.user);
+      if (!candId) return res.status(404).json({ erro: 'Perfil não encontrado' });
+      const info = await verificarAcessoCandidatoConversa(cid, candId);
+      if (!info) return res.status(404).json({ erro: 'Conversa não encontrada' });
+      await pool.query(
+        `UPDATE candidaturas SET chat_encerrado_candidato_em = NOW() WHERE id = $1`,
+        [cid]
+      );
+      res.json({ ok: true });
+    } catch (e) {
+      console.error('[candidato chat encerrar]', e);
+      res.status(500).json({ erro: 'Erro ao encerrar conversa' });
+    }
+  });
+
+  // ── FIM FASE 12 ───────────────────────────────────────────────────────────
   // FIX Etapa 2 (2026-07-27): HANDLER GLOBAL 404 — JSON seguro, sem stack.
   // =========================================================================
   // Impede que Express retorne HTML "<pre>Cannot GET ...</pre>" em rotas inexistentes.
