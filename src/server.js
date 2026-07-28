@@ -437,6 +437,31 @@ app.get('/api/public/empresa/:slug/vagas/:id', async (req, res) => {
 });
 
 app.get('/api/_version', (req,res) => res.json({commit:'22f61ca41a', ts:new Date().toISOString()}));
+
+// TEMP DIAG: ver colunas da tabela entrevistas
+app.get('/api/_debug/entrevistas-schema', async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT column_name, data_type, is_nullable, column_default
+      FROM information_schema.columns
+      WHERE table_name = 'entrevistas'
+      ORDER BY ordinal_position
+    `);
+    // Testar INSERT simples
+    let insertErr = null;
+    try {
+      await pool.query(`
+        INSERT INTO entrevistas (candidatura_id, etapa, data_hora, duracao_minutos, local, link_reuniao, observacoes, status, criada_em)
+        VALUES (999999, 4, NOW(), 60, NULL, NULL, NULL, 'agendada', NOW())
+        RETURNING id
+      `);
+    } catch(e) {
+      insertErr = e.message;
+    }
+    res.json({ colunas: rows, insert_teste_erro: insertErr });
+  } catch(e) { res.status(500).json({ erro: e.message }); }
+});
+
 app.get('/api/saude', async (req, res) => {
   let db_ok = false;
   try {
