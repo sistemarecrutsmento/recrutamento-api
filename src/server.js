@@ -436,6 +436,17 @@ app.get('/api/public/empresa/:slug/vagas/:id', async (req, res) => {
 app.get('/api/saude', (req, res) => res.json({ ok: true, sistema: process.env.SISTEMA_NOME, hora: new Date().toISOString() }));
 
 // DEBUG FASE 6 — versão top-level (não depende do wrapper async)
+// FASE 7 — endpoint top-level pra forçar migration 005 (temporário)
+app.get('/api/_debug/fase7-migrar', async (req, res) => {
+  try {
+    const { aplicar } = require('./migrations/005_notificacoes_fase7');
+    const r = await aplicar();
+    res.json(r);
+  } catch (e) {
+    res.status(500).json({ erro: e.message, stack: e.stack });
+  }
+});
+
 app.get('/api/_debug/fase6', async (req, res) => {
   try {
     const cols = await pool.query(
