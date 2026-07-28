@@ -1303,7 +1303,6 @@ app.get('/api/candidato/candidaturas/:id', authCandidato, async (req, res) => {
         cand.proposta_enviada_em AS proposta_enviada_em,
         cand.proposta_aceita_em  AS proposta_aceita_em,
         cand.proposta_recusada_em AS proposta_recusada_em,
-        cand.curriculo_url       AS curriculo_url,
         v.id                     AS vaga_id,
         v.titulo                 AS vaga_titulo,
         v.descricao              AS vaga_descricao,
