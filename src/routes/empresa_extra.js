@@ -600,8 +600,6 @@ function registrar(app, ctx) {
       res.status(500).json({ erro: 'Erro ao buscar candidatura' });
     }
   });
-}
-
 
   // ===========================================================
   // POST /api/empresa/candidatura/:id/proposta
@@ -649,5 +647,7 @@ function registrar(app, ctx) {
       res.status(500).json({ erro: 'Erro ao enviar proposta' });
     }
   });
+
+}
 
 module.exports = { registrar };
