@@ -292,6 +292,147 @@ app.use((err, req, res, next) => {
 });
 
 // ============= SAÚDE =============
+// =========================================================================
+// PORTAL PÚBLICO DAS EMPRESAS — FASE 5 (28/07/2026)
+// =========================================================================
+// Endpoints SEM autenticação. Resolvem tenant via slug.
+// Regras:
+//  • Empresa DEVE existir e estar ativo=true
+//  • Vaga DEVE ter empresa_id = empresa.id E status='publicada'
+//  • SELECTs NUNCA usam '*' — só campos públicos (privacidade)
+//  • Não aceita empresa_id/vaga_id do body (anti-IDOR)
+//  • Não usa empresa_vaga_acesso (compartilhamento interno não vaza)
+//  • 404 seguro: 'inexistente' e 'de outro tenant' retornam mesma resposta
+// =========================================================================
+
+// GET /api/public/empresa/:slug — perfil público
+app.get('/api/public/empresa/:slug', async (req, res) => {
+  const slug = (req.params.slug || '').toLowerCase().trim();
+  if (!slug || !/^[a-z0-9-]{1,80}$/.test(slug)) {
+    return res.status(404).json({ erro: 'Empresa não encontrada' });
+  }
+  try {
+    const { rows } = await pool.query(
+      `SELECT
+         slug, nome, logo_url, cor_destaque,
+         descricao, site, cidade, estado, setor, tamanho, criado_em
+       FROM empresas
+       WHERE slug = $1 AND ativo = true
+       LIMIT 1`,
+      [slug]
+    );
+    if (rows.length === 0) return res.status(404).json({ erro: 'Empresa não encontrada' });
+    const e = rows[0];
+    // Contador de vagas publicadas (público)
+    const { rows: c } = await pool.query(
+      `SELECT COUNT(*)::int AS total
+       FROM vagas
+       WHERE empresa_id = (SELECT id FROM empresas WHERE slug = $1 AND ativo = true)
+         AND status = 'publicada'`,
+      [slug]
+    );
+    res.json({
+      ok: true,
+      empresa: {
+        slug: e.slug,
+        nome: e.nome,
+        logo_url: e.logo_url,
+        cor_destaque: e.cor_destaque,
+        descricao: e.descricao,
+        site: e.site,
+        cidade: e.cidade,
+        estado: e.estado,
+        setor: e.setor,
+        tamanho: e.tamanho
+      },
+      vagas_publicadas: c[0].total
+    });
+  } catch (e) {
+    console.error('[PUBLIC empresa] erro:', e.message);
+    res.status(500).json({ erro: 'Erro ao carregar empresa' });
+  }
+});
+
+// GET /api/public/empresa/:slug/vagas — listagem pública
+app.get('/api/public/empresa/:slug/vagas', async (req, res) => {
+  const slug = (req.params.slug || '').toLowerCase().trim();
+  if (!slug || !/^[a-z0-9-]{1,80}$/.test(slug)) {
+    return res.status(404).json({ erro: 'Empresa não encontrada' });
+  }
+  try {
+    // 1. Resolve empresa (ativo=true é pré-requisito)
+    const emp = await pool.query(
+      `SELECT id FROM empresas WHERE slug = $1 AND ativo = true LIMIT 1`,
+      [slug]
+    );
+    if (emp.rows.length === 0) {
+      return res.status(404).json({ erro: 'Empresa não encontrada' });
+    }
+    const empresa_id = emp.rows[0].id;
+
+    // 2. Lista SOMENTE vagas publicadas desta empresa
+    //    NUNCA usa empresa_vaga_acesso (compartilhamento interno)
+    const { rows } = await pool.query(
+      `SELECT
+         v.id, v.titulo, v.cidade, v.estado, v.tipo_contrato, v.nivel,
+         v.area, v.salario_min, v.salario_max, v.modalidade, v.descricao,
+         v.criada_em, v.atualizada_em
+       FROM vagas v
+       WHERE v.empresa_id = $1
+         AND v.status = 'publicada'
+       ORDER BY v.atualizada_em DESC NULLS LAST, v.id DESC`,
+      [empresa_id]
+    );
+
+    res.json({ ok: true, vagas: rows, total: rows.length });
+  } catch (e) {
+    console.error('[PUBLIC vagas] erro:', e.message);
+    res.status(500).json({ erro: 'Erro ao listar vagas' });
+  }
+});
+
+// GET /api/public/empresa/:slug/vagas/:id — detalhe público
+// Validação simultânea: slug→empresa, vaga.empresa_id=empresa.id, vaga.status='publicada'
+// Retorna 404 (não 403) pra qualquer falha — não vaza existência
+app.get('/api/public/empresa/:slug/vagas/:id', async (req, res) => {
+  const slug = (req.params.slug || '').toLowerCase().trim();
+  const vagaId = parseInt(req.params.id, 10);
+  if (!slug || !/^[a-z0-9-]{1,80}$/.test(slug) || !Number.isInteger(vagaId) || vagaId <= 0) {
+    return res.status(404).json({ erro: 'Vaga não encontrada' });
+  }
+  try {
+    // Single query: garante 4 condições simultâneas:
+    //  1. empresa existe (slug)
+    //  2. empresa está ativa
+    //  3. vaga existe
+    //  4. vaga.empresa_id = empresa.id (não usar empresa TEXT legado)
+    //  5. vaga.status = 'publicada'
+    const { rows } = await pool.query(
+      `SELECT
+         v.id, v.titulo, v.cidade, v.estado, v.tipo_contrato, v.nivel,
+         v.area, v.salario_min, v.salario_max, v.modalidade,
+         v.descricao, v.requisitos, v.beneficios,
+         v.criada_em, v.atualizada_em,
+         e.slug AS empresa_slug, e.nome AS empresa_nome, e.logo_url
+       FROM vagas v
+       JOIN empresas e ON e.id = v.empresa_id
+       WHERE e.slug = $1
+         AND e.ativo = true
+         AND v.id = $2
+         AND v.status = 'publicada'
+       LIMIT 1`,
+      [slug, vagaId]
+    );
+    if (rows.length === 0) {
+      return res.status(404).json({ erro: 'Vaga não encontrada' });
+    }
+    res.json({ ok: true, vaga: rows[0] });
+  } catch (e) {
+    console.error('[PUBLIC vaga detalhe] erro:', e.message);
+    res.status(500).json({ erro: 'Erro ao carregar vaga' });
+  }
+});
+
 app.get('/api/saude', (req, res) => res.json({ ok: true, sistema: process.env.SISTEMA_NOME, hora: new Date().toISOString() }));
 
 // ETAPA 2: rota pública para diagnóstico de deploy (sem info sensível)
@@ -4511,17 +4652,18 @@ app.post('/api/empresa/vagas', requireRecrutadorOuAdmin, async (req, res) => {
           { nome: 'Contratação' }
         ];
 
-    // INSERT vaga (empresa = nome da empresa do usuário logado)
+    // INSERT vaga (empresa = nome da empresa do usuário logado; empresa_id vem do JWT)
     const { rows: vagaRows } = await pool.query(
       `INSERT INTO vagas (
-        titulo, empresa, cidade, estado, tipo_contrato, nivel, area,
+        titulo, empresa, empresa_id, cidade, estado, tipo_contrato, nivel, area,
         salario_min, salario_max, descricao, requisitos, beneficios,
         etapas, status, criada_por
-      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+      ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
       RETURNING *`,
       [
         v.titulo,
-        empresa_nome,         // TEXT, não precisa do ID aqui
+        empresa_nome,         // TEXT legado
+        empresa_id,           // FK → empresas (Fase 5: portal público usa este FK)
         v.cidade || null,
         v.estado || null,
         v.tipo_contrato || null,
