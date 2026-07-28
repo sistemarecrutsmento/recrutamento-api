@@ -429,7 +429,21 @@ async function init() {
       console.error('[MIGRATION 006] Erro não tratado (mas segui):', migrationErr.message);
     }
 
-    console.log('Tabelas criadas/verificadas + migrations Fase 1-006 aplicadas');
+    // Migration 007 (28/07/2026) — Fase 10: admin_2fa_codes + 2FA empresa + sessões + device_name.
+    try {
+      const { aplicar: aplicarMigration007 } = require('./migrations/007_auth_fase10');
+      const client7 = await pool.connect();
+      const logs7 = [];
+      try {
+        await aplicarMigration007(client7, (msg) => { logs7.push(msg); console.log('[MIGRATION 007]', msg); });
+      } finally {
+        client7.release();
+      }
+    } catch (migrationErr) {
+      console.error('[MIGRATION 007] Erro não tratado (mas segui):', migrationErr.message);
+    }
+
+    console.log('Tabelas criadas/verificadas + migrations Fase 1-007 aplicadas');
   } finally {
     client.release();
   }
