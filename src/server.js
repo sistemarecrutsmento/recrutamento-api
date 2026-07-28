@@ -3462,29 +3462,6 @@ app.put('/api/admin/entrevista/:id', authAdmin, async (req, res) => {
   }
 });
 
-// Atualizar status da entrevista (cancelar, realizar, no-show)
-app.put('/api/admin/entrevista/:id', authAdmin, async (req, res) => {
-  try {
-    const { status, data_hora, link_reuniao, observacoes } = req.body;
-    const updates = [];
-    const values = [];
-    let i = 1;
-    if (status) { updates.push(`status = $${i++}`); values.push(status); }
-    if (data_hora) { updates.push(`data_hora = $${i++}`); values.push(data_hora); }
-    if (link_reuniao !== undefined) { updates.push(`link_reuniao = $${i++}`); values.push(link_reuniao); }
-    if (observacoes !== undefined) { updates.push(`observacoes = $${i++}`); values.push(observacoes); }
-    if (updates.length === 0) return res.status(400).json({ erro: 'Nada para atualizar' });
-    updates.push(`atualizado_em = NOW()`);
-    values.push(req.params.id);
-    const r = await pool.query(`UPDATE entrevistas SET ${updates.join(', ')} WHERE id = $${i} RETURNING *`, values);
-    if (r.rows.length === 0) return res.status(404).json({ erro: 'Entrevista não encontrada' });
-    res.json({ ok: true, entrevista: r.rows[0] });
-  } catch (e) {
-    console.error('[ENTREVISTA ATUALIZAR ERRO]', e);
-    return erroInterno(req, res, e, 'api-admin-entrevista-:id');
-  }
-});
-
 app.post('/api/admin/candidatura/:id/status', authAdmin, async (req, res) => {
   let { status, etapa, mensagem, acao, comentario } = req.body;
   // Sanitiza textos de admin (defesa em profundidade)
@@ -8372,6 +8349,29 @@ process.on('unhandledRejection', (e) => {
   });
 
   // =========================================================================
+  // ── POST /api/cron/digest — disparo pelo Render Cron Job (CRON_SECRET) ──────
+  // Chamado pelo Render Cron às 07:00 BRT diariamente.
+  // Autenticação: header "Authorization: Bearer <CRON_SECRET>"
+  app.post('/api/cron/digest', async (req, res) => {
+    const cronSecret = process.env.CRON_SECRET;
+    if (!cronSecret) {
+      // Sem CRON_SECRET configurado, bloquear por segurança
+      return res.status(503).json({ erro: 'CRON_SECRET não configurado' });
+    }
+    const auth = (req.headers.authorization || '').replace('Bearer ', '').trim();
+    if (auth !== cronSecret) {
+      return res.status(401).json({ erro: 'Não autorizado' });
+    }
+    try {
+      const result = await emailSvc.bgDigestDiario({ empresaId: null });
+      await audit(req, 'cron.digest_disparado', { metadata: { result: JSON.stringify(result).slice(0, 200) } });
+      res.json({ ok: true, ts: new Date().toISOString(), result });
+    } catch (e) {
+      console.error('[CRON DIGEST]', e.message);
+      res.status(500).json({ ok: false, erro: e.message });
+    }
+  });
+
   // FASE 14 — Analytics + Auditoria Visual
   // =========================================================================
 
