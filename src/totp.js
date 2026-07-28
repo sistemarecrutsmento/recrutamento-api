@@ -6,10 +6,32 @@
  */
 const crypto = require('crypto');
 
+// ─── Base32 decode manual (Node.js não tem Buffer.from(..., 'base32')) ─────
+
+const B32_ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+
+function base32Decode(input) {
+  // Normaliza: maiúsculo, remove padding
+  const str = input.toUpperCase().replace(/=+$/, '');
+  let bits = 0, value = 0;
+  const output = [];
+  for (const char of str) {
+    const idx = B32_ALPHABET.indexOf(char);
+    if (idx === -1) continue; // ignora chars inválidos
+    value = (value << 5) | idx;
+    bits += 5;
+    if (bits >= 8) {
+      bits -= 8;
+      output.push((value >> bits) & 0xff);
+    }
+  }
+  return Buffer.from(output);
+}
+
 // ─── HOTP Base (RFC 4226) ─────────────────────────────────────────────────
 
 function hotp(secret, counter) {
-  const key = Buffer.from(secret, 'base32');
+  const key = base32Decode(secret);
   const buf = Buffer.alloc(8);
   buf.writeBigInt64BE(BigInt(counter));
   const hmac = crypto.createHmac('sha1', key).update(buf).digest();
