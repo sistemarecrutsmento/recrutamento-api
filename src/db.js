@@ -421,7 +421,7 @@ async function init() {
   }
 }
 
-module.exports = { pool, init };
+module.exports = { pool, init, inserirNotificacao };
 
 // =====================================================
 // FASE 7 — Helper: inserir notificação (empresa ou candidato)
