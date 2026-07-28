@@ -436,44 +436,6 @@ app.get('/api/public/empresa/:slug/vagas/:id', async (req, res) => {
 app.get('/api/saude', (req, res) => res.json({ ok: true, sistema: process.env.SISTEMA_NOME, hora: new Date().toISOString() }));
 
 // DEBUG FASE 6 — versão top-level (não depende do wrapper async)
-// FASE 7 — endpoint top-level pra forçar migration 005 (temporário)
-app.get('/api/_debug/fase7-migrar', async (req, res) => {
-  try {
-    const { aplicar } = require('./migrations/005_notificacoes_fase7');
-    const r = await aplicar();
-    res.json(r);
-  } catch (e) {
-    res.status(500).json({ erro: e.message, stack: e.stack });
-  }
-});
-
-app.get('/api/_debug/fase7-status', async (req, res) => {
-  try {
-    const cols = await pool.query(
-      `SELECT column_name FROM information_schema.columns
-       WHERE table_schema='public' AND table_name='notificacoes'
-       ORDER BY ordinal_position`
-    );
-    const count = await pool.query('SELECT COUNT(*)::int AS n FROM notificacoes');
-    const sample = await pool.query(
-      'SELECT id, user_type, user_id, tipo, titulo, referencia_tipo, referencia_id, criada_em FROM notificacoes ORDER BY id DESC LIMIT 5'
-    );
-    res.json({ colunas: cols.rows.map(r => r.column_name), total: count.rows[0].n, ultimas: sample.rows });
-  } catch (e) {
-    res.status(500).json({ erro: e.message });
-  }
-});
-
-// DEBUG: limpa tabela (uso em testes)
-app.get('/api/_debug/fase7-limpar', async (req, res) => {
-  try {
-    await pool.query('DELETE FROM notificacoes');
-    res.json({ ok: true, msg: 'notificacoes limpas' });
-  } catch (e) {
-    res.status(500).json({ erro: e.message });
-  }
-});
-
 app.get('/api/_debug/fase6', async (req, res) => {
   try {
     const cols = await pool.query(
