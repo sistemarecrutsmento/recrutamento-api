@@ -318,9 +318,10 @@ function registrar(app, ctx) {
   app.post('/api/empresa/entrevista', requireRecrutadorOuAdmin, async (req, res) => {
     try {
       const { empresa_id } = req.user;
-      const { candidatura_id, etapa, data_hora, duracao_minutos, local, link_reuniao, observacoes } = req.body;
-      if (!candidatura_id || !etapa || !data_hora) {
-        return res.status(400).json({ erro: 'candidatura_id, etapa e data_hora são obrigatórios' });
+      const { candidatura_id, etapa: etapaBody, data_hora, duracao_minutos, local, link_reuniao, observacoes, tipo } = req.body;
+      const etapa = etapaBody != null ? Number(etapaBody) : 4; // default etapa 4 (Gestor/Empresa)
+      if (!candidatura_id || !data_hora) {
+        return res.status(400).json({ erro: 'candidatura_id e data_hora são obrigatórios' });
       }
       const candCheck = await pool.query(`
         SELECT c.id FROM candidaturas c
@@ -403,9 +404,15 @@ function registrar(app, ctx) {
     try {
       const { empresa_id } = req.user;
       const { id } = req.params;
-      const { decisao, motivo } = req.body;
-      if (!['aprovado', 'reprovado'].includes(decisao)) {
-        return res.status(400).json({ erro: 'decisao deve ser "aprovado" ou "reprovado"' });
+      const { decisao, motivo, status: statusBody, justificativa, acao } = req.body;
+      // Normaliza: aceita 'decisao', 'status' ou 'acao' (retrocompat + novo padrão)
+      let statusFinal = decisao || statusBody;
+      if (acao === 'aprovar') statusFinal = 'aprovado';
+      else if (acao === 'reprovar') statusFinal = 'reprovado';
+      else if (acao === 'retornar') statusFinal = 'retornado';
+      const motivoFinal = motivo || justificativa || null;
+      if (!statusFinal || !['aprovado', 'reprovado', 'retornado', 'pendente'].includes(statusFinal)) {
+        return res.status(400).json({ erro: 'status deve ser: aprovado, reprovado, retornado ou pendente' });
       }
       const check = await pool.query(`
         SELECT d.id FROM documentos_candidatura d
@@ -416,10 +423,10 @@ function registrar(app, ctx) {
       if (check.rows.length === 0) return res.status(403).json({ erro: 'Documento não pertence a esta empresa' });
       await pool.query(`
         UPDATE documentos_candidatura
-        SET status = $1, motivo_reprovacao = $2, revisado_em = NOW(), revisado_por = $3
-        WHERE id = $4
-      `, [decisao, motivo || null, req.user.id, id]);
-      res.json({ ok: true });
+        SET status = $1, justificativa_admin = $2, revisado_em = NOW()
+        WHERE id = $3
+      `, [statusFinal, motivoFinal, id]);
+      res.json({ ok: true, status: statusFinal, documento: { id: Number(id), status: statusFinal } });
     } catch (e) {
       console.error('[EMPRESA DOC REVISAR]', e);
       res.status(500).json({ erro: 'Erro ao revisar documento' });
@@ -593,5 +600,53 @@ function registrar(app, ctx) {
     }
   });
 }
+
+
+  // ===========================================================
+  // POST /api/empresa/candidatura/:id/proposta
+  // Envia proposta de emprego ao candidato
+  // ===========================================================
+  app.post('/api/empresa/candidatura/:id/proposta', requireRecrutadorOuAdmin, async (req, res) => {
+    try {
+      const { empresa_id } = req.user;
+      const candId = Number(req.params.id);
+      const { texto, pdf_url, pdf_public_id } = req.body || {};
+      if (!texto && !pdf_url) {
+        return res.status(400).json({ erro: 'Envie um texto ou uma URL do PDF da proposta' });
+      }
+      // Validar ownership via empresa_vaga_acesso
+      const { rows: c } = await pool.query(`
+        SELECT c.*, v.titulo, cd.nome, cd.email, cd.id AS candidato_id_full
+        FROM candidaturas c
+        JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.empresa_id = $1
+        JOIN vagas v ON v.id = c.vaga_id
+        JOIN candidatos cd ON cd.id = c.candidato_id
+        WHERE c.id = $2
+      `, [empresa_id, candId]);
+      if (c.length === 0) return res.status(403).json({ erro: 'Sem acesso a esta candidatura' });
+      const cand = c[0];
+      if (cand.proposta_enviada_em) return res.status(409).json({ erro: 'Proposta já enviada para este candidato' });
+      if (['contratado', 'rejeitado', 'reprovado'].includes(cand.status)) {
+        return res.status(409).json({ erro: `Candidatura já está "${cand.status}"` });
+      }
+      const historico = Array.isArray(cand.historico) ? [...cand.historico] : [];
+      historico.push({
+        etapa: cand.etapa_atual, status: 'proposta_enviada', acao: 'enviar_proposta',
+        mensagem: 'Proposta enviada ao candidato pela empresa',
+        data: new Date().toISOString(),
+        por: `empresa:${req.user.nome || empresa_id}`
+      });
+      await pool.query(`
+        UPDATE candidaturas
+        SET proposta_texto = $1, proposta_pdf_url = $2, proposta_pdf_public_id = $3,
+            proposta_enviada_em = NOW(), historico = $4, atualizada_em = NOW()
+        WHERE id = $5
+      `, [texto || null, pdf_url || null, pdf_public_id || null, JSON.stringify(historico), candId]);
+      res.json({ ok: true, proposta: { texto, pdf_url: pdf_url || null } });
+    } catch (e) {
+      console.error('[EMPRESA PROPOSTA POST]', e);
+      res.status(500).json({ erro: 'Erro ao enviar proposta' });
+    }
+  });
 
 module.exports = { registrar };
