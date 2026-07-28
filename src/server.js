@@ -4711,12 +4711,15 @@ app.post('/api/empresa/cadastro', rateLimitByIp('cadastro-empresa'), async (req,
       }
     }
 
-    // 3. Cria a empresa
+    // 3. Cria a empresa — resolve plano_id via tabela planos
+    const planoSlug = plano || 'essencial';
+    const planoRow = await pool.query('SELECT id FROM planos WHERE slug = $1 LIMIT 1', [planoSlug]);
+    const planoId = planoRow.rows[0]?.id || null;
     const empRes = await pool.query(`
-      INSERT INTO empresas (nome, cnpj, email_principal, telefone, ativo, plano, slug)
-      VALUES ($1, $2, $3, $4, true, $5, $6)
-      RETURNING id, nome, cnpj, email_principal, plano, slug, criado_em
-    `, [empresa_nome.trim(), cnpjClean, email_principal?.toLowerCase() || null, telefone || null, plano || 'essencial', slugFinal]);
+      INSERT INTO empresas (nome, cnpj, email_principal, telefone, ativo, plano, plano_id, slug)
+      VALUES ($1, $2, $3, $4, true, $5, $6, $7)
+      RETURNING id, nome, cnpj, email_principal, plano, plano_id, slug, criado_em
+    `, [empresa_nome.trim(), cnpjClean, email_principal?.toLowerCase() || null, telefone || null, planoSlug, planoId, slugFinal]);
     const empresa = empRes.rows[0];
 
     // 4. Cria o admin master (empresa_usuarios) — primeiro usuário = admin_empresa
@@ -4760,7 +4763,7 @@ app.post('/api/empresa/cadastro', rateLimitByIp('cadastro-empresa'), async (req,
         cargo: adminUser.cargo,
         empresa_id: empresa.id,
         empresa_nome: empresa.nome,
-        primeiro_acesso: false
+        primeiro_acesso: true  // novo cadastro → redireciona para onboarding
       },
       empresa: {
         id: empresa.id,
