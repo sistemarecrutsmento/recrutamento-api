@@ -5563,13 +5563,24 @@ process.on('unhandledRejection', (e) => {
       }
       const t = r.token;
       // Gera novo access (15m) + novo refresh (7d)
-      // Preserva role e empresa_id do refresh anterior (Fase 1, jul/2026)
+      // Preserva role, empresa_id E empresa_nome do refresh anterior (Fase 1, jul/2026)
+      // FIX FASE 3 (28/07/2026): busca empresa_nome do banco pra incluir no novo JWT,
+      // senão o middleware /api/empresa/* falha com NOT NULL constraint
+      let empresa_nome = null;
+      if (t.user_type === 'empresa' && t.user_id) {
+        const { rows: empRows } = await pool.query(
+          'SELECT e.nome FROM empresa_usuarios u JOIN empresas e ON e.id = u.empresa_id WHERE u.id = $1',
+          [t.user_id]
+        );
+        if (empRows.length) empresa_nome = empRows[0].nome;
+      }
       const novoAccess = criarAccessToken({
         id: t.user_id || undefined,
         email: t.user_email,
         tipo: t.user_type,
         role: t.user_role || undefined,
-        empresa_id: t.user_empresa_id || undefined
+        empresa_id: t.user_empresa_id || undefined,
+        empresa_nome
       });
       const novoRefresh = criarRefreshToken();
       // Revoga o refresh usado e persiste o novo (ROTAÇÃO)
