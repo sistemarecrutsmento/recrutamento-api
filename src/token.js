@@ -87,6 +87,55 @@ async function revogarTodosPorUsuario(user_email, user_type, motivo = 'password_
   );
 }
 
+// ─── Gestão de Sessões ────────────────────────────────────────────────────
+
+/**
+ * Lista sessões ativas de um usuário (não expiradas, não revogadas).
+ */
+async function listarSessoes(user_email, user_type) {
+  const { rows } = await pool.query(
+    `SELECT id, ip_criacao, user_agent_criacao, device_name, criado_em, expira_em
+     FROM refresh_tokens
+     WHERE user_email = $1
+       AND user_type  = $2
+       AND revogado_em IS NULL
+       AND expira_em > NOW()
+     ORDER BY criado_em DESC`,
+    [user_email, user_type]
+  );
+  return rows;
+}
+
+/**
+ * Revoga sessão por ID — verifica ownership (isolamento por user_email/user_type).
+ */
+async function revogarSessaoById(sessaoId, user_email, user_type) {
+  const { rowCount } = await pool.query(
+    `UPDATE refresh_tokens
+     SET revogado_em = NOW(), revogado_motivo = 'sessao_encerrada_usuario'
+     WHERE id = $1 AND user_email = $2 AND user_type = $3 AND revogado_em IS NULL`,
+    [sessaoId, user_email, user_type]
+  );
+  return rowCount > 0;
+}
+
+/**
+ * Revoga todas as sessões EXCETO o token atual (informado raw).
+ */
+async function revogarOutrasSessoes(user_email, user_type, tokenAtual) {
+  const hashAtual = hashRefresh(tokenAtual);
+  const { rowCount } = await pool.query(
+    `UPDATE refresh_tokens
+     SET revogado_em = NOW(), revogado_motivo = 'outras_sessoes_encerradas'
+     WHERE user_email = $1
+       AND user_type  = $2
+       AND token_hash != $3
+       AND revogado_em IS NULL`,
+    [user_email, user_type, hashAtual]
+  );
+  return rowCount;
+}
+
 module.exports = {
   criarAccessToken,
   criarRefreshToken,
@@ -95,6 +144,9 @@ module.exports = {
   consumirRefresh,
   revogarRefresh,
   revogarTodosPorUsuario,
+  listarSessoes,
+  revogarSessaoById,
+  revogarOutrasSessoes,
   ACCESS_TTL,
   REFRESH_TTL_MS
 };
