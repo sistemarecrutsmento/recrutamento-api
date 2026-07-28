@@ -180,8 +180,12 @@ function registrar(app, ctx) {
                v.titulo as vaga_titulo,
                cd.id as candidato_id, cd.nome as candidato_nome, cd.foto_url,
                (SELECT COUNT(*) FROM mensagens_processo m
-                WHERE m.candidatura_id = c.id AND m.lida = false AND m.de = 'candidato')::int as nao_lidas_candidato,
-               (SELECT MAX(criada_em) FROM mensagens_processo m WHERE m.candidatura_id = c.id) as ultima_msg
+                WHERE m.candidatura_id = c.id AND m.autor_tipo = 'candidato'
+                  AND m.criado_em > COALESCE(
+                    (SELECT MAX(criado_em) FROM mensagens_processo
+                     WHERE candidatura_id = c.id AND autor_tipo = 'admin'), '1970-01-01'
+                  ))::int as nao_lidas_empresa,
+               (SELECT MAX(criado_em) FROM mensagens_processo m WHERE m.candidatura_id = c.id) as ultima_msg
         FROM candidaturas c
         JOIN vagas v ON v.id = c.vaga_id
         JOIN candidatos cd ON cd.id = c.candidato_id
@@ -308,14 +312,14 @@ function registrar(app, ctx) {
     try {
       const { empresa_id } = req.user;
       const { rows } = await pool.query(`
-        SELECT v.id, v.titulo, v.fechada_em,
+        SELECT v.id, v.titulo, v.criada_em,
                (SELECT COUNT(*) FROM candidaturas c WHERE c.vaga_id = v.id)::int as total_candidaturas,
                (SELECT COUNT(*) FROM candidaturas c WHERE c.vaga_id = v.id AND c.status = 'contratado')::int as contratacoes
         FROM vagas v
         WHERE (v.criada_por = $1 OR v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2))
           AND v.status = 'fechada'
           AND NOT EXISTS (SELECT 1 FROM candidaturas c WHERE c.vaga_id = v.id AND c.status = 'contratado')
-        ORDER BY v.fechada_em DESC NULLS LAST
+        ORDER BY v.criada_em DESC NULLS LAST
       `, [req.user.id, empresa_id]);
       res.json({ vagas: rows });
     } catch (e) {
@@ -332,7 +336,7 @@ function registrar(app, ctx) {
     try {
       const { empresa_id } = req.user;
       const { rows } = await pool.query(`
-        SELECT u.id, u.nome, u.email, u.role, u.ativo, u.criado_em, u.ultimo_login_em
+        SELECT u.id, u.nome, u.email, u.role, u.ativo, u.criado_em, u.cargo
         FROM empresa_usuarios u
         WHERE u.empresa_id = $1
         ORDER BY u.criado_em DESC
