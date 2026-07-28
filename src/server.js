@@ -5945,7 +5945,7 @@ app.get('/api/empresa/candidaturas/:id/historico', requireEmpresaViewer, async (
 // Cada KPI é um link inteligente (?tipo=X) que filtra o feed por tipo.
 // KPIS: candidatura_criada (novos candidatos), etapa_avancada (movimentações),
 //       proposta_aceita, proposta_recusada (decisões sobre propostas).
-app.get('/api/admin/notificacoes', authAdmin, async (req, res) => {
+app.get('/api/admin/notificacoes', requireEmpresaViewer, async (req, res) => {
   try {
     const empresa_id = req.user.empresa_id;
     const { tipo, limit: limitQ } = req.query;
@@ -6005,7 +6005,7 @@ app.get('/api/admin/notificacoes', authAdmin, async (req, res) => {
 });
 
 // Marca todas as notificações da empresa como lidas
-app.post('/api/admin/notificacoes/marcar-lidas', authAdmin, async (req, res) => {
+app.post('/api/admin/notificacoes/marcar-lidas', requireEmpresaViewer, async (req, res) => {
   try {
     const r = await pool.query(
       `UPDATE notificacoes SET lida_em = NOW()
