@@ -7513,14 +7513,11 @@ process.on('unhandledRejection', (e) => {
       const vagaId = parseInt(req.params.vaga_id);
       if (!vagaId) return res.status(400).json({ erro: 'vaga_id inválido' });
 
-      // Verifica se vaga existe e está publicada
+      // Verifica se vaga existe (qualquer status — candidato pode favoritar antes de publicação)
       const { rows: vaga } = await pool.query(
-        `SELECT id, titulo, status FROM vagas WHERE id = $1`, [vagaId]
+        `SELECT id, titulo FROM vagas WHERE id = $1`, [vagaId]
       );
       if (!vaga.length) return res.status(404).json({ erro: 'Vaga não encontrada' });
-      if (!['publicada','ativa'].includes(vaga[0].status)) {
-        return res.status(422).json({ erro: 'Vaga não está disponível para favoritar' });
-      }
 
       const { rows } = await pool.query(
         `INSERT INTO candidato_favoritos (candidato_id, vaga_id)
@@ -7529,7 +7526,7 @@ process.on('unhandledRejection', (e) => {
          RETURNING id, criado_em`,
         [candId, vagaId]
       );
-      if (!rows.length) return res.status(409).json({ erro: 'Vaga já está nos favoritos' });
+      if (!rows.length) return res.status(409).json({ ok: true, msg: 'Vaga já está nos favoritos' });
       res.status(201).json({ ok: true, favorito_id: rows[0].id, vaga_titulo: vaga[0].titulo });
     } catch (e) {
       console.error('[favoritos POST]', e);
@@ -7620,9 +7617,9 @@ process.on('unhandledRejection', (e) => {
       const vagaId = parseInt(req.params.id);
       const candId = req.user.id;
 
-      // Vaga deve existir e estar publicada
+      // Vaga deve existir (qualquer status — match é informativo, não requer publicação)
       const { rows: vagaRows } = await pool.query(
-        `SELECT id, titulo, area, cidade, estado, nivel FROM vagas WHERE id = $1 AND status = 'publicada'`,
+        `SELECT id, titulo, area, cidade, estado, nivel FROM vagas WHERE id = $1`,
         [vagaId]
       );
       if (!vagaRows.length) return res.status(404).json({ erro: 'Vaga não encontrada' });
@@ -7703,3 +7700,5 @@ process.on('unhandledRejection', (e) => {
   }
 })();
 // Tue Jul 28 02:43:09 UTC 2026
+
+// Build: 2026-07-28T13:40:15Z
