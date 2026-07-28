@@ -5934,6 +5934,20 @@ process.on('unhandledRejection', (e) => {
     await init();
     console.log('Banco inicializado com sucesso');
 
+    // ============= DEBUG FASE 6 — checa estrutura tabela
+    app.get('/api/_debug/fase6-tabela', async (req, res) => {
+      try {
+        const cols = await pool.query(
+          `SELECT column_name, data_type FROM information_schema.columns
+           WHERE table_schema='public' AND table_name='candidatura_historico'
+           ORDER BY ordinal_position`
+        );
+        res.json({ ok: true, colunas: cols.rows });
+      } catch (e) {
+        res.status(500).json({ erro: e.message });
+      }
+    });
+
     // FIX C3 (2026-07-27): rota /api/_teste/email REMOVIDA.
     // Era pública sem auth — atacante podia mandar e-mail arbitrário pelo nosso domínio.
     // Pra testar envio de e-mail em prod, use uma rota admin com auth + restrição por domínio.
@@ -6375,18 +6389,3 @@ process.on('unhandledRejection', (e) => {
     process.exit(1);
   }
 })();
-
-// ============= DEBUG FASE 6 — checa estrutura tabela
-app.get('/api/_debug/fase6-tabela', async (req, res) => {
-  try {
-    const cols = await pool.query(
-      `SELECT column_name, data_type FROM information_schema.columns
-       WHERE table_schema='public' AND table_name='candidatura_historico'
-       ORDER BY ordinal_position`
-    );
-    res.json({ ok: true, colunas: cols.rows });
-  } catch (e) {
-    res.status(500).json({ erro: e.message });
-  }
-});
-// 1785206197
