@@ -42,7 +42,7 @@ function emailRedefinicaoHtml({ nome, link, minutos }) {
 }
 
 // ===== Buscar usuário em qualquer tabela =====
-async function buscarUsuarioPorEmail(email) {
+async function buscarUsuarioPorEmail(email, tipoHint = null) {
   const emailNorm = email.trim().toLowerCase();
   // Tenta em cada tabela (candidatos, admins, recrutadores, empresa_usuarios)
   const tabelas = [
@@ -51,6 +51,10 @@ async function buscarUsuarioPorEmail(email) {
     { nome: 'recrutadores', tipo: 'recrutador' },
     { nome: 'empresa_usuarios', tipo: 'empresa' }
   ];
+  // Se tipoHint for fornecido, prioriza a tabela correspondente
+  if (tipoHint) {
+    tabelas.sort((a, b) => (a.tipo === tipoHint ? -1 : b.tipo === tipoHint ? 1 : 0));
+  }
   for (const t of tabelas) {
     const r = await pool.query(
       `SELECT id, email, nome, senha_hash FROM ${t.nome} WHERE LOWER(email) = $1 LIMIT 1`,
@@ -71,14 +75,14 @@ async function buscarUsuarioPorEmail(email) {
 
 // ===== POST /api/auth/esqueci-senha =====
 async function esqueciSenha(req, res) {
-  const { email, frontendUrl } = req.body || {};
+  const { email, frontendUrl, _user_tipo_hint } = req.body || {};
   if (!email) return res.status(400).json({ erro: 'E-mail é obrigatório' });
 
   // SEMPRE responde 200 (não revela se o e-mail existe)
   const respostaOk = { ok: true, mensagem: 'Se o e-mail estiver cadastrado, você receberá o link de redefinição.' };
 
   try {
-    const usuario = await buscarUsuarioPorEmail(email);
+    const usuario = await buscarUsuarioPorEmail(email, _user_tipo_hint || null);
     if (!usuario) {
       console.log(`[esqueci-senha] e-mail não encontrado: ${email}`);
       await audit(req, 'password.reset_requested', { result: 'failure', metadata: { email, motivo: 'email_nao_encontrado' } });
@@ -170,6 +174,22 @@ async function redefinirSenha(req, res) {
       `UPDATE password_resets SET usado_em = NOW() WHERE id = $1`,
       [reset.id]
     );
+
+    // Revogar todos os refresh tokens do usuário (sessões antigas invalidadas)
+    try {
+      const { revogarTodosPorUsuario } = require('./token');
+      // user_type nos refresh_tokens usa o nome do tipo
+      const tipoRefresh = reset.user_tipo === 'admin' ? 'admin' : reset.user_tipo;
+      // Buscar email do usuário para revogar
+      const { rows: emailRows } = await pool.query(
+        `SELECT email FROM ${tabela} WHERE id = $1`, [reset.user_id]
+      );
+      if (emailRows.length) {
+        await revogarTodosPorUsuario(emailRows[0].email, tipoRefresh, 'password_reset');
+      }
+    } catch (revokeErr) {
+      console.error('[redefinir-senha] revogação de refresh tokens falhou (não crítico):', revokeErr.message);
+    }
 
     console.log(`[redefinir-senha] senha atualizada: user_id=${reset.user_id}, tipo=${reset.user_tipo}`);
     await audit(req, 'password.changed', { result: 'success', metadata: { user_tipo: reset.user_tipo } });
