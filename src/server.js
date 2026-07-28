@@ -449,6 +449,33 @@ app.get('/api/_debug/fase6', async (req, res) => {
   }
 });
 
+// DEBUG FASE 6 — INSERT direto top-level (testa se tabela aceita escrita)
+app.post('/api/_debug/fase6-insert', async (req, res) => {
+  try {
+    const r = await pool.query(
+      `INSERT INTO candidatura_historico
+         (candidatura_id, vaga_id, empresa_id, etapa_nova, status_novo, alterado_por_tipo, alterado_por_nome, metadata)
+       VALUES (1, 1, 1, 0, 'em_analise', 'sistema', 'debug-top', '{"debug":true}'::jsonb)
+       RETURNING id, criado_em`
+    );
+    res.json({ ok: true, id: r.rows[0].id, criado_em: r.rows[0].criado_em });
+  } catch (e) {
+    res.status(500).json({ erro: e.message, code: e.code, detail: e.detail });
+  }
+});
+
+// DEBUG FASE 6 — UPDATE candidatura direta (testa o UPDATE)
+app.post('/api/_debug/fase6-update', async (req, res) => {
+  try {
+    const r = await pool.query(
+      `UPDATE candidaturas SET etapa_atual = 1, status = 'em_andamento', atualizada_em = NOW() WHERE id = 60 RETURNING id, etapa_atual, status`
+    );
+    res.json({ ok: true, rows: r.rows });
+  } catch (e) {
+    res.status(500).json({ erro: e.message, code: e.code, detail: e.detail });
+  }
+});
+
 // ETAPA 2: rota pública para diagnóstico de deploy (sem info sensível)
 app.get('/api/_build', (req, res) => res.json({
   ok: true,
