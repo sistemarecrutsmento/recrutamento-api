@@ -453,7 +453,17 @@ async function init() {
       console.error('[MIGRATION 008] Erro não tratado (mas segui):', migrationErr.message);
     }
 
-    console.log('Tabelas criadas/verificadas + migrations Fase 1-008 aplicadas');
+    // Migration 009 (28/07/2026) — Fase 12: Chat Empresa ↔ Candidato
+    try {
+      const { aplicar: aplicarMigration009 } = require('./migrations/009_chat_fase12');
+      const r9 = await aplicarMigration009();
+      if (!r9.ok) console.error('[MIGRATION 009] Falha (mas segui):', r9.erro);
+      else console.log('[MIGRATION 009] OK:', r9.log.join(' | '));
+    } catch (migrationErr) {
+      console.error('[MIGRATION 009] Erro não tratado (mas segui):', migrationErr.message);
+    }
+
+    console.log('Tabelas criadas/verificadas + migrations Fase 1-009 aplicadas');
   } finally {
     client.release();
   }
