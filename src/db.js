@@ -379,7 +379,20 @@ async function init() {
       console.error('[MIGRATION 002] Erro não tratado (mas segui):', migrationErr.message);
     }
 
-    console.log('Tabelas criadas/verificadas + migrations Fase 1 + 002 aplicadas');
+    // Migration 003 (28/07/2026) — portal público das empresas (Fase 5).
+    // Idempotente; adiciona colunas públicas em `empresas` + backfill vagas.empresa_id
+    // por match de nome (para vagas órfãs que ficaram sem empresa_id após Fase 1).
+    try {
+      const { aplicar: aplicarMigration003 } = require('./migrations/003_portal_publico_fase5');
+      const r3 = await aplicarMigration003();
+      if (!r3.ok) {
+        console.error('[MIGRATION 003] Falha (mas segui):', r3.erro);
+      }
+    } catch (migrationErr) {
+      console.error('[MIGRATION 003] Erro não tratado (mas segui):', migrationErr.message);
+    }
+
+    console.log('Tabelas criadas/verificadas + migrations Fase 1 + 002 + 003 aplicadas');
   } finally {
     client.release();
   }
