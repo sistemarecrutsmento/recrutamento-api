@@ -203,3 +203,17 @@ curl https://sistemarecrutsmento.github.io/vagas/candidato/
 # Vagas públicas
 curl https://recrutamento-api-novo.onrender.com/api/vagas
 ```
+
+---
+
+## Ativar GitHub Actions (CI)
+
+O arquivo `docs/ci.yml` contém o workflow completo. Para ativar:
+
+1. Acesse o repositório no GitHub
+2. Crie o arquivo em `.github/workflows/ci.yml` com o conteúdo de `docs/ci.yml`
+3. No repositório, vá em **Settings → Secrets and variables → Actions**
+4. Adicione o secret `CI_ADMIN_SECRET` com um valor seguro (igual ao configurado no Render)
+
+**Nota:** A criação de arquivos em `.github/workflows/` requer escopo `workflow` no Personal Access Token do GitHub. Se o seu token tiver apenas `repo`, crie o arquivo pela interface web ou atualize o token.
+
