@@ -1569,9 +1569,14 @@ app.post('/api/candidato/candidatar/:vagaId', authCandidato, async (req, res) =>
       console.error('[candidatar] Falha ao enviar e-mail de inscrição:', e.message);
     }
     await audit(req, 'candidatura.created', { resource_type: 'candidatura', resource_id: rows[0].id, metadata: { vaga_id: req.params.vagaId, etapa: 0 } });
-    analytics.bg({ evento: 'candidatura_enviada', user_type: 'candidato', user_id: vd[0].cand_id,
-      vaga_id: parseInt(req.params.vagaId), candidatura_id: rows[0].id,
-      empresa_id: vd[0].empresa_id || null, ...analytics.fromReq(req) });
+    // analytics — usa vd se disponível (declarado no try de email acima), senão dados básicos
+    try {
+      const _cand_id = (typeof vd !== 'undefined' && vd.length > 0) ? vd[0].cand_id : c[0].id;
+      const _emp_id  = (typeof vd !== 'undefined' && vd.length > 0) ? vd[0].empresa_id || null : null;
+      analytics.bg({ evento: 'candidatura_enviada', user_type: 'candidato', user_id: _cand_id,
+        vaga_id: parseInt(req.params.vagaId), candidatura_id: rows[0].id,
+        empresa_id: _emp_id, ...analytics.fromReq(req) });
+    } catch (_) { /* analytics nunca quebra o fluxo */ }
 
     // FASE 7 — notificação no feed global (nova candidatura)
     try {
