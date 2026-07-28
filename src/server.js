@@ -5749,7 +5749,8 @@ app.patch('/api/empresa/candidaturas/:id/etapa', requireRecrutadorOuAdmin, async
     res.json({ ok: true, etapa_atual: novaEtapa, status: novoStatus, historico_registrado: etapaMudou || statusMudou });
   } catch (e) {
     console.error('[empresa etapa patch]', e);
-    res.status(500).json({ erro: 'Erro ao atualizar etapa da candidatura' });
+    try { console.error('[empresa etapa patch] SQL:', e.message, '| detail:', e.detail, '| code:', e.code, '| hint:', e.hint); } catch (_) {}
+    res.status(500).json({ erro: 'Erro ao atualizar etapa da candidatura', debug: e.message });
   }
 });
 
