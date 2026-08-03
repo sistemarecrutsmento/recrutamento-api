@@ -15,7 +15,7 @@
 const { requireEmpresaViewer, requireRecrutadorOuAdmin } = require('../auth');
 
 function registrar(app, ctx) {
-  const { pool } = ctx;
+  const { pool, documentosObrigatorios = [] } = ctx;
   console.log('[FASE 8] Registrando 21 rotas /api/empresa/* complementares...');
 
   // ===========================================================
@@ -235,6 +235,31 @@ function registrar(app, ctx) {
   });
 
   // ===========================================================
+  // GET /api/empresa/candidatura/:id/entrevistas
+  // Compatibilidade funcional com o antigo admin/analisar.html.
+  // ===========================================================
+  app.get('/api/empresa/candidatura/:id/entrevistas', requireEmpresaViewer, async (req, res) => {
+    try {
+      const { empresa_id } = req.user;
+      const { id } = req.params;
+      const check = await pool.query(`
+        SELECT c.id FROM candidaturas c
+        JOIN vagas v ON v.id = c.vaga_id
+        WHERE c.id = $1 AND (v.criada_por = $2 OR v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3))
+      `, [id, req.user.id, empresa_id]);
+      if (check.rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
+      const { rows } = await pool.query(
+        `SELECT id, candidatura_id, etapa, data_hora, duracao_minutos, local, link_reuniao, observacoes, status, criado_em
+         FROM entrevistas WHERE candidatura_id = $1 ORDER BY data_hora DESC, id DESC`, [id]
+      );
+      res.json({ entrevistas: rows });
+    } catch (e) {
+      console.error('[EMPRESA ENTREVISTAS DA CANDIDATURA]', e);
+      res.status(500).json({ erro: 'Erro ao carregar entrevistas' });
+    }
+  });
+
+  // ===========================================================
   // POST /api/empresa/entrevista
   // ===========================================================
   app.post('/api/empresa/entrevista', requireRecrutadorOuAdmin, async (req, res) => {
@@ -246,18 +271,32 @@ function registrar(app, ctx) {
         return res.status(400).json({ erro: 'candidatura_id e data_hora são obrigatórios' });
       }
       const candCheck = await pool.query(`
-        SELECT c.id FROM candidaturas c
+        SELECT c.id, c.vaga_id, c.historico, cd.nome AS candidato_nome, v.titulo AS vaga_titulo
+        FROM candidaturas c
+        JOIN candidatos cd ON cd.id = c.candidato_id
         JOIN vagas v ON v.id = c.vaga_id
         WHERE c.id = $1 AND (v.criada_por = $2 OR v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3))
       `, [candidatura_id, req.user.id, empresa_id]);
       if (candCheck.rows.length === 0) return res.status(403).json({ erro: 'Candidatura não pertence a esta empresa' });
 
+      // Mantém o mesmo comportamento do admin: entrevistas online recebem um
+      // link utilizável mesmo quando a integração Google Meet não está ligada.
+      const isOnline = !local || /online|video/i.test(String(local)) || tipo === 'video';
+      const linkFinal = link_reuniao || (isOnline ? `https://meet.google.com/pending-${candidatura_id}-${Date.now()}` : null);
+      const dataFinal = new Date(data_hora);
+      if (isNaN(dataFinal.getTime())) return res.status(400).json({ erro: 'data_hora inválida' });
       const { rows } = await pool.query(`
         INSERT INTO entrevistas (candidatura_id, etapa, data_hora, duracao_minutos, local, link_reuniao, observacoes, status, criado_em)
         VALUES ($1, $2, $3, $4, $5, $6, $7, 'agendada', NOW())
-        RETURNING id
-      `, [candidatura_id, etapa, data_hora, duracao_minutos || 60, local, link_reuniao, observacoes]);
-      res.json({ ok: true, entrevista: { id: rows[0].id }, id: rows[0].id });
+        RETURNING *
+      `, [candidatura_id, etapa, dataFinal.toISOString(), duracao_minutos || 60,
+          isOnline ? 'Online (Google Meet)' : local, linkFinal, observacoes]);
+      const hist = Array.isArray(candCheck.rows[0].historico) ? candCheck.rows[0].historico : [];
+      hist.push({ tipo: 'entrevista', acao: 'entrevista_agendada', etapa, data_hora: dataFinal.toISOString(),
+        por: `empresa:${req.user.nome || empresa_id}`, quando: new Date().toISOString(),
+        detalhes: `Entrevista agendada para ${candCheck.rows[0].candidato_nome || 'candidato'}` });
+      await pool.query(`UPDATE candidaturas SET historico = $1::jsonb, atualizada_em = NOW() WHERE id = $2`, [JSON.stringify(hist), candidatura_id]);
+      res.json({ ok: true, entrevista: rows[0], id: rows[0].id });
     } catch (e) {
       console.error('[EMPRESA ENTREVISTA POST]', e);
       res.status(500).json({ erro: 'Erro ao agendar entrevista' });
@@ -332,6 +371,7 @@ function registrar(app, ctx) {
       if (acao === 'aprovar') statusFinal = 'aprovado';
       else if (acao === 'reprovar') statusFinal = 'reprovado';
       else if (acao === 'retornar') statusFinal = 'retornado';
+      else if (acao === 'reverter') statusFinal = 'pendente';
       const motivoFinal = motivo || justificativa || null;
       if (!statusFinal || !['aprovado', 'reprovado', 'retornado', 'pendente'].includes(statusFinal)) {
         return res.status(400).json({ erro: 'status deve ser: aprovado, reprovado, retornado ou pendente' });
@@ -361,19 +401,52 @@ function registrar(app, ctx) {
   app.post('/api/empresa/candidatura/:id/aprovar-documentos', requireRecrutadorOuAdmin, async (req, res) => {
     try {
       const { empresa_id } = req.user;
-      const { id } = req.params;
-      const check = await pool.query(`
-        SELECT c.id FROM candidaturas c
+      const candId = Number(req.params.id);
+      const { rows: cRows } = await pool.query(`
+        SELECT c.*, v.titulo, v.etapas, v.empresa, cd.nome, cd.email
+        FROM candidaturas c
         JOIN vagas v ON v.id = c.vaga_id
-        WHERE c.id = $1 AND (v.criada_por = $2 OR v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3))
-      `, [id, req.user.id, empresa_id]);
-      if (check.rows.length === 0) return res.status(403).json({ erro: 'Candidatura não pertence a esta empresa' });
+        JOIN candidatos cd ON cd.id = c.candidato_id
+        WHERE c.id = $1
+          AND (v.criada_por = $2 OR v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3))
+      `, [candId, req.user.id, empresa_id]);
+      if (cRows.length === 0) return res.status(403).json({ erro: 'Candidatura não pertence a esta empresa' });
+      const cand = cRows[0];
+      const { rows: docs } = await pool.query(
+        `SELECT id, tipo, status FROM documentos_candidatura WHERE candidatura_id = $1`, [candId]
+      );
+      const obrigatorios = documentosObrigatorios.map(d => d.tipo);
+      const enviados = new Set(docs.map(d => d.tipo));
+      const faltando = obrigatorios.filter(tipo => !enviados.has(tipo));
+      if (faltando.length) {
+        return res.status(400).json({ erro: 'Candidato ainda não enviou todos os documentos obrigatórios.', detalhes: { faltando } });
+      }
+      const bloqueados = docs.filter(d => obrigatorios.includes(d.tipo) && ['retornado', 'reprovado'].includes(d.status));
+      if (bloqueados.length) {
+        return res.status(400).json({ erro: 'Há documentos marcados para reenviar/reprovados. Aguarde a regularização.', detalhes: { bloqueados: bloqueados.length } });
+      }
+      if (!docs.length) return res.status(400).json({ erro: 'Nenhum documento enviado ainda.' });
+
       await pool.query(`
         UPDATE documentos_candidatura
-        SET status = 'aprovado', revisado_em = NOW(), revisado_por = $1
-        WHERE candidatura_id = $2 AND status = 'pendente'
-      `, [req.user.id, id]);
-      res.json({ ok: true });
+        SET status = 'aprovado', justificativa_admin = 'Aprovado em lote', revisado_em = NOW(), revisado_por = $1
+        WHERE candidatura_id = $2 AND status != 'aprovado'
+      `, [req.user.id, candId]);
+
+      let etapas = cand.etapas;
+      if (typeof etapas === 'string') { try { etapas = JSON.parse(etapas); } catch (_) { etapas = []; } }
+      const totalEtapas = Array.isArray(etapas) && etapas.length ? etapas.length : 7;
+      const novaEtapa = Number(cand.etapa_atual || 0) + 1;
+      const novoStatus = novaEtapa >= totalEtapas ? 'contratado' : 'em_andamento';
+      const historico = Array.isArray(cand.historico) ? cand.historico : [];
+      historico.push({ etapa: novaEtapa, status: novoStatus, acao: 'aprovar_docs',
+        mensagem: 'Documentação aprovada e processo avançado', data: new Date().toISOString(),
+        por: `empresa:${req.user.nome || empresa_id}` });
+      await pool.query(
+        `UPDATE candidaturas SET status = $1, etapa_atual = $2, historico = $3::jsonb, atualizada_em = NOW() WHERE id = $4`,
+        [novoStatus, novaEtapa, JSON.stringify(historico), candId]
+      );
+      res.json({ ok: true, novaEtapa, novoStatus, totalEtapas, contratados: novoStatus === 'contratado' });
     } catch (e) {
       console.error('[EMPRESA APROVAR DOCS]', e);
       res.status(500).json({ erro: 'Erro ao aprovar documentos' });
@@ -387,17 +460,27 @@ function registrar(app, ctx) {
     try {
       const { empresa_id } = req.user;
       const { id } = req.params;
-      const { texto } = req.body;
-      if (!texto || texto.trim().length === 0) return res.status(400).json({ erro: 'texto obrigatório' });
+      // Compatibilidade com o antigo admin/analisar.html: ele envia
+      // { etapa, comentario }. O Portal Empresa também aceita { texto }.
+      const texto = String(req.body?.texto || req.body?.comentario || '').trim();
+      const etapa = req.body?.etapa != null ? Number(req.body.etapa) : null;
+      if (!texto) return res.status(400).json({ erro: 'texto obrigatório' });
       const check = await pool.query(`
-        SELECT c.id, c.historico FROM candidaturas c
+        SELECT c.id, c.historico, c.observacoes_etapas FROM candidaturas c
         JOIN vagas v ON v.id = c.vaga_id
         WHERE c.id = $1 AND (v.criada_por = $2 OR v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3))
       `, [id, req.user.id, empresa_id]);
       if (check.rows.length === 0) return res.status(403).json({ erro: 'Candidatura não pertence a esta empresa' });
-      const hist = check.rows[0].historico || [];
-      hist.push({ tipo: 'comentario', por: `empresa:${req.user.email}`, quando: new Date().toISOString(), texto });
-      await pool.query(`UPDATE candidaturas SET historico = $1::jsonb WHERE id = $2`, [JSON.stringify(hist), id]);
+      const hist = Array.isArray(check.rows[0].historico) ? check.rows[0].historico : [];
+      const observacoes = check.rows[0].observacoes_etapas && typeof check.rows[0].observacoes_etapas === 'object'
+        ? { ...check.rows[0].observacoes_etapas } : {};
+      if (Number.isInteger(etapa) && etapa > 0) observacoes[String(etapa)] = texto;
+      hist.push({ tipo: 'comentario', etapa: Number.isInteger(etapa) ? etapa - 1 : null,
+        por: `empresa:${req.user.email}`, quando: new Date().toISOString(), texto });
+      await pool.query(
+        `UPDATE candidaturas SET historico = $1::jsonb, observacoes_etapas = $2::jsonb, atualizada_em = NOW() WHERE id = $3`,
+        [JSON.stringify(hist), JSON.stringify(observacoes), id]
+      );
       res.json({ ok: true });
     } catch (e) {
       console.error('[EMPRESA COMENTARIO]', e);
