@@ -5652,6 +5652,18 @@ app.get('/api/empresa/candidatura/:id', requireEmpresaViewer, async (req, res) =
     );
     candidatura.experiencias = exps;
 
+    // A página de análise precisa exibir e permitir administrar a entrevista
+    // atual, como fazia o antigo admin/analisar.html.
+    const { rows: entrevistas } = await pool.query(
+      `SELECT id, candidatura_id, etapa, data_hora, duracao_minutos, local,
+              link_reuniao, observacoes, status, criado_em
+       FROM entrevistas
+       WHERE candidatura_id = $1
+       ORDER BY data_hora DESC, id DESC`,
+      [id]
+    );
+    candidatura.entrevistas = entrevistas;
+
     res.json(candidatura);
   } catch (e) {
     console.error('[empresa detalhe candidatura]', e);
@@ -5857,8 +5869,9 @@ app.patch('/api/empresa/candidaturas/:id/etapa', requireRecrutadorOuAdmin, async
     if (acc.rows.length === 0) return res.status(403).json({ erro: 'Sem acesso a esta candidatura' });
     const cand = acc.rows[0];
 
-    // Bloqueia candidatura fechada
-    if (cand.status === 'contratado' || cand.status === 'rejeitado') {
+    // Igual ao antigo admin: candidaturas encerradas podem ser reabertas;
+    // as demais ações continuam bloqueadas enquanto fechadas.
+    if ((cand.status === 'contratado' || cand.status === 'rejeitado' || cand.status === 'reprovado') && acao !== 'reabrir') {
       return res.status(409).json({ erro: `Candidatura já está "${cand.status}" e não pode ser alterada.` });
     }
 
@@ -6789,7 +6802,7 @@ process.on('unhandledRejection', (e) => {
   // IMPORTANTE: registrado ANTES do handler 404 global (linha abaixo), senão as rotas
   // novas nunca são alcançadas — Express processa middlewares em ordem.
   const { registrar: registrarEmpresaExtra } = require('./routes/empresa_extra');
-  registrarEmpresaExtra(app, { pool });
+  registrarEmpresaExtra(app, { pool, documentosObrigatorios: DOCUMENTOS_OBRIGATORIOS });
 
   // =========================================================================
   // FASE 9 — Rotas de planos (público), perfil empresa (tenant) e onboarding
