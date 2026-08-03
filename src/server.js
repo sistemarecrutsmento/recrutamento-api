@@ -4561,13 +4561,24 @@ app.get('/api/admin/empresas', authAdmin, async (req, res) => {
 
 // Criar empresa
 app.post('/api/admin/empresas', authAdminOnly, async (req, res) => {
-  const { nome, cnpj, email_principal, telefone, usuario } = req.body;
-  if (!nome) return res.status(400).json({ erro: 'Nome obrigatório' });
+  const { nome, cnpj, email_principal, telefone, plano, usuario } = req.body;
+  if (!nome || String(nome).trim().length < 2) return res.status(400).json({ erro: 'Nome obrigatório (mínimo 2 caracteres)' });
   try {
+    const planoSlug = plano || 'essencial';
+    const planoResult = await pool.query('SELECT id FROM planos WHERE slug = $1 LIMIT 1', [planoSlug]);
+    const planoId = planoResult.rows[0]?.id || null;
+    const baseSlug = String(nome).normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'empresa';
+    let slug = baseSlug;
+    let suffix = 1;
+    while ((await pool.query('SELECT 1 FROM empresas WHERE slug = $1 LIMIT 1', [slug])).rowCount) {
+      suffix += 1;
+      slug = `${baseSlug}-${suffix}`;
+    }
     const { rows } = await pool.query(
-      `INSERT INTO empresas (nome, cnpj, email_principal, telefone, criado_por)
-       VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-      [nome, cnpj, email_principal, telefone, req.user.id]
+      `INSERT INTO empresas (nome, cnpj, email_principal, telefone, criado_por, ativo, plano, plano_id, slug)
+       VALUES ($1,$2,$3,$4,$5,true,$6,$7,$8) RETURNING *`,
+      [String(nome).trim(), cnpj || null, email_principal || null, telefone || null, req.user.id, planoSlug, planoId, slug]
     );
     const empresa = rows[0];
     let usuarioCriado = null;
