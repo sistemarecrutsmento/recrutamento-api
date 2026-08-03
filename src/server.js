@@ -6963,6 +6963,77 @@ process.on('unhandledRejection', (e) => {
     }
   });
 
+  // ─── SaaS Master: visão executiva e saúde operacional ─────────────────────
+  // Dados reais disponíveis no produto. Métricas financeiras ficam como
+  // "não conectado" até a integração com um gateway de pagamentos.
+  app.get('/api/saas/overview', authAdmin, async (req, res) => {
+    const safe = async (sql, params = []) => {
+      try { return (await pool.query(sql, params)).rows; }
+      catch (e) { console.error('[SAAS/OVERVIEW]', e.message); return []; }
+    };
+    try {
+      const [resumo, planos, atividade, ranking, crescimento, seguranca, comunicacao] = await Promise.all([
+        safe(`SELECT
+          COUNT(*)::int AS empresas_total,
+          COUNT(*) FILTER (WHERE ativo = true)::int AS empresas_ativas,
+          COUNT(*) FILTER (WHERE ativo = false)::int AS empresas_bloqueadas,
+          COUNT(*) FILTER (WHERE criado_em >= CURRENT_DATE)::int AS novos_cadastros_hoje,
+          (SELECT COUNT(*)::int FROM empresa_usuarios WHERE ativo = true) AS usuarios_ativos,
+          (SELECT COUNT(*)::int FROM vagas WHERE status = 'publicada') AS vagas_abertas,
+          (SELECT COUNT(*)::int FROM candidatos) AS candidatos_total,
+          (SELECT COUNT(*)::int FROM candidaturas) AS candidaturas_total,
+          (SELECT COUNT(*)::int FROM entrevistas WHERE status = 'agendada' AND data_hora >= NOW()) AS entrevistas_agendadas,
+          (SELECT COUNT(*)::int FROM candidaturas WHERE status = 'contratado') AS contratacoes_total,
+          (SELECT COUNT(*)::int FROM candidaturas WHERE criada_em >= NOW() - INTERVAL '24 hours') AS candidaturas_24h
+        FROM empresas`),
+        safe(`SELECT COALESCE(plano, 'não definido') AS plano, COUNT(*)::int AS total
+              FROM empresas GROUP BY COALESCE(plano, 'não definido') ORDER BY total DESC`),
+        safe(`SELECT id, created_at, user_email, user_type, action, resource_type, resource_id, result, metadata
+              FROM audit_logs ORDER BY created_at DESC LIMIT 14`),
+        safe(`SELECT e.id, e.nome,
+                COUNT(DISTINCT v.id) FILTER (WHERE v.status = 'publicada')::int AS vagas,
+                COUNT(DISTINCT c.id)::int AS candidatos,
+                COUNT(DISTINCT c.id) FILTER (WHERE c.status = 'contratado')::int AS contratacoes
+              FROM empresas e
+              LEFT JOIN vagas v ON v.empresa_id = e.id
+              LEFT JOIN candidaturas c ON c.vaga_id = v.id
+              GROUP BY e.id ORDER BY contratacoes DESC, candidatos DESC, vagas DESC LIMIT 8`),
+        safe(`SELECT TO_CHAR(date_trunc('month', criado_em), 'YYYY-MM') AS periodo,
+                COUNT(*)::int AS empresas,
+                (SELECT COUNT(*)::int FROM candidatos c2 WHERE TO_CHAR(date_trunc('month', c2.criado_em), 'YYYY-MM') = TO_CHAR(date_trunc('month', e.criado_em), 'YYYY-MM')) AS candidatos,
+                (SELECT COUNT(*)::int FROM vagas v2 WHERE TO_CHAR(date_trunc('month', v2.criada_em), 'YYYY-MM') = TO_CHAR(date_trunc('month', e.criado_em), 'YYYY-MM')) AS vagas
+              FROM empresas e
+              WHERE criado_em >= NOW() - INTERVAL '6 months'
+              GROUP BY date_trunc('month', criado_em) ORDER BY periodo`),
+        safe(`SELECT
+                (SELECT COUNT(*)::int FROM audit_logs WHERE created_at >= NOW() - INTERVAL '24 hours' AND action ILIKE '%login%' AND result = 'success') AS logins_24h,
+                (SELECT COUNT(*)::int FROM audit_logs WHERE created_at >= NOW() - INTERVAL '24 hours' AND result IN ('failure','blocked')) AS falhas_24h,
+                (SELECT COUNT(*)::int FROM audit_logs WHERE created_at >= NOW() - INTERVAL '24 hours') AS eventos_24h,
+                (SELECT COUNT(*)::int FROM refresh_tokens WHERE revogado_em IS NULL AND expira_em > NOW()) AS tokens_ativos`),
+        safe(`SELECT
+                COUNT(*) FILTER (WHERE criado_em >= CURRENT_DATE)::int AS emails_hoje,
+                COUNT(*) FILTER (WHERE criado_em >= CURRENT_DATE AND status = 'erro')::int AS emails_erro_hoje
+              FROM email_outbox`)
+      ]);
+      res.json({
+        ok: true,
+        gerado_em: new Date().toISOString(),
+        resumo: resumo[0] || {},
+        planos,
+        atividade,
+        ranking,
+        crescimento,
+        seguranca: seguranca[0] || {},
+        comunicacao: comunicacao[0] || {},
+        financeiro: { conectado: false, motivo: 'Gateway de pagamentos ainda não configurado' },
+        infraestrutura: { api: 'online', banco: 'online', redis: 'nao_utilizado', monitoramento_recursos: false }
+      });
+    } catch (e) {
+      console.error('[SAAS/OVERVIEW]', e);
+      res.status(500).json({ erro: 'Erro ao carregar visão executiva' });
+    }
+  });
+
   // =========================================================================
   // FASE 10 — AUTENTICAÇÃO, SESSÕES E RECUPERAÇÃO DE CONTA
   // =========================================================================
