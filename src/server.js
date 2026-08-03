@@ -5511,37 +5511,39 @@ app.get('/api/empresa/agenda', requireEmpresaViewer, async (req, res) => {
   const { empresa_id } = req.user;
   const { periodo } = req.query; // 'hoje' | 'proximos' | 'passados' | 'todos' | 'semana' | '7dias' | '30dias' | 'atrasadas' | 'realizadas' | 'canceladas'
   try {
-    let whereExtra = `AND e.etapa = 4`; // Empresa só vê Entrevista com Gestor (etapa 4)
+    // Paridade com o antigo Admin: a empresa acompanha entrevistas de RH e
+    // Gestor/Empresa das suas próprias vagas.
+    let whereExtra = ``;
     const params = [empresa_id];
     const now = new Date();
     if (periodo === 'hoje') {
       const inicio = new Date(now); inicio.setHours(0,0,0,0);
       const fim = new Date(now); fim.setHours(23,59,59,999);
-      whereExtra = `AND e.etapa = 4 AND e.data_hora BETWEEN $2 AND $3`;
+      whereExtra = `AND e.data_hora BETWEEN $2 AND $3`;
       params.push(inicio.toISOString(), fim.toISOString());
     } else if (periodo === 'proximos') {
-      whereExtra = `AND e.etapa = 4 AND e.data_hora >= NOW()`;
+      whereExtra = `AND e.data_hora >= NOW()`;
     } else if (periodo === 'passados') {
-      whereExtra = `AND e.etapa = 4 AND e.data_hora < NOW() AND e.status NOT IN ('cancelada', 'realizada')`;
+      whereExtra = `AND e.data_hora < NOW() AND e.status NOT IN ('cancelada', 'realizada')`;
     } else if (periodo === 'semana') {
       const inicio = new Date(now); inicio.setHours(0,0,0,0);
       const fim = new Date(now); fim.setDate(fim.getDate() + 7);
-      whereExtra = `AND e.etapa = 4 AND e.data_hora BETWEEN $2 AND $3`;
+      whereExtra = `AND e.data_hora BETWEEN $2 AND $3`;
       params.push(inicio.toISOString(), fim.toISOString());
     } else if (periodo === '7dias') {
       const fim = new Date(now); fim.setDate(fim.getDate() + 7);
-      whereExtra = `AND e.etapa = 4 AND e.data_hora BETWEEN NOW() AND $2`;
+      whereExtra = `AND e.data_hora BETWEEN NOW() AND $2`;
       params.push(fim.toISOString());
     } else if (periodo === '30dias') {
       const fim = new Date(now); fim.setDate(fim.getDate() + 30);
-      whereExtra = `AND e.etapa = 4 AND e.data_hora BETWEEN NOW() AND $2`;
+      whereExtra = `AND e.data_hora BETWEEN NOW() AND $2`;
       params.push(fim.toISOString());
     } else if (periodo === 'atrasadas') {
-      whereExtra = `AND e.etapa = 4 AND e.data_hora < NOW() AND e.status = 'agendada'`;
+      whereExtra = `AND e.data_hora < NOW() AND e.status = 'agendada'`;
     } else if (periodo === 'realizadas') {
-      whereExtra = `AND e.etapa = 4 AND e.status = 'realizada'`;
+      whereExtra = `AND e.status = 'realizada'`;
     } else if (periodo === 'canceladas') {
-      whereExtra = `AND e.etapa = 4 AND e.status = 'cancelada'`;
+      whereExtra = `AND e.status = 'cancelada'`;
     }
     const { rows } = await pool.query(`
       SELECT e.id, e.etapa, e.data_hora, e.duracao_minutos, e.local, e.link_reuniao, e.observacoes, e.status,
