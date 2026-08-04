@@ -4722,7 +4722,7 @@ app.delete('/api/admin/empresa-vaga', authAdminOnly, async (req, res) => {
   const { empresa_id, vaga_id } = req.body;
   if (!empresa_id || !vaga_id) return res.status(400).json({ erro: 'empresa_id e vaga_id obrigatórios' });
   try {
-    await pool.query('DELETE FROM empresa_vaga_acesso WHERE empresa_id = $1 AND vaga_id = $2 AND revogado_em IS NULL', [empresa_id, vaga_id]);
+    await pool.query('DELETE FROM empresa_vaga_acesso WHERE empresa_id = $1 AND vaga_id = $2', [empresa_id, vaga_id]);
     res.json({ ok: true });
   } catch (e) {
     res.status(500).json({ erro: 'Erro ao remover acesso' });
