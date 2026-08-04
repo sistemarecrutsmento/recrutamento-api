@@ -1,5 +1,6 @@
 const jwt = require('jsonwebtoken');
 const { audit } = require('./audit');
+const { pool } = require('./db');
 
 // Opções padrão para verificação de tokens — força HS256 explicitamente
 // (evita o bug "alg=none" e força que o algoritmo declarado no header seja respeitado)
@@ -121,6 +122,29 @@ function isEmpresaRole(role) {
       || role === EMPRESA_ROLES.VIEWER;
 }
 
+// JWTs are short-lived, but an account can be disabled while one is still valid.
+// Re-check the user and tenant on every Empresa request so deactivated access
+// cannot use the remaining access-token window.
+async function ensureEmpresaAccessAtivo(req, res, next) {
+  try {
+    const id = Number(req.user?.id), empresaId = Number(req.user?.empresa_id);
+    if (!Number.isInteger(id) || id <= 0 || !Number.isInteger(empresaId) || empresaId <= 0) {
+      return res.status(401).json({ erro: 'Token inválido: identidade empresarial ausente' });
+    }
+    const q = await pool.query(`
+      SELECT 1
+      FROM empresa_usuarios u
+      JOIN empresas e ON e.id = u.empresa_id
+      WHERE u.id = $1 AND u.empresa_id = $2 AND u.ativo = true AND e.ativo = true
+    `, [id, empresaId]);
+    if (!q.rowCount) return res.status(401).json({ erro: 'Acesso empresarial inativo' });
+    return next();
+  } catch (e) {
+    console.error('[AUTH EMPRESA ACCESS]', e.message);
+    return res.status(503).json({ erro: 'Não foi possível validar o acesso empresarial' });
+  }
+}
+
 // Apenas admin_empresa pode chamar (gerenciar usuarios, configs).
 // Exige: token tipo=empresa + role=admin_empresa + empresa_id no JWT.
 function requireAdminEmpresa(req, res, next) {
@@ -134,7 +158,7 @@ function requireAdminEmpresa(req, res, next) {
     if (!req.user.empresa_id || typeof req.user.empresa_id !== 'number') {
       return res.status(401).json({ erro: 'Token invalido: empresa_id ausente' });
     }
-    next();
+    return ensureEmpresaAccessAtivo(req, res, next);
   });
 }
 
@@ -152,7 +176,7 @@ function requireRecrutadorOuAdmin(req, res, next) {
     if (!req.user.empresa_id || typeof req.user.empresa_id !== 'number') {
       return res.status(401).json({ erro: 'Token invalido: empresa_id ausente' });
     }
-    next();
+    return ensureEmpresaAccessAtivo(req, res, next);
   });
 }
 
@@ -169,7 +193,7 @@ function requireEmpresaViewer(req, res, next) {
     if (!req.user.empresa_id || typeof req.user.empresa_id !== 'number') {
       return res.status(401).json({ erro: 'Token invalido: empresa_id ausente' });
     }
-    next();
+    return ensureEmpresaAccessAtivo(req, res, next);
   });
 }
 
