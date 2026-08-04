@@ -205,8 +205,7 @@ const IP_RATE_LIMITS = {
   twofa: { max: 5, windowMs: 60 * 60 * 1000 },          // 5 códigos 2FA/hora por IP+email
   'chat-download': { max: 120, windowMs: 60 * 60 * 1000 }, // 120 downloads/hora por IP (mitiga scraping)
   'api-read': { max: 600, windowMs: 60 * 60 * 1000 },   // 600 leituras/hora por IP
-  'api-write': { max: 120, windowMs: 60 * 60 * 1000 },  // 120 escritas/hora por IP
-  contato: { max: 5, windowMs: 60 * 60 * 1000 }         // 5 contatos/hora por IP
+  'api-write': { max: 120, windowMs: 60 * 60 * 1000 }   // 120 escritas/hora por IP
 };
 
 function rateLimitByIp(routeName) {
@@ -842,62 +841,6 @@ async function enviarCodigoSeguro(email, codigo) {
 }
 
 // ============= CANDIDATO - CADASTRO =============
-// ===== CONTATO PÚBLICO DA HOME 2.0 =====
-// Sem autenticação: validação server-side, honeypot, limite por IP e envio pelo provedor já configurado.
-const CONTACT_ASSUNTOS = new Set([
-  'Comercial / Quero contratar o VagasIO',
-  'Suporte / Dúvidas técnicas',
-  'Financeiro / Pagamentos e cobrança',
-  'Parcerias / Indicação',
-  'Imprensa / Mídia',
-  'Sugestões / Feedback',
-  'Outros assuntos'
-]);
-function contatoTexto(value, max, allowNewlines = false) {
-  const raw = sanitizeText(String(value || ''));
-  const cleaned = raw.replace(allowNewlines ? /[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]/g : /[\\u0000-\\u001F\\u007F\\r\\n]/g, ' ');
-  return cleaned.trim().slice(0, max);
-}
-app.post('/api/contato', rateLimitByIp('contato'), async (req, res) => {
-  ipRateRegister('contato', req);
-  const website = contatoTexto(req.body?.website, 100);
-  // Honeypot: responde como sucesso sem enviar para não ensinar o filtro ao robô.
-  if (website) return res.json({ ok: true });
-  const nome = contatoTexto(req.body?.nome, 100);
-  const email = contatoTexto(req.body?.email, 160).toLowerCase();
-  const empresa = contatoTexto(req.body?.empresa, 120);
-  const telefone = contatoTexto(req.body?.telefone, 25);
-  const assunto = contatoTexto(req.body?.assunto, 100);
-  const mensagem = contatoTexto(req.body?.mensagem, 5000, true);
-  const emailValido = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]{2,}$/.test(email);
-  const telefoneDigits = telefone.replace(/\\D/g, '');
-  if (nome.length < 2 || !emailValido || !CONTACT_ASSUNTOS.has(assunto) || mensagem.length < 10 || (telefoneDigits && ![10, 11].includes(telefoneDigits.length))) {
-    return res.status(400).json({ erro: 'Revise os campos obrigatórios e tente novamente.' });
-  }
-  const destino = process.env.CONTATO_EMAIL || process.env.CONTACT_EMAIL || 'contato@vagasio.com.br';
-  const subject = `[Contato VagasIO] ${assunto} — ${nome}`.replace(/[\\r\\n]/g, ' ').slice(0, 240);
-  const text = [
-    'Novo contato recebido pela Home 2.0 do VagasIO',
-    '',
-    `Nome: ${nome}`,
-    `E-mail: ${email}`,
-    `Empresa: ${empresa || 'Não informada'}`,
-    `Telefone: ${telefone || 'Não informado'}`,
-    `Assunto: ${assunto}`,
-    '',
-    'Mensagem:',
-    mensagem
-  ].join('\\n');
-  const html = `<div style="font-family:Arial,sans-serif;max-width:620px;margin:0 auto;color:#211A20"><div style="padding:20px 22px;background:#3A0A1D;color:#fff;border-radius:10px 10px 0 0"><strong style="font-size:18px">VagasIO</strong><div style="margin-top:5px;color:#F2C9D8;font-size:12px">Novo contato pela Home 2.0</div></div><div style="padding:22px;border:1px solid #E7DCE1;border-top:0;border-radius:0 0 10px 10px"><p><strong>Nome:</strong> ${escapeEmailHtml(nome)}</p><p><strong>E-mail:</strong> ${escapeEmailHtml(email)}</p><p><strong>Empresa:</strong> ${escapeEmailHtml(empresa || 'Não informada')}</p><p><strong>Telefone:</strong> ${escapeEmailHtml(telefone || 'Não informado')}</p><p><strong>Assunto:</strong> ${escapeEmailHtml(assunto)}</p><hr style="border:0;border-top:1px solid #E7DCE1;margin:18px 0"><p><strong>Mensagem:</strong></p><p style="white-space:pre-wrap;line-height:1.6">${escapeEmailHtml(mensagem)}</p></div></div>`;
-  try {
-    await enviarEmail({ to: destino, subject, text, html, from: process.env.EMAIL_REMETENTE_AMIGAVEL });
-    return res.json({ ok: true });
-  } catch (e) {
-    console.error('[CONTATO HOME2] Falha no envio:', e.message);
-    return res.status(503).json({ erro: 'Não foi possível enviar sua mensagem agora.' });
-  }
-});
-
 app.post('/api/candidato/iniciar', rateLimitByIp('iniciar'), async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ erro: 'E-mail obrigatório' });
@@ -3891,21 +3834,24 @@ app.post('/api/chat/:candidatura_id/mensagens', authCandidatoOrAdminStrict, asyn
     // Notifica o outro lado por e-mail (em background)
     setImmediate(() => {
       try {
-        const safe = texto.replace(/</g,'&lt;').replace(/>/g,'&gt;');
+        const emailEsc = v => String(v || '').replace(/[&<>"']/g, ch => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[ch]));
+        const safe = emailEsc(textoLimpo);
+        const safeAutor = emailEsc(autorNome);
+        const safeTitulo = emailEsc(c.titulo);
         if (autorTipo === 'candidato') {
           enviarEmailBg(enviarEmail, ADMIN_NOTIF_EMAIL,
             `💬 Nova mensagem de ${autorNome}`,
-            `<p><b>${autorNome}</b> enviou uma mensagem sobre a vaga <b>${c.titulo}</b>:</p>
+            `<p><b>${safeAutor}</b> enviou uma mensagem sobre a vaga <b>${safeTitulo}</b>:</p>
              <blockquote style="border-left:3px solid #d4a017;padding:8px 12px;background:#f8f8f8;">${safe}</blockquote>
-             <p><a href="https://vagasio.com.br/admin/analisar.html?id=${cid}">Responder no painel →</a></p>`
+             <p>Responda pelo painel administrativo autenticado.</p>`
           );
         } else {
           enviarEmailBg(enviarEmail, c.email,
             `💬 Nova mensagem sobre sua candidatura - ${c.titulo}`,
-            `<p>Olá <b>${c.cand_nome}</b>,</p>
-             <p><b>${autorNome}</b> enviou uma mensagem sobre sua candidatura na vaga <b>${c.titulo}</b>:</p>
+            `<p>Olá <b>${emailEsc(c.cand_nome)}</b>,</p>
+             <p><b>${safeAutor}</b> enviou uma mensagem sobre sua candidatura na vaga <b>${safeTitulo}</b>:</p>
              <blockquote style="border-left:3px solid #d4a017;padding:8px 12px;background:#f8f8f8;">${safe}</blockquote>
-             <p><a href="https://vagasio.com.br/candidato/entrevistas.html">Responder no portal →</a></p>`
+             <p>Responda pelo portal autenticado.</p>`
           );
         }
       } catch (e) { console.error('[CHAT EMAIL]', e.message); }
@@ -5726,8 +5672,8 @@ app.get('/api/empresa/candidatura/:id', requireEmpresaViewer, async (req, res) =
     );
     candidatura.experiencias = exps;
 
-    // A página de análise precisa exibir e permitir administrar a entrevista
-    // atual, como fazia o antigo admin/analisar.html.
+    // A página do Portal Empresa precisa exibir e permitir administrar a entrevista
+    // atual, preservando a compatibilidade da análise de candidatura.
     const { rows: entrevistas } = await pool.query(
       `SELECT id, candidatura_id, etapa, data_hora, duracao_minutos, local,
               link_reuniao, observacoes, status, criado_em
@@ -6879,19 +6825,24 @@ process.on('unhandledRejection', (e) => {
 app.get('/api/empresa/notificacoes', requireEmpresaViewer, async (req, res) => {
   const limite = Math.min(100, Math.max(1, Number(req.query.limite) || 20));
   try {
-    const { rows } = await pool.query(`
-      SELECT id, tipo, titulo, mensagem, referencia_tipo, referencia_id, lida, lida_em, criada_em, metadata
-      FROM notificacoes
-      WHERE user_type = 'empresa' AND user_id = $1
-      ORDER BY criada_em DESC
-      LIMIT $2
-    `, [req.user.empresa_id, limite]);
-    res.json({ notificacoes: rows, nao_lidas: rows.filter(n => !n.lida).length });
+    const [list, unread] = await Promise.all([
+      pool.query(`
+        SELECT id, tipo, titulo, mensagem, referencia_tipo, referencia_id, lida, lida_em, criada_em, metadata
+        FROM notificacoes
+        WHERE user_type = 'empresa' AND user_id = $1
+        ORDER BY criada_em DESC
+        LIMIT $2
+      `, [req.user.empresa_id, limite]),
+      pool.query(`SELECT COUNT(*)::int AS total FROM notificacoes WHERE user_type='empresa' AND user_id=$1 AND lida=false`, [req.user.empresa_id])
+    ]);
+    res.json({ notificacoes: list.rows, nao_lidas: unread.rows[0]?.total || 0 });
   } catch (e) { res.status(500).json({ erro: 'Erro ao carregar notificações' }); }
 });
 app.patch('/api/empresa/notificacoes/:id/lida', requireEmpresaViewer, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) return res.status(400).json({ erro:'Notificação inválida' });
   try {
-    const q = await pool.query(`UPDATE notificacoes SET lida=true, lida_em=NOW() WHERE id=$1 AND user_type='empresa' AND user_id=$2 RETURNING id,lida,lida_em`, [Number(req.params.id), req.user.empresa_id]);
+    const q = await pool.query(`UPDATE notificacoes SET lida=true, lida_em=NOW() WHERE id=$1 AND user_type='empresa' AND user_id=$2 RETURNING id,lida,lida_em`, [id, req.user.empresa_id]);
     if (!q.rows.length) return res.status(404).json({ erro:'Notificação não encontrada' });
     res.json({ ok:true, notificacao:q.rows[0] });
   } catch (e) { res.status(500).json({ erro:'Erro ao marcar notificação' }); }
@@ -6911,9 +6862,13 @@ function escapeEmailHtml(value) {
   return String(value || '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
 }
 function conviteFrontendUrl(req, rawToken) {
-  const base = String(process.env.FRONTEND_URL || req.headers.origin || '').replace(/\/$/, '');
+  const base = String(process.env.FRONTEND_URL || '').trim().replace(/\/$/, '');
   if (!base) return null;
-  return `${base}/empresa/convite.html?token=${encodeURIComponent(rawToken)}`;
+  try {
+    const parsed = new URL(base);
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) return null;
+    return `${base}/empresa/convite.html?token=${encodeURIComponent(rawToken)}`;
+  } catch (_) { return null; }
 }
 
 app.get('/api/empresa/convites', requireAdminEmpresa, async (req, res) => {
@@ -6937,7 +6892,7 @@ app.post('/api/empresa/convites', requireAdminEmpresa, async (req, res) => {
   const email = String(req.body?.email || '').trim().toLowerCase();
   const cargo = String(req.body?.cargo || '').trim() || null;
   const role = String(req.body?.role || 'recrutador').trim();
-  if (!nome || !email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ erro: 'Nome e e-mail válidos são obrigatórios' });
+  if (!nome || !email || nome.length > 160 || email.length > 254 || cargo && cargo.length > 160 || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ erro: 'Nome e e-mail válidos são obrigatórios' });
   if (!['admin_empresa','recrutador','viewer'].includes(role)) return res.status(400).json({ erro: 'Função inválida' });
   const rawToken = crypto.randomBytes(32).toString('hex');
   const tokenHash = hashConviteToken(rawToken);
@@ -6946,6 +6901,9 @@ app.post('/api/empresa/convites', requireAdminEmpresa, async (req, res) => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    // Serializa convites da mesma empresa: evita corrida que criaria dois admins ativos.
+    const empresaLock = await client.query('SELECT id FROM empresas WHERE id = $1 AND ativo = true FOR UPDATE', [empresaId]);
+    if (!empresaLock.rows.length) { await client.query('ROLLBACK'); return res.status(403).json({ erro: 'Empresa inativa ou não encontrada' }); }
     const existing = await client.query('SELECT id, ativo FROM empresa_usuarios WHERE lower(email) = $1', [email]);
     if (existing.rows.length) {
       await client.query('ROLLBACK');
@@ -7003,8 +6961,10 @@ app.delete('/api/empresa/convites/:id', requireAdminEmpresa, async (req, res) =>
   } catch (e) { res.status(500).json({ erro:'Não foi possível cancelar o convite' }); }
 });
 
-app.get('/api/empresa/convite/:token', async (req, res) => {
-  const hash = hashConviteToken(req.params.token || '');
+app.get('/api/empresa/convite/:token', rateLimitByIp('cadastro'), async (req, res) => {
+  const rawToken = String(req.params.token || '');
+  if (!/^[a-f0-9]{64}$/i.test(rawToken)) return res.status(404).json({ erro:'Convite inválido ou expirado' });
+  const hash = hashConviteToken(rawToken);
   try {
     const { rows } = await pool.query(`SELECT c.id,c.nome,c.email,c.cargo,c.role,c.expira_em,e.nome AS empresa_nome FROM empresa_convites c JOIN empresas e ON e.id=c.empresa_id WHERE c.token_hash=$1 AND c.aceito_em IS NULL AND c.cancelado_em IS NULL AND c.expira_em>NOW()`, [hash]);
     if (!rows.length) return res.status(404).json({ erro:'Convite inválido ou expirado' });
@@ -7013,7 +6973,9 @@ app.get('/api/empresa/convite/:token', async (req, res) => {
 });
 
 app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async (req, res) => {
-  const hash = hashConviteToken(req.params.token || ''), senha = String(req.body?.senha || '');
+  const rawToken = String(req.params.token || '');
+  if (!/^[a-f0-9]{64}$/i.test(rawToken)) return res.status(404).json({ erro:'Convite inválido ou expirado' });
+  const hash = hashConviteToken(rawToken), senha = String(req.body?.senha || '');
   if (senha.length < 8) return res.status(400).json({ erro:'A senha deve ter pelo menos 8 caracteres' });
   const client = await pool.connect();
   try {
