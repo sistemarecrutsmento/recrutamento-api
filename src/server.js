@@ -1,6 +1,7 @@
 // BUILD_TIMESTAMP: 2026-07-27T05:55-Z (Etapa 2 force redeploy)
 // BUILD_TIMESTAMP: 2026-07-25T21:20-Z — commit forçando redeploy
 const express = require('express');
+const crypto = require('crypto');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
@@ -6814,6 +6815,165 @@ process.on('unhandledRejection', (e) => {
       return erroInterno(req, res, e, 'empresa.usuarios.delete');
     }
   });
+
+// ===========================================================
+// NOTIFICAÇÕES DA EMPRESA — feed real
+// ===========================================================
+app.get('/api/empresa/notificacoes', requireEmpresaViewer, async (req, res) => {
+  const limite = Math.min(100, Math.max(1, Number(req.query.limite) || 20));
+  try {
+    const { rows } = await pool.query(`
+      SELECT id, tipo, titulo, mensagem, referencia_tipo, referencia_id, lida, lida_em, criada_em, metadata
+      FROM notificacoes
+      WHERE user_type = 'empresa' AND user_id = $1
+      ORDER BY criada_em DESC
+      LIMIT $2
+    `, [req.user.empresa_id, limite]);
+    res.json({ notificacoes: rows, nao_lidas: rows.filter(n => !n.lida).length });
+  } catch (e) { res.status(500).json({ erro: 'Erro ao carregar notificações' }); }
+});
+app.patch('/api/empresa/notificacoes/:id/lida', requireEmpresaViewer, async (req, res) => {
+  try {
+    const q = await pool.query(`UPDATE notificacoes SET lida=true, lida_em=NOW() WHERE id=$1 AND user_type='empresa' AND user_id=$2 RETURNING id,lida,lida_em`, [Number(req.params.id), req.user.empresa_id]);
+    if (!q.rows.length) return res.status(404).json({ erro:'Notificação não encontrada' });
+    res.json({ ok:true, notificacao:q.rows[0] });
+  } catch (e) { res.status(500).json({ erro:'Erro ao marcar notificação' }); }
+});
+app.post('/api/empresa/notificacoes/lidas', requireEmpresaViewer, async (req, res) => {
+  try { await pool.query(`UPDATE notificacoes SET lida=true, lida_em=NOW() WHERE user_type='empresa' AND user_id=$1 AND lida=false`, [req.user.empresa_id]); res.json({ ok:true }); }
+  catch (e) { res.status(500).json({ erro:'Erro ao marcar notificações' }); }
+});
+
+// ===========================================================
+// CONVITES REAIS DE USUÁRIOS DA EMPRESA
+// ===========================================================
+function hashConviteToken(raw) {
+  return crypto.createHash('sha256').update(String(raw)).digest('hex');
+}
+function escapeEmailHtml(value) {
+  return String(value || '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+}
+function conviteFrontendUrl(req, rawToken) {
+  const base = String(process.env.FRONTEND_URL || req.headers.origin || '').replace(/\/$/, '');
+  if (!base) return null;
+  return `${base}/empresa/convite.html?token=${encodeURIComponent(rawToken)}`;
+}
+
+app.get('/api/empresa/convites', requireAdminEmpresa, async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT id, nome, email, cargo, role, criado_em, expira_em, reenviado_em
+      FROM empresa_convites
+      WHERE empresa_id = $1 AND aceito_em IS NULL AND cancelado_em IS NULL AND expira_em > NOW()
+      ORDER BY criado_em DESC
+    `, [req.user.empresa_id]);
+    res.json({ convites: rows });
+  } catch (e) {
+    console.error('[EMPRESA CONVITES GET]', e.message);
+    res.status(500).json({ erro: 'Erro ao listar convites' });
+  }
+});
+
+app.post('/api/empresa/convites', requireAdminEmpresa, async (req, res) => {
+  const empresaId = req.user.empresa_id;
+  const nome = String(req.body?.nome || '').trim();
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  const cargo = String(req.body?.cargo || '').trim() || null;
+  const role = String(req.body?.role || 'recrutador').trim();
+  if (!nome || !email || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ erro: 'Nome e e-mail válidos são obrigatórios' });
+  if (!['admin_empresa','recrutador','viewer'].includes(role)) return res.status(400).json({ erro: 'Função inválida' });
+  const rawToken = crypto.randomBytes(32).toString('hex');
+  const tokenHash = hashConviteToken(rawToken);
+  const inviteUrl = conviteFrontendUrl(req, rawToken);
+  if (!inviteUrl) return res.status(503).json({ erro: 'URL do portal não configurada para convites' });
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const existing = await client.query('SELECT id, ativo FROM empresa_usuarios WHERE lower(email) = $1', [email]);
+    if (existing.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(409).json({ erro: existing.rows[0].ativo ? 'Este e-mail já pertence a um usuário' : 'Este e-mail pertence a um usuário inativo' });
+    }
+    const pending = await client.query(`SELECT id FROM empresa_convites WHERE empresa_id = $1 AND lower(email) = $2 AND aceito_em IS NULL AND cancelado_em IS NULL AND expira_em > NOW()`, [empresaId, email]);
+    if (pending.rows.length) { await client.query('ROLLBACK'); return res.status(409).json({ erro: 'Já existe um convite pendente para este e-mail' }); }
+    if (role === 'admin_empresa') {
+      const admins = await client.query(`SELECT COUNT(*)::int AS total FROM empresa_usuarios WHERE empresa_id = $1 AND role = 'admin_empresa' AND ativo = true`, [empresaId]);
+      if (admins.rows[0].total >= 1) { await client.query('ROLLBACK'); return res.status(409).json({ erro: 'Esta empresa já possui um administrador ativo' }); }
+    }
+    const expira = new Date(Date.now() + 7 * 86400000);
+    const ins = await client.query(`INSERT INTO empresa_convites (empresa_id, nome, email, cargo, role, token_hash, expira_em, criado_por) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, nome, email, cargo, role, criado_em, expira_em`, [empresaId, nome, email, cargo, role, tokenHash, expira, req.user.id]);
+    await enviarEmail({
+      to: email,
+      subject: 'Convite para acessar o portal da empresa',
+      html: `<p>Olá, ${escapeEmailHtml(nome)}.</p><p>Você recebeu um convite para acessar o portal da empresa como <strong>${escapeEmailHtml(role)}</strong>.</p><p>O convite expira em 7 dias.</p><p>Acesse pelo link abaixo e defina sua senha:</p><p>${escapeEmailHtml(inviteUrl)}</p>`,
+      text: `Olá, ${nome}. Você recebeu um convite para acessar o portal da empresa como ${role}. O convite expira em 7 dias. Acesse: ${inviteUrl}`
+    });
+    await client.query('COMMIT');
+    await audit(req, 'empresa.convite.created', { resource_type: 'empresa_convite', resource_id: ins.rows[0].id, metadata: { empresa_id: empresaId, role } });
+    res.status(201).json({ ok: true, convite: ins.rows[0] });
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error('[EMPRESA CONVITE POST]', e.message);
+    res.status(503).json({ erro: 'Não foi possível criar e enviar o convite' });
+  } finally { client.release(); }
+});
+
+app.post('/api/empresa/convites/:id/reenviar', requireAdminEmpresa, async (req, res) => {
+  const id = Number(req.params.id), empresaId = req.user.empresa_id;
+  if (!Number.isInteger(id)) return res.status(400).json({ erro: 'Convite inválido' });
+  const rawToken = crypto.randomBytes(32).toString('hex');
+  const tokenHash = hashConviteToken(rawToken);
+  const inviteUrl = conviteFrontendUrl(req, rawToken);
+  if (!inviteUrl) return res.status(503).json({ erro: 'URL do portal não configurada para convites' });
+  try {
+    const q = await pool.query(`UPDATE empresa_convites SET token_hash=$1, expira_em=NOW()+INTERVAL '7 days', reenviado_em=NOW() WHERE id=$2 AND empresa_id=$3 AND aceito_em IS NULL AND cancelado_em IS NULL RETURNING id,nome,email,cargo,role,expira_em`, [tokenHash,id,empresaId]);
+    if (!q.rows.length) return res.status(404).json({ erro: 'Convite pendente não encontrado' });
+    const c = q.rows[0];
+    await enviarEmail({ to:c.email, subject:'Seu convite para acessar o portal da empresa', html:`<p>Olá, ${escapeEmailHtml(c.nome)}.</p><p>Seu convite foi reenviado e expira em 7 dias.</p><p>${escapeEmailHtml(inviteUrl)}</p>`, text:`Seu convite foi reenviado. Acesse: ${inviteUrl}` });
+    await audit(req, 'empresa.convite.resent', { resource_type:'empresa_convite', resource_id:id });
+    res.json({ ok:true, convite:c });
+  } catch (e) { console.error('[EMPRESA CONVITE RESEND]', e.message); res.status(503).json({ erro:'Não foi possível reenviar o convite' }); }
+});
+
+app.delete('/api/empresa/convites/:id', requireAdminEmpresa, async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id)) return res.status(400).json({ erro:'Convite inválido' });
+  try {
+    const q = await pool.query(`UPDATE empresa_convites SET cancelado_em=NOW() WHERE id=$1 AND empresa_id=$2 AND aceito_em IS NULL AND cancelado_em IS NULL RETURNING id`, [id, req.user.empresa_id]);
+    if (!q.rows.length) return res.status(404).json({ erro:'Convite pendente não encontrado' });
+    await audit(req, 'empresa.convite.cancelled', { resource_type:'empresa_convite', resource_id:id });
+    res.json({ ok:true });
+  } catch (e) { res.status(500).json({ erro:'Não foi possível cancelar o convite' }); }
+});
+
+app.get('/api/empresa/convite/:token', async (req, res) => {
+  const hash = hashConviteToken(req.params.token || '');
+  try {
+    const { rows } = await pool.query(`SELECT c.id,c.nome,c.email,c.cargo,c.role,c.expira_em,e.nome AS empresa_nome FROM empresa_convites c JOIN empresas e ON e.id=c.empresa_id WHERE c.token_hash=$1 AND c.aceito_em IS NULL AND c.cancelado_em IS NULL AND c.expira_em>NOW()`, [hash]);
+    if (!rows.length) return res.status(404).json({ erro:'Convite inválido ou expirado' });
+    res.json({ convite: rows[0] });
+  } catch (e) { res.status(500).json({ erro:'Erro ao consultar convite' }); }
+});
+
+app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async (req, res) => {
+  const hash = hashConviteToken(req.params.token || ''), senha = String(req.body?.senha || '');
+  if (senha.length < 8) return res.status(400).json({ erro:'A senha deve ter pelo menos 8 caracteres' });
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const q = await client.query(`SELECT c.*,e.nome AS empresa_nome FROM empresa_convites c JOIN empresas e ON e.id=c.empresa_id WHERE c.token_hash=$1 AND c.aceito_em IS NULL AND c.cancelado_em IS NULL AND c.expira_em>NOW() FOR UPDATE`, [hash]);
+    if (!q.rows.length) { await client.query('ROLLBACK'); return res.status(404).json({ erro:'Convite inválido ou expirado' }); }
+    const c=q.rows[0];
+    const exists=await client.query('SELECT id FROM empresa_usuarios WHERE lower(email)=lower($1)',[c.email]);
+    if(exists.rows.length){await client.query('ROLLBACK');return res.status(409).json({erro:'Este e-mail já possui um acesso'});}
+    const hashSenha=await bcrypt.hash(senha,12);
+    const u=await client.query(`INSERT INTO empresa_usuarios (empresa_id,nome,email,senha_hash,cargo,ativo,primeiro_acesso,role) VALUES ($1,$2,$3,$4,$5,true,false,$6) RETURNING id,nome,email,cargo,role,ativo`,[c.empresa_id,c.nome,c.email,hashSenha,c.cargo,c.role]);
+    await client.query('UPDATE empresa_convites SET aceito_em=NOW() WHERE id=$1',[c.id]);
+    await client.query('COMMIT');
+    res.json({ok:true,usuario:u.rows[0],empresa:{id:c.empresa_id,nome:c.empresa_nome}});
+  } catch(e){await client.query('ROLLBACK').catch(()=>{});console.error('[EMPRESA CONVITE ACCEPT]',e.message);res.status(500).json({erro:'Não foi possível aceitar o convite'});} finally{client.release();}
+});
+
 
   // ===== FASE 8 — Registra rotas /api/empresa/* complementares (ANTES do 404 global) =====
   // Paridade multi-tenant: antes só existia em /api/admin/* (visão SaaS).
