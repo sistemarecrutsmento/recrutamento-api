@@ -205,7 +205,8 @@ const IP_RATE_LIMITS = {
   twofa: { max: 5, windowMs: 60 * 60 * 1000 },          // 5 códigos 2FA/hora por IP+email
   'chat-download': { max: 120, windowMs: 60 * 60 * 1000 }, // 120 downloads/hora por IP (mitiga scraping)
   'api-read': { max: 600, windowMs: 60 * 60 * 1000 },   // 600 leituras/hora por IP
-  'api-write': { max: 120, windowMs: 60 * 60 * 1000 }   // 120 escritas/hora por IP
+  'api-write': { max: 120, windowMs: 60 * 60 * 1000 },  // 120 escritas/hora por IP
+  contato: { max: 5, windowMs: 60 * 60 * 1000 }         // 5 contatos/hora por IP
 };
 
 function rateLimitByIp(routeName) {
@@ -841,6 +842,62 @@ async function enviarCodigoSeguro(email, codigo) {
 }
 
 // ============= CANDIDATO - CADASTRO =============
+// ===== CONTATO PÚBLICO DA HOME 2.0 =====
+// Sem autenticação: validação server-side, honeypot, limite por IP e envio pelo provedor já configurado.
+const CONTACT_ASSUNTOS = new Set([
+  'Comercial / Quero contratar o VagasIO',
+  'Suporte / Dúvidas técnicas',
+  'Financeiro / Pagamentos e cobrança',
+  'Parcerias / Indicação',
+  'Imprensa / Mídia',
+  'Sugestões / Feedback',
+  'Outros assuntos'
+]);
+function contatoTexto(value, max, allowNewlines = false) {
+  const raw = sanitizeText(String(value || ''));
+  const cleaned = raw.replace(allowNewlines ? /[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]/g : /[\\u0000-\\u001F\\u007F\\r\\n]/g, ' ');
+  return cleaned.trim().slice(0, max);
+}
+app.post('/api/contato', rateLimitByIp('contato'), async (req, res) => {
+  ipRateRegister('contato', req);
+  const website = contatoTexto(req.body?.website, 100);
+  // Honeypot: responde como sucesso sem enviar para não ensinar o filtro ao robô.
+  if (website) return res.json({ ok: true });
+  const nome = contatoTexto(req.body?.nome, 100);
+  const email = contatoTexto(req.body?.email, 160).toLowerCase();
+  const empresa = contatoTexto(req.body?.empresa, 120);
+  const telefone = contatoTexto(req.body?.telefone, 25);
+  const assunto = contatoTexto(req.body?.assunto, 100);
+  const mensagem = contatoTexto(req.body?.mensagem, 5000, true);
+  const emailValido = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]{2,}$/.test(email);
+  const telefoneDigits = telefone.replace(/\\D/g, '');
+  if (nome.length < 2 || !emailValido || !CONTACT_ASSUNTOS.has(assunto) || mensagem.length < 10 || (telefoneDigits && ![10, 11].includes(telefoneDigits.length))) {
+    return res.status(400).json({ erro: 'Revise os campos obrigatórios e tente novamente.' });
+  }
+  const destino = process.env.CONTATO_EMAIL || process.env.CONTACT_EMAIL || 'contato@vagasio.com.br';
+  const subject = `[Contato VagasIO] ${assunto} — ${nome}`.replace(/[\\r\\n]/g, ' ').slice(0, 240);
+  const text = [
+    'Novo contato recebido pela Home 2.0 do VagasIO',
+    '',
+    `Nome: ${nome}`,
+    `E-mail: ${email}`,
+    `Empresa: ${empresa || 'Não informada'}`,
+    `Telefone: ${telefone || 'Não informado'}`,
+    `Assunto: ${assunto}`,
+    '',
+    'Mensagem:',
+    mensagem
+  ].join('\\n');
+  const html = `<div style="font-family:Arial,sans-serif;max-width:620px;margin:0 auto;color:#211A20"><div style="padding:20px 22px;background:#3A0A1D;color:#fff;border-radius:10px 10px 0 0"><strong style="font-size:18px">VagasIO</strong><div style="margin-top:5px;color:#F2C9D8;font-size:12px">Novo contato pela Home 2.0</div></div><div style="padding:22px;border:1px solid #E7DCE1;border-top:0;border-radius:0 0 10px 10px"><p><strong>Nome:</strong> ${escapeEmailHtml(nome)}</p><p><strong>E-mail:</strong> ${escapeEmailHtml(email)}</p><p><strong>Empresa:</strong> ${escapeEmailHtml(empresa || 'Não informada')}</p><p><strong>Telefone:</strong> ${escapeEmailHtml(telefone || 'Não informado')}</p><p><strong>Assunto:</strong> ${escapeEmailHtml(assunto)}</p><hr style="border:0;border-top:1px solid #E7DCE1;margin:18px 0"><p><strong>Mensagem:</strong></p><p style="white-space:pre-wrap;line-height:1.6">${escapeEmailHtml(mensagem)}</p></div></div>`;
+  try {
+    await enviarEmail({ to: destino, subject, text, html, from: process.env.EMAIL_REMETENTE_AMIGAVEL });
+    return res.json({ ok: true });
+  } catch (e) {
+    console.error('[CONTATO HOME2] Falha no envio:', e.message);
+    return res.status(503).json({ erro: 'Não foi possível enviar sua mensagem agora.' });
+  }
+});
+
 app.post('/api/candidato/iniciar', rateLimitByIp('iniciar'), async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ erro: 'E-mail obrigatório' });
