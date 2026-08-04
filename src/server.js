@@ -855,7 +855,7 @@ const CONTACT_ASSUNTOS = new Set([
 ]);
 function contatoTexto(value, max, allowNewlines = false) {
   const raw = sanitizeText(String(value || ''));
-  const cleaned = raw.replace(allowNewlines ? /[\\u0000-\\u0008\\u000B\\u000C\\u000E-\\u001F\\u007F]/g : /[\\u0000-\\u001F\\u007F\\r\\n]/g, ' ');
+  const cleaned = raw.replace(allowNewlines ? /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/g : /[\u0000-\u001F\u007F\r\n]/g, ' ');
   return cleaned.trim().slice(0, max);
 }
 app.post('/api/contato', rateLimitByIp('contato'), async (req, res) => {
@@ -869,13 +869,13 @@ app.post('/api/contato', rateLimitByIp('contato'), async (req, res) => {
   const telefone = contatoTexto(req.body?.telefone, 25);
   const assunto = contatoTexto(req.body?.assunto, 100);
   const mensagem = contatoTexto(req.body?.mensagem, 5000, true);
-  const emailValido = /^[^\\s@]+@[^\\s@]+\\.[^\\s@]{2,}$/.test(email);
-  const telefoneDigits = telefone.replace(/\\D/g, '');
+  const emailValido = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(email);
+  const telefoneDigits = telefone.replace(/\D/g, '');
   if (nome.length < 2 || !emailValido || !CONTACT_ASSUNTOS.has(assunto) || mensagem.length < 10 || (telefoneDigits && ![10, 11].includes(telefoneDigits.length))) {
     return res.status(400).json({ erro: 'Revise os campos obrigatórios e tente novamente.' });
   }
   const destino = process.env.CONTATO_EMAIL || process.env.CONTACT_EMAIL || 'contato@vagasio.com.br';
-  const subject = `[Contato VagasIO] ${assunto} — ${nome}`.replace(/[\\r\\n]/g, ' ').slice(0, 240);
+  const subject = `[Contato VagasIO] ${assunto} — ${nome}`.replace(/[\r\n]/g, ' ').slice(0, 240);
   const text = [
     'Novo contato recebido pela Home 2.0 do VagasIO',
     '',
@@ -887,7 +887,7 @@ app.post('/api/contato', rateLimitByIp('contato'), async (req, res) => {
     '',
     'Mensagem:',
     mensagem
-  ].join('\\n');
+  ].join('\n');
   const html = `<div style="font-family:Arial,sans-serif;max-width:620px;margin:0 auto;color:#211A20"><div style="padding:20px 22px;background:#3A0A1D;color:#fff;border-radius:10px 10px 0 0"><strong style="font-size:18px">VagasIO</strong><div style="margin-top:5px;color:#F2C9D8;font-size:12px">Novo contato pela Home 2.0</div></div><div style="padding:22px;border:1px solid #E7DCE1;border-top:0;border-radius:0 0 10px 10px"><p><strong>Nome:</strong> ${escapeEmailHtml(nome)}</p><p><strong>E-mail:</strong> ${escapeEmailHtml(email)}</p><p><strong>Empresa:</strong> ${escapeEmailHtml(empresa || 'Não informada')}</p><p><strong>Telefone:</strong> ${escapeEmailHtml(telefone || 'Não informado')}</p><p><strong>Assunto:</strong> ${escapeEmailHtml(assunto)}</p><hr style="border:0;border-top:1px solid #E7DCE1;margin:18px 0"><p><strong>Mensagem:</strong></p><p style="white-space:pre-wrap;line-height:1.6">${escapeEmailHtml(mensagem)}</p></div></div>`;
   try {
     await enviarEmail({ to: destino, subject, text, html, from: process.env.EMAIL_REMETENTE_AMIGAVEL });
