@@ -7621,6 +7621,41 @@ process.on('unhandledRejection', (e) => {
     }
   });
 
+  // ── 1b. DETALHE DE CANDIDATO — compatibilidade com o Admin antigo ────────
+  // Escopo: só candidatos que possuem candidatura em vaga liberada para a
+  // empresa autenticada. Mantém o currículo do layout antigo sem vazar dados.
+  app.get('/api/empresa/candidatos/:id', requireEmpresaViewer, async (req, res) => {
+    try {
+      const candidatoId = Number(req.params.id);
+      const empresaId = req.user.empresa_id;
+      if (!Number.isInteger(candidatoId) || candidatoId <= 0) {
+        return res.status(400).json({ erro: 'ID de candidato inválido' });
+      }
+      const { rows } = await pool.query(`
+        SELECT DISTINCT c.id, c.nome, c.email, c.celular, c.cpf, c.data_nascimento,
+          c.sexo, c.acessibilidade, c.cep, c.estado, c.cidade, c.bairro,
+          c.logradouro, c.numero, c.complemento, c.formacao, c.instituicao,
+          c.curso, c.situacao, c.data_conclusao, c.primeiro_emprego,
+          c.sobre_voce, c.experiencia, c.foto_url, c.areas_interesse,
+          c.competencias, c.banco_talentos, c.criado_em
+        FROM candidatos c
+        JOIN candidaturas can ON can.candidato_id = c.id
+        JOIN empresa_vaga_acesso eva ON eva.vaga_id = can.vaga_id
+        WHERE c.id = $1 AND eva.empresa_id = $2
+        LIMIT 1
+      `, [candidatoId, empresaId]);
+      if (!rows.length) return res.status(404).json({ erro: 'Candidato não encontrado' });
+      const { rows: experiencias } = await pool.query(
+        'SELECT * FROM experiencias WHERE candidato_id = $1 ORDER BY inicio DESC NULLS LAST, id DESC',
+        [candidatoId]
+      );
+      res.json({ candidato: { ...rows[0], experiencias } });
+    } catch (e) {
+      console.error('[empresa candidato detalhe]', e);
+      res.status(500).json({ erro: 'Erro ao carregar candidato' });
+    }
+  });
+
   // ── 2. TAGS DE VAGA ───────────────────────────────────────────────────────
 
   // GET /api/empresa/vagas/:id/tags
