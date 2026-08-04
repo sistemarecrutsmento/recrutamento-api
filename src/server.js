@@ -71,7 +71,6 @@ function naoAutorizadoOuInexistente(req, res, resource_type, resource_id) {
 const { audit } = require('./audit');
 const { create2faCode, verify2faCode, resend2faCode } = require('./twoFactor');
 const { getBackupMetadata } = require('./backup');
-const { seedDemoCompleto } = require('./seed-demo-once');
 
 // Cloudinary: aceita CLOUDINARY_URL no formato cloudinary://key:secret@cloud_name
 if (process.env.CLOUDINARY_URL) cloudinary.config({ url: process.env.CLOUDINARY_URL, secure: true });
@@ -8854,22 +8853,6 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
   });
 
   // =========================================================================
-  // ── POST /api/cron/seed-demo-completo — carga única, idempotente e sem e-mails ──
-  // Remover após a execução; protegido pelo mesmo segredo do cron.
-  app.post('/api/cron/seed-demo-completo', async (req, res) => {
-    const cronSecret = process.env.CRON_SECRET;
-    const auth = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
-    if (!cronSecret || auth !== cronSecret) return res.status(401).json({ erro: 'Não autorizado' });
-    try {
-      const alvo = String(req.body?.email || 'fabio17dejesusjunior@gmail.com').trim().toLowerCase();
-      const resultado = await seedDemoCompleto(pool, alvo);
-      return res.json({ ok: true, resultado });
-    } catch (e) {
-      console.error('[SEED DEMO COMPLETO]', e.message);
-      return res.status(400).json({ ok: false, erro: e.message });
-    }
-  });
-
   // ── POST /api/cron/digest — disparo pelo Render Cron Job (CRON_SECRET) ──────
   // Chamado pelo Render Cron às 07:00 BRT diariamente.
   // Autenticação: header "Authorization: Bearer <CRON_SECRET>"
