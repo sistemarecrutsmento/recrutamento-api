@@ -5359,6 +5359,8 @@ app.get('/api/empresa/dashboard', requireEmpresaViewer, async (req, res) => {
     `, [empresa_id]);
 
     res.json({
+      // Aliases mantêm compatibilidade com o DOM e o dashboard do Admin antigo.
+      admin: { nome: req.user?.nome || req.user?.email || 'Recrutador', email: req.user?.email || '' },
       kpis: {
         // bloco "principal" (compatível com frontend atual)
         vagas_liberadas: vagas.rows.length,
@@ -5369,7 +5371,13 @@ app.get('/api/empresa/dashboard', requireEmpresaViewer, async (req, res) => {
         entrevistas_agendadas: k.entrevistas_agendadas,
         // deltas (para o frontend espelhar setas do admin)
         processos_ativos: k.processos_ativos,
-        entrevistas_proximos_7d: k.entrevistas_proximos_7d
+        entrevistas_proximos_7d: k.entrevistas_proximos_7d,
+        deltas: {
+          vagas: k.vagas_ativas_novas_7d || 0,
+          candidatos: k.candidatos_novos_7d || 0,
+          processos: k.processos_novos_7d || 0,
+          entrevistas: k.entrevistas_proximos_7d || 0
+        }
       },
       kpis_deltas: {
         vagas_ativas: { atual: k.vagas_ativas, novos_7d: k.vagas_ativas_novas_7d, novos_14d: k.vagas_ativas_novas_14d },
@@ -5383,12 +5391,19 @@ app.get('/api/empresa/dashboard', requireEmpresaViewer, async (req, res) => {
         taxa_aprovacao_30d_qtd: com_contratacao_30d,
         taxa_aprovacao_30d_total: total_fechadas_30d,
         taxa_desistencia: taxaDesistencia,
-        vagas_encerradas: vagas_encerradas
+        vagas_encerradas: vagas_encerradas,
+        // aliases do dashboard antigo
+        taxa_documentacao: 0,
+        taxa_aprovacao: taxa_fechadas_30d,
+        taxa_desligamento: taxaDesistencia,
+        empresas_ativas: 1
       },
       etapas: etapasMap,
       etapas_labels: ['Inscrição', 'Triagem', 'RH', 'Gestor', 'Proposta', 'Coleta Docs', 'Contratação'],
       proximas: proximas.rows,
+      proximas_entrevistas: proximas.rows,
       atividades: atividadesRecentes,
+      atividades_recentes: atividadesRecentes,
       vagas_mais_candidatos: vagasMaisCandidatos.rows,
       vagas: vagas.rows,
       empresa: { id: empresa_id, nome: req.user?.nome || req.user?.email || 'Empresa' }
