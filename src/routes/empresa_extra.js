@@ -26,8 +26,8 @@ function registrar(app, ctx) {
     try {
       const { empresa_id } = req.user;
       const { etapa } = req.query;
-      let where = `WHERE (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2 AND revogado_em IS NULL))`;
-      const params = [req.user.id, empresa_id];
+      let where = `WHERE (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $1 AND revogado_em IS NULL))`;
+      const params = [empresa_id];
       if (etapa) {
         const etapas = etapa.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
         if (etapas.length > 0) {
@@ -62,10 +62,10 @@ function registrar(app, ctx) {
         FROM candidaturas c
         JOIN vagas v ON v.id = c.vaga_id
         WHERE c.status NOT IN ('reprovado')
-          AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2 AND revogado_em IS NULL))
+          AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $1 AND revogado_em IS NULL))
         GROUP BY c.etapa_atual
         ORDER BY c.etapa_atual
-      `, [req.user.id, empresa_id]);
+      `, [empresa_id]);
       const etapasMap = { 0: 0, 1: 0, 2: 0, 3: 0, 4: 0, 5: 0, 6: 0 };
       rows.forEach(r => { etapasMap[r.etapa_atual] = r.total; });
       res.json({ etapas: etapasMap, lista: rows });
@@ -91,9 +91,9 @@ function registrar(app, ctx) {
         JOIN vagas v ON v.id = c.vaga_id
         JOIN candidatos cd ON cd.id = c.candidato_id
         WHERE c.status = 'contratado'
-          AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2 AND revogado_em IS NULL))
+          AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $1 AND revogado_em IS NULL))
         ORDER BY c.atualizada_em DESC
-      `, [req.user.id, empresa_id]);
+      `, [empresa_id]);
       res.json({ contratacoes: rows });
     } catch (e) {
       console.error('[EMPRESA CONTRATACOES]', e);
@@ -110,7 +110,7 @@ function registrar(app, ctx) {
       const { empresa_id } = req.user;
       const { periodo } = req.query;
       let whereExtra = '';
-      const params = [req.user.id, empresa_id];
+      const params = [empresa_id];
       if (periodo === 'proximas') whereExtra = ` AND e.data_hora >= NOW() AND e.status = 'agendada'`;
       else if (periodo === 'passadas') whereExtra = ` AND e.data_hora < NOW()`;
       const { rows } = await pool.query(`
@@ -122,7 +122,7 @@ function registrar(app, ctx) {
         JOIN candidaturas c ON c.id = e.candidatura_id
         JOIN vagas v ON v.id = c.vaga_id
         JOIN candidatos cd ON cd.id = c.candidato_id
-        WHERE (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2 AND revogado_em IS NULL))
+        WHERE (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $1 AND revogado_em IS NULL))
           ${whereExtra}
         ORDER BY e.data_hora ASC
       `, params);
@@ -155,9 +155,9 @@ function registrar(app, ctx) {
         JOIN vagas v ON v.id = c.vaga_id
         JOIN candidatos cd ON cd.id = c.candidato_id
         WHERE c.status NOT IN ('reprovado', 'rejeitado')
-          AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2 AND revogado_em IS NULL))
+          AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $1 AND revogado_em IS NULL))
         ORDER BY c.atualizada_em DESC
-      `, [req.user.id, empresa_id]);
+      `, [empresa_id]);
       res.json({ conversas: rows });
     } catch (e) {
       console.error('[EMPRESA CONVERSAS]', e);
@@ -179,11 +179,11 @@ function registrar(app, ctx) {
                NOW() - v.criada_em as idade,
                (SELECT COUNT(*) FROM candidaturas c WHERE c.vaga_id = v.id)::int as total_candidaturas
         FROM vagas v
-        WHERE (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2 AND revogado_em IS NULL))
+        WHERE (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $1 AND revogado_em IS NULL))
           AND v.status = 'publicada'
           AND v.criada_em < NOW() - INTERVAL '30 days'
         ORDER BY v.criada_em ASC
-      `, [req.user.id, empresa_id]);
+      `, [empresa_id]);
       res.json({ vagas: rows });
     } catch (e) {
       console.error('[EMPRESA VAGAS ANTIGAS]', e);
@@ -202,11 +202,11 @@ function registrar(app, ctx) {
                (SELECT COUNT(*) FROM candidaturas c WHERE c.vaga_id = v.id)::int as total_candidaturas,
                (SELECT COUNT(*) FROM candidaturas c WHERE c.vaga_id = v.id AND c.status = 'contratado')::int as contratacoes
         FROM vagas v
-        WHERE (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2 AND revogado_em IS NULL))
+        WHERE (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $1 AND revogado_em IS NULL))
           AND v.status = 'fechada'
           AND NOT EXISTS (SELECT 1 FROM candidaturas c WHERE c.vaga_id = v.id AND c.status = 'contratado')
         ORDER BY v.criada_em DESC NULLS LAST
-      `, [req.user.id, empresa_id]);
+      `, [empresa_id]);
       res.json({ vagas: rows });
     } catch (e) {
       console.error('[EMPRESA VAGAS FECHADAS S CONTRAT]', e);
