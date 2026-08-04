@@ -128,17 +128,23 @@ const REMETENTE_AMIGAVEL = process.env.EMAIL_REMETENTE_AMIGAVEL
                             || 'Recrutamento e Seleção <contato@vagasio.com.br>';
 const FALLBACK_REMETENTE = `${SISTEMA} <onboarding@resend.dev>`;
 
-// Wrapper: tenta com REMETENTE_AMIGAVEL; se 403 (domínio não verificado), cai pro fallback
+// Wrapper resiliente: usa um remetente válido e tenta o remetente de fallback
+// quando o Resend recusar domínio ou formato do remetente configurado.
+function remetenteValido(value) {
+  return typeof value === 'string' && /[^\s<>@]+@[^\s<>@]+\.[^\s<>@]+/.test(value);
+}
+
 async function enviarViaResendComFallback(args) {
+  const preferido = remetenteValido(args.from)
+    ? args.from
+    : (remetenteValido(REMETENTE_AMIGAVEL) ? REMETENTE_AMIGAVEL : FALLBACK_REMETENTE);
   try {
-    return await enviarViaResend({ ...args, from: args.from || REMETENTE_AMIGAVEL });
+    return await enviarViaResend({ ...args, from: preferido });
   } catch (e) {
-    // Detecta erro de domínio não verificado (Resend retorna 403 com message específico)
-    const isDomainError = e?.response?.status === 403
-                       && /not verified/i.test(e?.response?.data?.message || e?.message || '');
-    if (isDomainError) {
-      console.warn('[email] Domínio vagasio.com.br não verificado no Resend — usando fallback onboarding@resend.dev');
-      console.warn('[email] Pra ativar o remetente amigável, verifique o domínio em https://resend.com/domains');
+    // 400 também cobre remetente malformado; 403 cobre domínio não verificado.
+    const status = e?.response?.status;
+    if ((status === 400 || status === 403) && preferido !== FALLBACK_REMETENTE) {
+      console.warn('[email] Resend recusou o remetente configurado — usando fallback onboarding@resend.dev');
       return enviarViaResend({ ...args, from: FALLBACK_REMETENTE });
     }
     throw e;
