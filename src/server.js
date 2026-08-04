@@ -889,10 +889,17 @@ app.post('/api/contato', rateLimitByIp('contato'), async (req, res) => {
     mensagem
   ].join('\n');
   const html = `<div style="font-family:Arial,sans-serif;max-width:620px;margin:0 auto;color:#211A20"><div style="padding:20px 22px;background:#3A0A1D;color:#fff;border-radius:10px 10px 0 0"><strong style="font-size:18px">VagasIO</strong><div style="margin-top:5px;color:#F2C9D8;font-size:12px">Novo contato pela Home 2.0</div></div><div style="padding:22px;border:1px solid #E7DCE1;border-top:0;border-radius:0 0 10px 10px"><p><strong>Nome:</strong> ${escapeEmailHtml(nome)}</p><p><strong>E-mail:</strong> ${escapeEmailHtml(email)}</p><p><strong>Empresa:</strong> ${escapeEmailHtml(empresa || 'Não informada')}</p><p><strong>Telefone:</strong> ${escapeEmailHtml(telefone || 'Não informado')}</p><p><strong>Assunto:</strong> ${escapeEmailHtml(assunto)}</p><hr style="border:0;border-top:1px solid #E7DCE1;margin:18px 0"><p><strong>Mensagem:</strong></p><p style="white-space:pre-wrap;line-height:1.6">${escapeEmailHtml(mensagem)}</p></div></div>`;
-  // O envio não pode manter o formulário preso aguardando SMTP/Resend.
-  // A mensagem é validada e enfileirada no próximo tick; falhas ficam registradas no log.
-  enviarEmailBg(enviarEmail, { to: destino, subject, text, html, from: process.env.EMAIL_REMETENTE_AMIGAVEL });
-  return res.status(202).json({ ok: true, mensagem: 'Mensagem recebida e encaminhada para processamento.' });
+  // Responde primeiro: o navegador nunca fica dependente do Resend/SMTP.
+  // O envio é iniciado somente depois que o 202 já foi entregue ao cliente.
+  res.status(202).json({ ok: true, mensagem: 'Mensagem recebida e encaminhada para processamento.' });
+  setTimeout(() => {
+    try {
+      enviarEmailBg(enviarEmail, { to: destino, subject, text, html, from: process.env.EMAIL_REMETENTE_AMIGAVEL });
+    } catch (e) {
+      console.error('[CONTATO HOME2] Falha ao iniciar envio:', e.message);
+    }
+  }, 0);
+  return;
 });
 
 app.post('/api/candidato/iniciar', rateLimitByIp('iniciar'), async (req, res) => {
