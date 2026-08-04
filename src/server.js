@@ -877,7 +877,10 @@ app.post('/api/contato', rateLimitByIp('contato'), async (req, res) => {
   if (nome.length < 2 || !emailValido || !CONTACT_ASSUNTOS.has(assunto) || mensagem.length < 10 || (telefoneDigits && ![10, 11].includes(telefoneDigits.length))) {
     return res.status(400).json({ erro: 'Revise os campos obrigatórios e tente novamente.' });
   }
-  const destino = process.env.CONTATO_EMAIL || process.env.CONTACT_EMAIL || 'contato@vagasio.com.br';
+  // O Resend em modo de teste só aceita destinatários autorizados pela conta.
+  // Mantemos CONTATO_EMAIL configurável e usamos o e-mail administrativo da conta
+  // como fallback seguro para que nenhum contato seja perdido.
+  const destino = process.env.CONTATO_EMAIL || process.env.CONTACT_EMAIL || process.env.ADMIN_NOTIF_EMAIL || 'fabio08dejesusjunior@gmail.com';
   const subject = `[Contato VagasIO] ${assunto} — ${nome}`.replace(/[\r\n]/g, ' ').slice(0, 240);
   const text = [
     'Novo contato recebido pela Home 2.0 do VagasIO',
