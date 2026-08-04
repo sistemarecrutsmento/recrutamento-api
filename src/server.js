@@ -107,7 +107,8 @@ app.use(cors({
     // requests sem Origin (curl, server-to-server) passam
     if (!origin) return cb(null, true);
     if (ALLOWED_ORIGINS.includes(origin)) return cb(null, true);
-    return cb(new Error(`CORS: origem não autorizada (${origin})`));
+    // Origem não autorizada: não falha o servidor com 500; apenas não concede CORS.
+    return cb(null, false);
   },
   credentials: true
 }));
