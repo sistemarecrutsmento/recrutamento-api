@@ -8858,7 +8858,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
   // Remover após a execução; protegido pelo mesmo segredo do cron.
   app.post('/api/cron/seed-demo-completo', async (req, res) => {
     const cronSecret = process.env.CRON_SECRET;
-    const auth = (req.headers.authorization || '').replace(/^Bearer\\s+/i, '');
+    const auth = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
     if (!cronSecret || auth !== cronSecret) return res.status(401).json({ erro: 'Não autorizado' });
     try {
       const alvo = String(req.body?.email || 'fabio17dejesusjunior@gmail.com').trim().toLowerCase();
