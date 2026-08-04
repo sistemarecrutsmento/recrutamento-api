@@ -889,13 +889,10 @@ app.post('/api/contato', rateLimitByIp('contato'), async (req, res) => {
     mensagem
   ].join('\n');
   const html = `<div style="font-family:Arial,sans-serif;max-width:620px;margin:0 auto;color:#211A20"><div style="padding:20px 22px;background:#3A0A1D;color:#fff;border-radius:10px 10px 0 0"><strong style="font-size:18px">VagasIO</strong><div style="margin-top:5px;color:#F2C9D8;font-size:12px">Novo contato pela Home 2.0</div></div><div style="padding:22px;border:1px solid #E7DCE1;border-top:0;border-radius:0 0 10px 10px"><p><strong>Nome:</strong> ${escapeEmailHtml(nome)}</p><p><strong>E-mail:</strong> ${escapeEmailHtml(email)}</p><p><strong>Empresa:</strong> ${escapeEmailHtml(empresa || 'Não informada')}</p><p><strong>Telefone:</strong> ${escapeEmailHtml(telefone || 'Não informado')}</p><p><strong>Assunto:</strong> ${escapeEmailHtml(assunto)}</p><hr style="border:0;border-top:1px solid #E7DCE1;margin:18px 0"><p><strong>Mensagem:</strong></p><p style="white-space:pre-wrap;line-height:1.6">${escapeEmailHtml(mensagem)}</p></div></div>`;
-  try {
-    await enviarEmail({ to: destino, subject, text, html, from: process.env.EMAIL_REMETENTE_AMIGAVEL });
-    return res.json({ ok: true });
-  } catch (e) {
-    console.error('[CONTATO HOME2] Falha no envio:', e.message);
-    return res.status(503).json({ erro: 'Não foi possível enviar sua mensagem agora.' });
-  }
+  // O envio não pode manter o formulário preso aguardando SMTP/Resend.
+  // A mensagem é validada e enfileirada no próximo tick; falhas ficam registradas no log.
+  enviarEmailBg(enviarEmail, { to: destino, subject, text, html, from: process.env.EMAIL_REMETENTE_AMIGAVEL });
+  return res.status(202).json({ ok: true, mensagem: 'Mensagem recebida e encaminhada para processamento.' });
 });
 
 app.post('/api/candidato/iniciar', rateLimitByIp('iniciar'), async (req, res) => {
