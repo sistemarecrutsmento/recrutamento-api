@@ -275,8 +275,8 @@ function registrar(app, ctx) {
         FROM candidaturas c
         JOIN candidatos cd ON cd.id = c.candidato_id
         JOIN vagas v ON v.id = c.vaga_id
-        WHERE c.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3 AND revogado_em IS NULL))
-      `, [candidatura_id, req.user.id, empresa_id]);
+        WHERE c.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2 AND revogado_em IS NULL))
+      `, [candidatura_id, empresa_id]);
       if (candCheck.rows.length === 0) return res.status(403).json({ erro: 'Candidatura não pertence a esta empresa' });
 
       // Mantém o mesmo comportamento do admin: entrevistas online recebem um
