@@ -26,7 +26,7 @@ function registrar(app, ctx) {
     try {
       const { empresa_id } = req.user;
       const { etapa } = req.query;
-      let where = `WHERE (v.criada_por = $1 OR v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2))`;
+      let where = `WHERE (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2 AND revogado_em IS NULL))`;
       const params = [req.user.id, empresa_id];
       if (etapa) {
         const etapas = etapa.split(',').map(s => parseInt(s.trim())).filter(n => !isNaN(n));
@@ -62,7 +62,7 @@ function registrar(app, ctx) {
         FROM candidaturas c
         JOIN vagas v ON v.id = c.vaga_id
         WHERE c.status NOT IN ('reprovado')
-          AND (v.criada_por = $1 OR v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2))
+          AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2 AND revogado_em IS NULL))
         GROUP BY c.etapa_atual
         ORDER BY c.etapa_atual
       `, [req.user.id, empresa_id]);
@@ -91,7 +91,7 @@ function registrar(app, ctx) {
         JOIN vagas v ON v.id = c.vaga_id
         JOIN candidatos cd ON cd.id = c.candidato_id
         WHERE c.status = 'contratado'
-          AND (v.criada_por = $1 OR v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2))
+          AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2 AND revogado_em IS NULL))
         ORDER BY c.atualizada_em DESC
       `, [req.user.id, empresa_id]);
       res.json({ contratacoes: rows });
@@ -122,7 +122,7 @@ function registrar(app, ctx) {
         JOIN candidaturas c ON c.id = e.candidatura_id
         JOIN vagas v ON v.id = c.vaga_id
         JOIN candidatos cd ON cd.id = c.candidato_id
-        WHERE (v.criada_por = $1 OR v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2))
+        WHERE (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2 AND revogado_em IS NULL))
           ${whereExtra}
         ORDER BY e.data_hora ASC
       `, params);
@@ -155,7 +155,7 @@ function registrar(app, ctx) {
         JOIN vagas v ON v.id = c.vaga_id
         JOIN candidatos cd ON cd.id = c.candidato_id
         WHERE c.status NOT IN ('reprovado', 'rejeitado')
-          AND (v.criada_por = $1 OR v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2))
+          AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2 AND revogado_em IS NULL))
         ORDER BY c.atualizada_em DESC
       `, [req.user.id, empresa_id]);
       res.json({ conversas: rows });
@@ -179,7 +179,7 @@ function registrar(app, ctx) {
                NOW() - v.criada_em as idade,
                (SELECT COUNT(*) FROM candidaturas c WHERE c.vaga_id = v.id)::int as total_candidaturas
         FROM vagas v
-        WHERE (v.criada_por = $1 OR v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2))
+        WHERE (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2 AND revogado_em IS NULL))
           AND v.status = 'publicada'
           AND v.criada_em < NOW() - INTERVAL '30 days'
         ORDER BY v.criada_em ASC
@@ -202,7 +202,7 @@ function registrar(app, ctx) {
                (SELECT COUNT(*) FROM candidaturas c WHERE c.vaga_id = v.id)::int as total_candidaturas,
                (SELECT COUNT(*) FROM candidaturas c WHERE c.vaga_id = v.id AND c.status = 'contratado')::int as contratacoes
         FROM vagas v
-        WHERE (v.criada_por = $1 OR v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2))
+        WHERE (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2 AND revogado_em IS NULL))
           AND v.status = 'fechada'
           AND NOT EXISTS (SELECT 1 FROM candidaturas c WHERE c.vaga_id = v.id AND c.status = 'contratado')
         ORDER BY v.criada_em DESC NULLS LAST
@@ -245,7 +245,7 @@ function registrar(app, ctx) {
       const check = await pool.query(`
         SELECT c.id FROM candidaturas c
         JOIN vagas v ON v.id = c.vaga_id
-        WHERE c.id = $1 AND (v.criada_por = $2 OR v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3))
+        WHERE c.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3 AND revogado_em IS NULL))
       `, [id, req.user.id, empresa_id]);
       if (check.rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
       const { rows } = await pool.query(
@@ -275,7 +275,7 @@ function registrar(app, ctx) {
         FROM candidaturas c
         JOIN candidatos cd ON cd.id = c.candidato_id
         JOIN vagas v ON v.id = c.vaga_id
-        WHERE c.id = $1 AND (v.criada_por = $2 OR v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3))
+        WHERE c.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3 AND revogado_em IS NULL))
       `, [candidatura_id, req.user.id, empresa_id]);
       if (candCheck.rows.length === 0) return res.status(403).json({ erro: 'Candidatura não pertence a esta empresa' });
 
@@ -315,7 +315,7 @@ function registrar(app, ctx) {
         SELECT e.id FROM entrevistas e
         JOIN candidaturas c ON c.id = e.candidatura_id
         JOIN vagas v ON v.id = c.vaga_id
-        WHERE e.id = $1 AND (v.criada_por = $2 OR v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3))
+        WHERE e.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3 AND revogado_em IS NULL))
       `, [id, req.user.id, empresa_id]);
       if (check.rows.length === 0) return res.status(403).json({ erro: 'Entrevista não pertence a esta empresa' });
       await pool.query(`
@@ -347,7 +347,7 @@ function registrar(app, ctx) {
         SELECT e.id FROM entrevistas e
         JOIN candidaturas c ON c.id = e.candidatura_id
         JOIN vagas v ON v.id = c.vaga_id
-        WHERE e.id = $1 AND (v.criada_por = $2 OR v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3))
+        WHERE e.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3 AND revogado_em IS NULL))
       `, [id, req.user.id, empresa_id]);
       if (check.rows.length === 0) return res.status(403).json({ erro: 'Entrevista não pertence a esta empresa' });
       await pool.query(`UPDATE entrevistas SET status = 'cancelada', observacoes = COALESCE($1, observacoes) WHERE id = $2`, [motivo ? `[CANCELADA] ${motivo}` : null, id]);
@@ -380,7 +380,7 @@ function registrar(app, ctx) {
         SELECT d.id FROM documentos_candidatura d
         JOIN candidaturas c ON c.id = d.candidatura_id
         JOIN vagas v ON v.id = c.vaga_id
-        WHERE d.id = $1 AND (v.criada_por = $2 OR v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3))
+        WHERE d.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3 AND revogado_em IS NULL))
       `, [id, req.user.id, empresa_id]);
       if (check.rows.length === 0) return res.status(403).json({ erro: 'Documento não pertence a esta empresa' });
       await pool.query(`
@@ -408,7 +408,7 @@ function registrar(app, ctx) {
         JOIN vagas v ON v.id = c.vaga_id
         JOIN candidatos cd ON cd.id = c.candidato_id
         WHERE c.id = $1
-          AND (v.criada_por = $2 OR v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3))
+          AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3 AND revogado_em IS NULL))
       `, [candId, req.user.id, empresa_id]);
       if (cRows.length === 0) return res.status(403).json({ erro: 'Candidatura não pertence a esta empresa' });
       const cand = cRows[0];
@@ -468,7 +468,7 @@ function registrar(app, ctx) {
       const check = await pool.query(`
         SELECT c.id, c.historico, c.observacoes_etapas FROM candidaturas c
         JOIN vagas v ON v.id = c.vaga_id
-        WHERE c.id = $1 AND (v.criada_por = $2 OR v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3))
+        WHERE c.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3 AND revogado_em IS NULL))
       `, [id, req.user.id, empresa_id]);
       if (check.rows.length === 0) return res.status(403).json({ erro: 'Candidatura não pertence a esta empresa' });
       const hist = Array.isArray(check.rows[0].historico) ? check.rows[0].historico : [];
@@ -499,7 +499,7 @@ function registrar(app, ctx) {
       const check = await pool.query(`
         SELECT c.*, v.etapas as vaga_etapas FROM candidaturas c
         JOIN vagas v ON v.id = c.vaga_id
-        WHERE c.id = $1 AND (v.criada_por = $2 OR v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3))
+        WHERE c.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3 AND revogado_em IS NULL))
       `, [id, req.user.id, empresa_id]);
       if (check.rows.length === 0) return res.status(403).json({ erro: 'Candidatura não pertence a esta empresa' });
       const cand = check.rows[0];
@@ -535,7 +535,7 @@ function registrar(app, ctx) {
       const check = await pool.query(`
         SELECT c.id FROM candidaturas c
         JOIN vagas v ON v.id = c.vaga_id
-        WHERE c.id = $1 AND (v.criada_por = $2 OR v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3))
+        WHERE c.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3 AND revogado_em IS NULL))
       `, [id, req.user.id, empresa_id]);
       if (check.rows.length === 0) return res.status(403).json({ erro: 'Candidatura não pertence a esta empresa' });
       const { rows } = await pool.query(`
