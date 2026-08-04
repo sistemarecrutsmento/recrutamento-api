@@ -79,28 +79,6 @@ async function init() {
         criado_em TIMESTAMP DEFAULT NOW()
       );
 
-      -- N:N — quais vagas cada empresa tem acesso
-      CREATE TABLE IF NOT EXISTS empresa_vaga_acesso (
-        id SERIAL PRIMARY KEY,
-        empresa_id INTEGER REFERENCES empresas(id) ON DELETE CASCADE,
-        vaga_id INTEGER REFERENCES vagas(id) ON DELETE CASCADE,
-        concedido_por INTEGER REFERENCES admins(id),
-        concedido_em TIMESTAMP DEFAULT NOW(),
-        UNIQUE(empresa_id, vaga_id)
-      );
-
-      -- Log de notificações enviadas para a empresa
-      CREATE TABLE IF NOT EXISTS empresa_notificacoes (
-        id SERIAL PRIMARY KEY,
-        empresa_id INTEGER REFERENCES empresas(id) ON DELETE CASCADE,
-        candidatura_id INTEGER REFERENCES candidaturas(id) ON DELETE CASCADE,
-        tipo TEXT NOT NULL,
-        assunto TEXT,
-        corpo TEXT,
-        enviado_em TIMESTAMP DEFAULT NOW(),
-        status TEXT DEFAULT 'enviado'
-      );
-
       CREATE TABLE IF NOT EXISTS candidatos (
         id SERIAL PRIMARY KEY,
         cpf TEXT UNIQUE,
@@ -191,6 +169,28 @@ async function init() {
         observacoes_etapas JSONB DEFAULT '{}',
         criada_em TIMESTAMP DEFAULT NOW(),
         UNIQUE(vaga_id, candidato_id)
+      );
+
+      -- N:N — quais vagas cada empresa tem acesso
+      CREATE TABLE IF NOT EXISTS empresa_vaga_acesso (
+        id SERIAL PRIMARY KEY,
+        empresa_id INTEGER REFERENCES empresas(id) ON DELETE CASCADE,
+        vaga_id INTEGER REFERENCES vagas(id) ON DELETE CASCADE,
+        concedido_por INTEGER REFERENCES admins(id),
+        concedido_em TIMESTAMP DEFAULT NOW(),
+        UNIQUE(empresa_id, vaga_id)
+      );
+
+      -- Log de notificações enviadas para a empresa
+      CREATE TABLE IF NOT EXISTS empresa_notificacoes (
+        id SERIAL PRIMARY KEY,
+        empresa_id INTEGER REFERENCES empresas(id) ON DELETE CASCADE,
+        candidatura_id INTEGER REFERENCES candidaturas(id) ON DELETE CASCADE,
+        tipo TEXT NOT NULL,
+        assunto TEXT,
+        corpo TEXT,
+        enviado_em TIMESTAMP DEFAULT NOW(),
+        status TEXT DEFAULT 'enviado'
       );
 
       -- Adiciona colunas de proposta (se ainda não existirem)
