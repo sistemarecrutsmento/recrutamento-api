@@ -5408,7 +5408,6 @@ app.get('/api/empresa/dashboard', requireEmpresaViewer, async (req, res) => {
                        NULLIF(h->>'quando','')::timestamptz,
                        NULLIF(h->>'criado_em','')::timestamptz) >= NOW() - INTERVAL '48 hours'
         ORDER BY quando DESC NULLS LAST
-        LIMIT 50
       `, [empresa_id]);
       const atividadesHistorico = hist.rows.map(r => ({
         texto: r.evento_tipo || r.evento_status || 'atualizacao',
