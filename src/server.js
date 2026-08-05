@@ -1976,7 +1976,7 @@ app.post('/api/admin/2fa/reenviar', rateLimitByIp('twofa'), async (req, res) => 
 app.get('/api/admin/vagas-fechadas-sem-contratacao', authAdmin, async (req, res) => {
   try {
     const { rows } = await pool.query(`
-      SELECT v.id, v.titulo, v.empresa, v.cidade, v.estado, v.status, v.criada_em,
+      SELECT v.id, v.titulo, v.empresa, v.cidade, v.estado, v.status, v.criada_em, v.etapas,
         (SELECT COUNT(*)::int FROM candidaturas c WHERE c.vaga_id = v.id) as total_candidatos,
         (SELECT MAX(c.atualizada_em) FROM candidaturas c WHERE c.vaga_id = v.id) as ultima_mov
       FROM vagas v
@@ -5384,36 +5384,74 @@ app.get('/api/empresa/dashboard', requireEmpresaViewer, async (req, res) => {
       LIMIT 10
     `, [empresa_id]);
 
-    // 6. Atividades recentes (histórico das candidaturas da empresa)
+    // 6. Atividades recentes: somente eventos reais do histórico, tenant-scoped,
+    // nas últimas 24h e ordenados pelo timestamp do evento (não pela candidatura).
     let atividadesRecentes = [];
+    let atividadesHistoricoDashboard = [];
     try {
       const hist = await pool.query(`
-        SELECT c.id as candidatura_id, c.atualizada_em as quando,
-          c.historico, v.titulo as vaga, v.id as vaga_id, cd.nome as candidato
+        SELECT c.id as candidatura_id, c.vaga_id, v.titulo as vaga,
+          cd.nome as candidato, h->>'tipo' as evento_tipo,
+          h->>'por' as por,
+          COALESCE(NULLIF(h->>'data','')::timestamptz,
+                   NULLIF(h->>'quando','')::timestamptz,
+                   NULLIF(h->>'criado_em','')::timestamptz) as quando,
+          h->>'mensagem' as mensagem, h->>'etapa' as etapa,
+          h->>'status' as evento_status
         FROM candidaturas c
         JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.revogado_em IS NULL
         JOIN vagas v ON v.id = c.vaga_id
         JOIN candidatos cd ON cd.id = c.candidato_id
+        CROSS JOIN LATERAL jsonb_array_elements(COALESCE(c.historico, '[]'::jsonb)) h
         WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL
-        ORDER BY c.atualizada_em DESC NULLS LAST
-        LIMIT 8
+          AND COALESCE(NULLIF(h->>'data','')::timestamptz,
+                       NULLIF(h->>'quando','')::timestamptz,
+                       NULLIF(h->>'criado_em','')::timestamptz) >= NOW() - INTERVAL '48 hours'
+        ORDER BY quando DESC NULLS LAST
+        LIMIT 50
       `, [empresa_id]);
-      hist.rows.forEach(r => {
-        if (Array.isArray(r.historico) && r.historico.length > 0) {
-          const ultimo = r.historico[r.historico.length - 1];
-          let texto = 'Atualização';
-          if (ultimo.tipo === 'avancar') texto = 'Avançou de etapa';
-          else if (ultimo.tipo === 'reprovar') texto = 'Reprovado';
-          else if (ultimo.tipo === 'comentario') texto = 'Parecer adicionado';
-          else if (ultimo.tipo === 'inscricao') texto = 'Inscrição realizada';
-          atividadesRecentes.push({
-            texto, candidato: r.candidato, vaga: r.vaga,
-            vaga_id: r.vaga_id, candidatura_id: r.candidatura_id,
-            quando: r.quando, por: ultimo.por || ''
-          });
-        }
-      });
-    } catch (_) {}
+      const atividadesHistorico = hist.rows.map(r => ({
+        texto: r.evento_tipo || r.evento_status || 'atualizacao',
+        evento_tipo: r.evento_tipo || '', status: r.evento_status || '',
+        mensagem: r.mensagem || '', etapa: r.etapa || '',
+        candidato: r.candidato, vaga: r.vaga, vaga_id: r.vaga_id,
+        candidatura_id: r.candidatura_id, quando: r.quando, por: r.por || ''
+      }));
+      atividadesRecentes = atividadesHistorico.filter(a => a.quando && new Date(a.quando).getTime() >= Date.now() - 24 * 60 * 60 * 1000).slice(0, 8);
+      // Guardado separadamente para a visão histórica do dashboard (máx. 48h).
+      atividadesHistoricoDashboard = atividadesHistorico;
+    } catch (e) {
+      console.error('[empresa dashboard activities]', e.message);
+    }
+
+    // 6b. Processos ativos por vaga (uma agregação, sem N+1), com IDs reais.
+    const processosPorVagaQ = await pool.query(`
+      SELECT v.id as vaga_id, v.titulo, v.status as vaga_status, v.criada_em,
+        COUNT(c.id)::int as processos_ativos,
+        COUNT(c.id) FILTER (WHERE c.status = 'em_andamento')::int as em_andamento,
+        COUNT(c.id) FILTER (WHERE c.status = 'contratado')::int as contratados
+      FROM vagas v
+      JOIN empresa_vaga_acesso eva ON eva.vaga_id = v.id AND eva.revogado_em IS NULL
+      LEFT JOIN candidaturas c ON c.vaga_id = v.id
+        AND c.status NOT IN ('reprovado','rejeitado','contratado')
+      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL
+      GROUP BY v.id, v.titulo, v.status, v.criada_em
+      HAVING COUNT(c.id) > 0
+      ORDER BY processos_ativos DESC, v.criada_em DESC
+    `, [empresa_id]);
+
+    // Vagas abertas há mais de 30 dias: regra explícita = status publicada + criada_em.
+    const abertasMais30Q = await pool.query(`
+      SELECT v.id, v.titulo, v.status, v.criada_em,
+        COUNT(c.id)::int as total_candidatos
+      FROM vagas v
+      JOIN empresa_vaga_acesso eva ON eva.vaga_id = v.id AND eva.revogado_em IS NULL
+      LEFT JOIN candidaturas c ON c.vaga_id = v.id
+      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL
+        AND v.status = 'publicada' AND v.criada_em < NOW() - INTERVAL '30 days'
+      GROUP BY v.id, v.titulo, v.status, v.criada_em
+      ORDER BY v.criada_em ASC
+    `, [empresa_id]);
 
     // 7. Vagas mais procuradas (ranking por total de candidatos)
     const vagasMaisCandidatos = await pool.query(`
@@ -5469,6 +5507,10 @@ app.get('/api/empresa/dashboard', requireEmpresaViewer, async (req, res) => {
       },
       etapas: etapasMap,
       etapas_labels: ['Inscrição', 'Triagem', 'RH', 'Gestor', 'Proposta', 'Coleta Docs', 'Contratação'],
+      processos_por_vaga: processosPorVagaQ.rows,
+      vagas_abertas_mais_30: abertasMais30Q.rows,
+      atividades_janela_horas: 24,
+      atividades_historico_48h: atividadesHistoricoDashboard,
       proximas: proximas.rows,
       proximas_entrevistas: proximas.rows,
       atividades: atividadesRecentes,
