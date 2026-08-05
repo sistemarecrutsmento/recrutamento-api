@@ -5391,20 +5391,23 @@ app.get('/api/empresa/dashboard', requireEmpresaViewer, async (req, res) => {
     try {
       const hist = await pool.query(`
         SELECT c.id as candidatura_id, c.vaga_id, v.titulo as vaga,
-          cd.nome as candidato, h->>'tipo' as evento_tipo,
+          cd.nome as candidato,
+          COALESCE(NULLIF(h->>'tipo',''), NULLIF(h->>'acao',''), NULLIF(h->>'evento','')) as evento_tipo,
           h->>'por' as por,
-          COALESCE(NULLIF(h->>'data','')::timestamptz,
+          COALESCE(NULLIF(h->>'em','')::timestamptz,
+                   NULLIF(h->>'data','')::timestamptz,
                    NULLIF(h->>'quando','')::timestamptz,
                    NULLIF(h->>'criado_em','')::timestamptz) as quando,
-          h->>'mensagem' as mensagem, h->>'etapa' as etapa,
-          h->>'status' as evento_status
+          COALESCE(h->>'mensagem', h->>'texto', h->>'detalhes') as mensagem,
+          h->>'etapa' as etapa, h->>'status' as evento_status
         FROM candidaturas c
         JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.revogado_em IS NULL
         JOIN vagas v ON v.id = c.vaga_id
         JOIN candidatos cd ON cd.id = c.candidato_id
         CROSS JOIN LATERAL jsonb_array_elements(COALESCE(c.historico, '[]'::jsonb)) h
         WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL
-          AND COALESCE(NULLIF(h->>'data','')::timestamptz,
+          AND COALESCE(NULLIF(h->>'em','')::timestamptz,
+                       NULLIF(h->>'data','')::timestamptz,
                        NULLIF(h->>'quando','')::timestamptz,
                        NULLIF(h->>'criado_em','')::timestamptz) >= NOW() - INTERVAL '48 hours'
         ORDER BY quando DESC NULLS LAST
