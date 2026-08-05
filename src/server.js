@@ -5938,7 +5938,7 @@ app.post('/api/empresa/candidatura/:id/proposta', requireRecrutadorOuAdmin, asyn
     }
     // Ownership via empresa_vaga_acesso (anti-IDOR)
     const { rows: c } = await pool.query(`
-      SELECT c.*, v.titulo, cd.nome, cd.email, cd.id AS candidato_id_full
+      SELECT c.*, v.titulo, v.etapas, cd.nome, cd.email, cd.id AS candidato_id_full
       FROM candidaturas c
       JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.revogado_em IS NULL AND eva.empresa_id = $1
       JOIN vagas v ON v.id = c.vaga_id
@@ -5947,6 +5947,10 @@ app.post('/api/empresa/candidatura/:id/proposta', requireRecrutadorOuAdmin, asyn
     `, [empresa_id, candId]);
     if (c.length === 0) return res.status(403).json({ erro: 'Sem acesso a esta candidatura' });
     const cand = c[0];
+    const idxProposta = indicesFluxoProposta(cand.etapas);
+    if (Number(cand.etapa_atual) !== idxProposta.proposta) {
+      return res.status(409).json({ erro: `A proposta só pode ser enviada na etapa "Proposta" (etapa atual: ${Number(cand.etapa_atual) + 1})` });
+    }
     if (cand.proposta_enviada_em) return res.status(409).json({ erro: 'Proposta já enviada para este candidato' });
     if (['contratado','rejeitado','reprovado'].includes(cand.status)) {
       return res.status(409).json({ erro: `Candidatura já está "${cand.status}"` });
