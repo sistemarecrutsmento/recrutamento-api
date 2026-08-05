@@ -36,7 +36,7 @@ function registrar(app, ctx) {
         }
       }
       const { rows } = await pool.query(`
-        SELECT c.*, v.titulo, v.empresa, cd.nome as candidato_nome, cd.email as candidato_email
+        SELECT c.*, v.titulo, v.empresa, v.etapas, cd.nome as candidato_nome, cd.email as candidato_email
         FROM candidaturas c
         JOIN vagas v ON v.id = c.vaga_id
         JOIN candidatos cd ON cd.id = c.candidato_id
