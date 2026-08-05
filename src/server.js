@@ -1976,7 +1976,7 @@ app.post('/api/admin/2fa/reenviar', rateLimitByIp('twofa'), async (req, res) => 
 app.get('/api/admin/vagas-fechadas-sem-contratacao', authAdmin, async (req, res) => {
   try {
     const { rows } = await pool.query(`
-      SELECT v.id, v.titulo, v.empresa, v.cidade, v.estado, v.status, v.criada_em, v.etapas,
+      SELECT v.id, v.titulo, v.empresa, v.cidade, v.estado, v.status, v.criada_em,
         (SELECT COUNT(*)::int FROM candidaturas c WHERE c.vaga_id = v.id) as total_candidatos,
         (SELECT MAX(c.atualizada_em) FROM candidaturas c WHERE c.vaga_id = v.id) as ultima_mov
       FROM vagas v
@@ -5254,7 +5254,7 @@ app.get('/api/empresa/dashboard', requireEmpresaViewer, async (req, res) => {
 
     // 1. Vagas liberadas para essa empresa
     const vagas = await pool.query(`
-      SELECT v.id, v.titulo, v.empresa, v.cidade, v.estado, v.status, v.criada_em,
+      SELECT v.id, v.titulo, v.empresa, v.cidade, v.estado, v.status, v.criada_em, v.etapas,
         (SELECT COUNT(*) FROM candidaturas c WHERE c.vaga_id = v.id) as total_candidatos,
         (SELECT COUNT(*) FROM candidaturas c WHERE c.vaga_id = v.id AND c.status = 'em_andamento') as em_andamento,
         (SELECT COUNT(*) FROM candidaturas c WHERE c.vaga_id = v.id AND c.status = 'contratado') as contratados
