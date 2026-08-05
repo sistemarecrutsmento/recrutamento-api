@@ -4105,7 +4105,19 @@ app.get('/api/admin/conversas', authAdmin, async (req, res) => {
   }
 });
 
-// ===== Admin: enviar proposta ao candidato (etapa 5 - Proposta) =====
+// Resolve os índices pelo nome da etapa. Vagas novas têm 7 etapas (Proposta=4),
+// enquanto vagas legadas podem ter uma etapa intermediária (Proposta=5).
+function indicesFluxoProposta(etapas) {
+  let arr = etapas;
+  if (typeof arr === 'string') { try { arr = JSON.parse(arr); } catch (_) { arr = []; } }
+  if (!Array.isArray(arr)) arr = [];
+  const nome = e => String(typeof e === 'string' ? e : (e && e.nome) || '').toLowerCase();
+  const proposta = arr.findIndex(e => /proposta/.test(nome(e)));
+  const coleta = arr.findIndex(e => /coleta.*document|document.*coleta/.test(nome(e)));
+  return { proposta: proposta >= 0 ? proposta : 4, coleta: coleta >= 0 ? coleta : (proposta >= 0 ? proposta + 1 : 5) };
+}
+
+// ===== Admin: enviar proposta ao candidato =====
 // Recebe texto da proposta + opcional PDF (data URL base64) ou já com URL pública
 app.post('/api/admin/candidatura/:id/enviar-proposta', authAdmin, async (req, res) => {
   const { texto, pdf_url, pdf_public_id } = req.body;
@@ -4210,6 +4222,7 @@ app.post('/api/candidato/aceitar-proposta/:candidaturaId', authCandidato, async 
     WHERE c.id = $1`, [req.params.candidaturaId]);
   if (c.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
   const cand = c[0];
+  const idxProposta = indicesFluxoProposta(cand.etapas);
 
   // Garante que o candidato é o dono da candidatura
   if (cand.cand_email !== req.user.email) return res.status(403).json({ erro: 'Acesso negado' });
@@ -4224,7 +4237,7 @@ app.post('/api/candidato/aceitar-proposta/:candidaturaId', authCandidato, async 
 
   const historico = Array.isArray(cand.historico) ? [...cand.historico] : [];
   historico.push({
-    etapa: 6, // próxima etapa = Coleta de documentos (etapa 6)
+    etapa: idxProposta.coleta,
     status: 'em_andamento',
     acao: 'aceitar_proposta',
     mensagem: 'Candidato aceitou a proposta',
@@ -4235,24 +4248,24 @@ app.post('/api/candidato/aceitar-proposta/:candidaturaId', authCandidato, async 
   await pool.query(
     `UPDATE candidaturas
      SET proposta_aceita_em = NOW(),
-         etapa_atual = 6,
+         etapa_atual = $2,
          status = 'em_andamento',
          historico = $1
-     WHERE id = $2`,
-    [JSON.stringify(historico), req.params.candidaturaId]
+     WHERE id = $3`,
+    [JSON.stringify(historico), idxProposta.coleta, req.params.candidaturaId]
   );
 
   // FASE 7 — notificação no feed global
   inserirNotificacao(pool, 'empresa', cand.empresa_id, 'proposta_aceita',
     `✅ ${cand.nome || 'Candidato'} ACEITOU a proposta`,
     `Próxima etapa: Coleta de Documentos`,
-    { referencia_tipo: 'candidatura', referencia_id: req.params.candidaturaId, metadata: { etapa_anterior: 5, etapa_nova: 6 } }
+    { referencia_tipo: 'candidatura', referencia_id: req.params.candidaturaId, metadata: { etapa_anterior: idxProposta.proposta, etapa_nova: idxProposta.coleta } }
   );
 
   // Notifica o candidato por e-mail (em background)
   try {
     enviarEmailBg(enviarEmailAtualizacao, cand.cand_email, 'Candidato', cand.titulo, {
-      etapaNum: 6,
+      etapaNum: idxProposta.coleta + 1,
       etapaNome: 'Coleta de Documentos',
       acao: 'avancar',
       status: 'em_andamento',
@@ -4261,7 +4274,7 @@ app.post('/api/candidato/aceitar-proposta/:candidaturaId', authCandidato, async 
     // Notifica o admin também
     if (ADMIN_NOTIF_EMAIL) {
       enviarEmailBg(enviarEmailAtualizacao, ADMIN_NOTIF_EMAIL, 'Admin', cand.titulo, {
-        etapaNum: 6,
+        etapaNum: idxProposta.coleta + 1,
         etapaNome: 'Coleta de Documentos',
         acao: 'admin_candidato_aceitou',
         status: 'em_andamento',
@@ -4336,22 +4349,23 @@ app.post('/api/candidato/recusar-proposta/:candidaturaId', authCandidato, async 
   await audit(req, 'candidatura.proposta.recusar', { resource_type: 'candidatura', resource_id: req.params.candidaturaId });
   const { motivo } = req.body;
   const { rows: c } = await pool.query(`
-    SELECT c.*, v.titulo, cd.email as cand_email
+    SELECT c.*, v.titulo, v.etapas, cd.email as cand_email
     FROM candidaturas c
     JOIN vagas v ON v.id = c.vaga_id
     JOIN candidatos cd ON cd.id = c.candidato_id
     WHERE c.id = $1`, [req.params.candidaturaId]);
   if (c.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
   const cand = c[0];
+  const idxProposta = indicesFluxoProposta(cand.etapas);
 
   if (cand.cand_email !== req.user.email) return res.status(403).json({ erro: 'Acesso negado' });
-  if ((cand.etapa_atual || 0) !== 5) {
+  if ((cand.etapa_atual || 0) !== idxProposta.proposta) {
     return res.status(400).json({ erro: 'Você só pode recusar a proposta quando estiver na etapa "Proposta"' });
   }
 
   const historico = Array.isArray(cand.historico) ? [...cand.historico] : [];
   historico.push({
-    etapa: 5,
+    etapa: idxProposta.proposta,
     status: 'rejeitado',
     acao: 'recusar_proposta',
     mensagem: 'Candidato recusou a proposta' + (motivo ? `: ${motivo}` : ''),
@@ -4379,7 +4393,7 @@ app.post('/api/candidato/recusar-proposta/:candidaturaId', authCandidato, async 
   // Notifica o candidato por e-mail (em background)
   try {
     enviarEmailBg(enviarEmailAtualizacao, cand.cand_email, 'Candidato', cand.titulo, {
-      etapaNum: 5,
+      etapaNum: idxProposta.proposta + 1,
       etapaNome: 'Proposta',
       acao: 'recusar_proposta',
       status: 'rejeitado',
@@ -4388,7 +4402,7 @@ app.post('/api/candidato/recusar-proposta/:candidaturaId', authCandidato, async 
     // Notifica o admin
     if (ADMIN_NOTIF_EMAIL) {
       enviarEmailBg(enviarEmailAtualizacao, ADMIN_NOTIF_EMAIL, 'Admin', cand.titulo, {
-        etapaNum: 5,
+        etapaNum: idxProposta.proposta + 1,
         etapaNome: 'Proposta',
         acao: 'admin_candidato_recusou',
         status: 'rejeitado',
