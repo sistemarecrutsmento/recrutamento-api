@@ -6019,7 +6019,10 @@ app.patch('/api/empresa/candidaturas/:id/etapa', requireRecrutadorOuAdmin, async
 
     // Igual ao antigo admin: candidaturas encerradas podem ser reabertas;
     // as demais ações continuam bloqueadas enquanto fechadas.
-    if ((cand.status === 'contratado' || cand.status === 'rejeitado' || cand.status === 'reprovado') && acao !== 'reabrir') {
+    // Uma candidatura encerrada só pode ser reaberta explicitamente com
+    // status=em_andamento. A rota não recebe `acao`; usar essa variável aqui
+    // causava ReferenceError justamente no fluxo de reabertura.
+    if ((cand.status === 'contratado' || cand.status === 'rejeitado' || cand.status === 'reprovado') && status !== 'em_andamento') {
       return res.status(409).json({ erro: `Candidatura já está "${cand.status}" e não pode ser alterada.` });
     }
 
