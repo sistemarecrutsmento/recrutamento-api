@@ -7846,7 +7846,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
 
   app.get('/api/empresa/candidatos', requireEmpresaViewer, async (req, res) => {
     try {
-      const { q, cidade, estado, area, vaga_id, status, pagina = 1, limite = 20 } = req.query;
+      const { q, cidade, estado, area, vaga_id, status, etapa, pagina = 1, limite = 20 } = req.query;
       const emp = req.user.empresa_id;
       const pg  = Math.max(1, parseInt(pagina) || 1);
       const lim = Math.min(100, Math.max(1, parseInt(limite) || 20));
@@ -7880,6 +7880,13 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
       if (status) {
         params.push(status);
         where.push(`can.status = $${params.length}`);
+      }
+      if (etapa) {
+        const etapaNum = Number(etapa);
+        if (Number.isInteger(etapaNum) && etapaNum > 0) {
+          params.push(etapaNum);
+          where.push(`can.etapa_atual = $${params.length}`);
+        }
       }
 
       const whereSql = where.join(' AND ');
