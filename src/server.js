@@ -989,6 +989,22 @@ app.post('/api/candidato/verificar', rateLimitLogin, async (req, res) => {
 // ============= CANDIDATO - LEITURA DE CURRÍCULO =============
 // Leitura inicial sem criar conta: o PDF é processado em memória e nunca é salvo nesta etapa.
 // Os dados ausentes permanecem vazios para preenchimento manual no wizard.
+async function analisarCurriculoComIA(texto) {
+  const apiKey = process.env.GROQ_API_KEY;
+  if (!apiKey) return null;
+  const trecho = String(texto || '').slice(0, 30000);
+  const prompt = `Você é um extrator de currículos. Leia o texto abaixo e retorne SOMENTE um JSON válido, sem markdown. Identifique informações pelo significado, independentemente da ordem, títulos, idioma, tabelas ou formato. Nunca invente: use string vazia, null ou [] quando não encontrar. Separe corretamente cada experiência profissional. Datas devem estar em YYYY-MM-DD quando houver mês/ano; se só houver ano, use YYYY-01-01. Campos: nome, email, cpf, celular, data_nascimento, sobre_voce, endereco {cep, estado, cidade, bairro, logradouro, numero, complemento}, formacao {nivel, curso, instituicao, situacao, data_conclusao}, experiencias [{empresa, cargo, inicio, fim, emprego_atual, descricao}]. Texto do currículo:\n\n${trecho}`;
+  const resposta = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+    body: JSON.stringify({ model: process.env.GROQ_MODEL || 'llama-3.1-8b-instant', temperature: 0, max_tokens: 3500, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: 'Retorne apenas JSON válido. Não crie informações ausentes.' }, { role: 'user', content: prompt }] })
+  });
+  if (!resposta.ok) throw new Error(`Groq HTTP ${resposta.status}`);
+  const json = await resposta.json();
+  const conteudo = json?.choices?.[0]?.message?.content;
+  if (!conteudo) return null;
+  return typeof conteudo === 'string' ? JSON.parse(conteudo.replace(/^```json\s*|\s*```$/g, '').trim()) : conteudo;
+}
+
 app.post('/api/candidato/analisar-curriculo', rateLimitByIp('upload'), async (req, res) => {
   try {
     const raw = String(req.body?.arquivo_base64 || '').replace(/^data:application\/pdf;base64,/, '');
@@ -1046,6 +1062,25 @@ app.post('/api/candidato/analisar-curriculo', rateLimitByIp('upload'), async (re
     const bairro = enderecoPartes[1] || '';
     const numero = linhaEndereco.match(/(?:n[ºo°]?|número)\s*(\d+)/i)?.[1] || linhaEndereco.match(/\b(\d{1,6})\b/)?.[1] || '';
     const dados = { nome, email, cpf, celular, data_nascimento, formacao, instituicao, curso, situacao, data_conclusao: dataCurso ? `${dataCurso}-01-01` : '', sexo: '', acessibilidade: '', cep: cepEncontrado, estado: cidadeUf?.[2] || '', cidade: cidadeUf?.[1]?.trim() || '', bairro, logradouro, numero, complemento: '', sobre_voce: resumo || '', experiencias };
+    try {
+      const ia = await analisarCurriculoComIA(texto);
+      if (ia) {
+        const enderecoIA = ia.endereco || {};
+        const formacaoIA = ia.formacao || {};
+        Object.assign(dados, {
+          nome: ia.nome || dados.nome, email: ia.email || dados.email, cpf: ia.cpf || dados.cpf,
+          celular: ia.celular || dados.celular, data_nascimento: ia.data_nascimento || dados.data_nascimento,
+          sobre_voce: ia.sobre_voce || dados.sobre_voce, cep: enderecoIA.cep || dados.cep,
+          estado: enderecoIA.estado || dados.estado, cidade: enderecoIA.cidade || dados.cidade,
+          bairro: enderecoIA.bairro || dados.bairro, logradouro: enderecoIA.logradouro || dados.logradouro,
+          numero: enderecoIA.numero || dados.numero, complemento: enderecoIA.complemento || dados.complemento,
+          formacao: formacaoIA.nivel || dados.formacao, curso: formacaoIA.curso || dados.curso,
+          instituicao: formacaoIA.instituicao || dados.instituicao, situacao: formacaoIA.situacao || dados.situacao,
+          data_conclusao: formacaoIA.data_conclusao || dados.data_conclusao,
+          experiencias: Array.isArray(ia.experiencias) ? ia.experiencias : dados.experiencias
+        });
+      }
+    } catch (iaError) { console.warn('[CURRICULO IA FALLBACK]', iaError.message); }
     return res.json({ ok: true, dados, arquivo_nome: req.body?.arquivo_nome || 'curriculo.pdf' });
   } catch (e) {
     console.error('[CURRICULO PDF]', e.message);
