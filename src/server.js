@@ -7,7 +7,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const axios = require('axios');
 const cloudinary = require('cloudinary').v2;
-const pdfParse = require('pdf-parse');
+const { analisarCurriculo } = require('./curriculoParser');
 require('dotenv').config();
 
 // =========================================================================
@@ -989,131 +989,18 @@ app.post('/api/candidato/verificar', rateLimitLogin, async (req, res) => {
 // ============= CANDIDATO - LEITURA DE CURRÍCULO =============
 // Leitura inicial sem criar conta: o PDF é processado em memória e nunca é salvo nesta etapa.
 // Os dados ausentes permanecem vazios para preenchimento manual no wizard.
-async function analisarCurriculoComIA(texto) {
-  const apiKey = process.env.GROQ_API_KEY;
-  if (!apiKey) return null;
-  const trecho = String(texto || '').slice(0, 30000);
-  const prompt = `Você é um extrator de currículos. Leia o texto abaixo e retorne SOMENTE um JSON válido, sem markdown. Identifique informações pelo significado, independentemente da ordem, títulos, idioma, tabelas ou formato. Nunca invente: use string vazia, null ou [] quando não encontrar. Separe corretamente cada experiência profissional. Datas devem estar em YYYY-MM-DD quando houver mês/ano; se só houver ano, use YYYY-01-01. REGRA DE SEPARAÇÃO: sobre_voce deve conter somente o perfil/resumo/objetivo profissional; NÃO coloque nele experiências, conquistas, projetos, formação ou competências. Cada experiência deve ter apenas sua própria empresa, cargo, período e descrição. NÃO coloque formação, competências ou a próxima experiência dentro da descrição anterior. Campos: nome, email, cpf, celular, data_nascimento, sobre_voce, endereco {cep, estado, cidade, bairro, logradouro, numero, complemento}, formacao {nivel, curso, instituicao, situacao, data_conclusao}, experiencias [{empresa, cargo, inicio, fim, emprego_atual, descricao}]. Texto do currículo:\n\n${trecho}`;
-  const resposta = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-    body: JSON.stringify({ model: process.env.GROQ_MODEL || 'llama-3.1-8b-instant', temperature: 0, max_tokens: 3500, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: 'Retorne apenas JSON válido. Não crie informações ausentes.' }, { role: 'user', content: prompt }] })
-  });
-  if (!resposta.ok) throw new Error(`Groq HTTP ${resposta.status}`);
-  const json = await resposta.json();
-  const conteudo = json?.choices?.[0]?.message?.content;
-  if (!conteudo) return null;
-  return typeof conteudo === 'string' ? JSON.parse(conteudo.replace(/^```json\s*|\s*```$/g, '').trim()) : conteudo;
-}
-
 app.post('/api/candidato/analisar-curriculo', rateLimitByIp('upload'), async (req, res) => {
   try {
     const raw = String(req.body?.arquivo_base64 || '').replace(/^data:application\/pdf;base64,/, '');
     if (!raw || raw.length > 10 * 1024 * 1024) return res.status(400).json({ erro: 'Arquivo inválido ou maior que o limite permitido.' });
     const buffer = Buffer.from(raw, 'base64');
     if (buffer.length > 7 * 1024 * 1024 || buffer.slice(0, 4).toString() !== '%PDF') return res.status(400).json({ erro: 'Envie um arquivo PDF válido de até 7 MB.' });
-    const parsed = await pdfParse(buffer);
-    const texto = String(parsed.text || '').replace(/[\t\r]+/g, ' ').replace(/ {2,}/g, ' ').trim();
-    const email = texto.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i)?.[0]?.toLowerCase() || '';
-    const cpf = texto.match(/\b\d{3}[. -]?\d{3}[. -]?\d{3}[- ]?\d{2}\b/)?.[0]?.replace(/\D/g, '') || '';
-    const celular = texto.match(/(?:\+?55\s?)?(?:\(?\d{2}\)?\s?)?9?\d{4}[- ]?\d{4}\b/)?.[0] || '';
-    const dataBr = texto.match(/\b\d{1,2}[\/.-]\d{1,2}[\/.-]\d{4}\b/)?.[0] || '';
-    const data_nascimento = dataBr ? (() => { const p = dataBr.split(/[\/.-]/); return `${p[2]}-${String(p[1]).padStart(2, '0')}-${String(p[0]).padStart(2, '0')}`; })() : '';
-    const linhas = texto.split(/\n/).map(x => x.replace(/\s+/g, ' ').trim()).filter(x => x.length >= 2);
-    const normalizar = x => x.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
-    const cabecalhos = /^(resumo|perfil profissional|perfil|objetivo profissional|objetivo|sobre mim|sobre voce|experiencia profissional|experiencias profissionais|experiencia|experiências|formacao|formação|educacao|educação|escolaridade|qualificacoes|qualificações|habilidades|competencias|competências|dados pessoais|contato|endereco|endereço|cursos|idiomas|referencias|referências)$/i;
-    const indiceSecao = termos => { const lista = Array.isArray(termos) ? termos : [termos]; return linhas.findIndex(l => lista.some(t => normalizar(l).replace(/[:：]$/, '').trim() === normalizar(t))); };
-    const blocoSecao = termos => { const i = indiceSecao(termos); if (i < 0) return ''; const fim = linhas.findIndex((l, n) => n > i && cabecalhos.test(l.replace(/[:：]$/, '').trim())); return linhas.slice(i + 1, fim < 0 ? Math.min(linhas.length, i + 14) : fim).join(' ').trim(); };
-    const linhasDaSecao = termos => { const i = indiceSecao(termos); if (i < 0) return []; const fim = linhas.findIndex((l, n) => n > i && cabecalhos.test(l.replace(/[:：]$/, '').trim())); return linhas.slice(i + 1, fim < 0 ? linhas.length : fim); };
-    const nome = (linhas.find(x => !/@/.test(x) && !/curr[íi]culo|objetivo|exper[ieê]ncia|forma[çc][ãa]o|contato/i.test(x) && /^[A-Za-zÀ-ÿ' -]+$/.test(x) && x.split(' ').length >= 2) || '').trim();
-    const resumo = blocoSecao(['resumo', 'perfil profissional', 'perfil', 'objetivo profissional', 'sobre mim', 'sobre você', 'sobre voce']);
-    const experienciaBloco = blocoSecao(['experiência profissional', 'experiencias profissionais', 'experiência', 'experiencias']);
-    const formacaoBloco = blocoSecao(['formação', 'formacao', 'educação', 'educacao', 'escolaridade']);
-    const datas = [...texto.matchAll(/\b(\d{1,2})[\/.-](\d{4})\b/g)].map(m => `${m[2]}-${String(m[1]).padStart(2, '0')}-01`);
-    const dataCurso = texto.match(/\b(19|20)\d{2}\b/)?.[0] || '';
-    const formacaoMap = [['doutorado','doutorado'],['mestrado','mestrado'],['pós-graduação','pos'],['bacharelado','superior'],['licenciatura','superior'],['tecnólogo','superior'], ['pos-graduação','pos'],['superior','superior'],['técnico','tecnico'],['ensino médio','medio'],['médio','medio'],['fundamental','fundamental']];
-    const formacao = formacaoMap.find(([key]) => texto.toLowerCase().includes(key))?.[1] || '';
-    const formacaoLinhas = linhasDaSecao(['formação', 'formacao', 'educação', 'educacao', 'escolaridade']);
-    const linhaFormacao = formacaoLinhas.find(x => /\bem\s+andamento\b|\bconcluíd[ao]?\b|\bcursando\b|\bbacharelado\b|\btecnólogo\b|\btécnico\b/i.test(x)) || formacaoBloco;
-    const partesFormacao = linhaFormacao.split(/\s+-\s+|\s+\|\s+/).map(x => x.replace(/[()]/g, '').trim()).filter(Boolean);
-    const curso = (partesFormacao[0] || '').replace(/^(bacharelado|licenciatura|tecnólogo|tecnologia|técnico|ensino superior)\s+em\s+/i, '').replace(/^(bacharelado|licenciatura|tecnólogo|tecnologia|técnico)\s+/i, '').trim();
-    const instituicao = partesFormacao[1] || '';
-    const situacao = /cursando|em andamento/i.test(formacaoBloco) ? 'cursando' : /trancad/i.test(formacaoBloco) ? 'trancado' : /concluíd|concluido|formad/i.test(formacaoBloco) ? 'concluido' : '';
-    const meses = { jan:'01', fev:'02', mar:'03', abr:'04', mai:'05', jun:'06', jul:'07', ago:'08', set:'09', out:'10', nov:'11', dez:'12' };
-    const dataCv = valor => { const m = String(valor || '').toLowerCase().match(/(jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)[a-z]*\.?\s+(\d{4})|(\d{4})/); return m ? `${m[2] || m[3]}-${m[1] ? meses[m[1].slice(0,3)] : '01'}-01` : null; };
-    const linhasExperiencia = linhasDaSecao(['experiência profissional', 'experiencias profissionais', 'experiência', 'experiencias']);
-    const cabecalhosExperiencia = linhasExperiencia.filter(x => /\|/.test(x) || /\b(19|20)\d{2}\b/.test(x) || /\b(jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)\w*\.?\s+\d{4}/i.test(x));
-    const experiencias = cabecalhosExperiencia.map((cab, idx) => {
-      const partes = cab.split('|').map(x => x.trim()).filter(Boolean);
-      const empresa = partes[0] || '';
-      const cargo = partes[1] || '';
-      const inicio = dataCv(partes[2] || cab);
-      const proximo = cabecalhosExperiencia[idx + 1];
-      const inicioTexto = linhasExperiencia.indexOf(cab);
-      const fimTexto = proximo ? linhasExperiencia.indexOf(proximo) : linhasExperiencia.length;
-      const descricao = linhasExperiencia.slice(inicioTexto + 1, fimTexto).filter(x => x !== cab).join(' ').trim();
-      const datasCab = [...cab.matchAll(/\b(?:jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)\w*\.?\s+\d{4}|\b(?:19|20)\d{2}\b/gi)].map(m => dataCv(m[0]));
-      return { empresa, cargo, inicio: datasCab[0] || inicio, fim: datasCab[1] || null, emprego_atual: /atual|presente/i.test(cab), descricao };
-    }).filter(x => x.empresa || x.cargo);
-    const linhaEndereco = linhas.find(x => /\b(rua|r\.|avenida|av\.|travessa|tv\.|rodovia|estrada|alameda|logradouro)\b/i.test(x)) || '';
-    const cepEncontrado = texto.match(/\b\d{5}-?\d{3}\b/)?.[0]?.replace(/(\d{5})(\d{3})/, '$1-$2') || '';
-    const cidadeUf = linhas.find(x => /^[A-Za-zÀ-ÿ .'-]+,\s*[A-Z]{2}\b/.test(x))?.match(/^(.+?),\s*([A-Z]{2})\b/) || texto.match(/\b([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ .'-]{2,})\s*[-/]\s*([A-Z]{2})\b/);
-    const inicioLogradouro = linhaEndereco.search(/\b(rua|r\.|avenida|av\.|travessa|tv\.|rodovia|estrada|alameda|logradouro)\b/i);
-    const enderecoTrecho = inicioLogradouro >= 0 ? linhaEndereco.slice(inicioLogradouro) : linhaEndereco;
-    const enderecoPartes = enderecoTrecho.split(/\s+-\s+|\s+\|\s+/)[0].split(',').map(x => x.trim()).filter(Boolean);
-    const logradouro = enderecoPartes[0] || '';
-    const bairro = enderecoPartes[1] || '';
-    const numero = linhaEndereco.match(/(?:n[ºo°]?|número)\s*(\d+)/i)?.[1] || linhaEndereco.match(/\b(\d{1,6})\b/)?.[1] || '';
-    const dados = { nome, email, cpf, celular, data_nascimento, formacao, instituicao, curso, situacao, data_conclusao: dataCurso ? `${dataCurso}-01-01` : '', sexo: '', acessibilidade: '', cep: cepEncontrado, estado: cidadeUf?.[2] || '', cidade: cidadeUf?.[1]?.trim() || '', bairro, logradouro, numero, complemento: '', sobre_voce: resumo || '', experiencias };
-    try {
-      const ia = await analisarCurriculoComIA(texto);
-      if (ia) {
-        const enderecoIA = ia.endereco || {};
-        const formacaoIA = ia.formacao || {};
-        // Impede que o modelo misture seções: "sobre você" é apenas o perfil/resumo,
-        // enquanto conquistas, formação e competências pertencem aos seus próprios campos.
-        const cortarSecoes = (valor) => {
-          const s = String(valor || '').trim();
-          const marcadores = ['principais conquistas', 'projetos', 'experiência profissional', 'experiência', 'formação acadêmica', 'formação', 'competências técnicas', 'competências', 'educação', 'habilidades'];
-          const lower = s.toLocaleLowerCase('pt-BR');
-          const posicoes = marcadores.map(m => lower.indexOf(m)).filter(i => i > 0);
-          return (posicoes.length ? s.slice(0, Math.min(...posicoes)) : s).trim();
-        };
-        const perfilTexto = (String(texto).match(/(?:PERFIL|RESUMO|OBJETIVO)\s*(?:PROFISSIONAL)?\s+([\s\S]*?)(?=\s+(?:PRINCIPAIS\s+CONQUISTAS|PROJETOS|EXPERI[ÊE]NCIA|FORMA[ÇC][ÃA]O|COMPET[ÊE]NCIAS?|EDUCA[ÇC][ÃA]O|HABILIDADES?)\b|$)/i) || [])[1];
-        const textoPlano = String(texto).replace(/\s+/g, ' ').trim();
-        const formacaoFallback = textoPlano.match(/(?:bacharelado|licenciatura|tecn[óo]logo|tecnologia|gradua[çc][ãa]o|p[óo]s-gradua[çc][ãa]o|mba|curso)\s+(?:em\s+)?(.+?)\s+-\s+(.+?)\s*\(([^)]+)\)/i);
-        const preenchido = v => String(v || '').trim();
-        const experienciasIA = Array.isArray(ia.experiencias) ? ia.experiencias.map(e => ({
-          ...e,
-          descricao: cortarSecoes(e?.descricao)
-        })).filter(e => e.empresa || e.cargo || e.descricao) : null;
-        Object.assign(dados, {
-          nome: ia.nome || dados.nome, email: ia.email || dados.email, cpf: ia.cpf || dados.cpf,
-          celular: ia.celular || dados.celular, data_nascimento: ia.data_nascimento || dados.data_nascimento,
-          sobre_voce: cortarSecoes(perfilTexto || ia.sobre_voce) || dados.sobre_voce, cep: dados.cep || enderecoIA.cep || '',
-          estado: dados.estado || enderecoIA.estado || '', cidade: dados.cidade || enderecoIA.cidade || '',
-          bairro: dados.bairro || enderecoIA.bairro || '', logradouro: dados.logradouro || enderecoIA.logradouro || '',
-          numero: dados.numero || enderecoIA.numero || '', complemento: dados.complemento || enderecoIA.complemento || '',
-          formacao: formacaoIA.nivel || dados.formacao, curso: preenchido(formacaoIA.curso) || formacaoFallback?.[1]?.trim() || dados.curso,
-          instituicao: preenchido(formacaoIA.instituicao) || formacaoFallback?.[2]?.trim() || dados.instituicao, situacao: preenchido(formacaoIA.situacao) || formacaoFallback?.[3] || dados.situacao,
-          data_conclusao: formacaoIA.data_conclusao || dados.data_conclusao,
-          experiencias: experienciasIA && experienciasIA.length ? experienciasIA : dados.experiencias
-        });
-      }
-    } catch (iaError) { console.warn('[CURRICULO IA FALLBACK]', iaError.message); }
-    // Última barreira antes de enviar ao frontend: nenhum campo pode carregar a seção seguinte.
-    const cortarNoMarcador = (valor) => {
-      const s = String(valor || '');
-      const marcadores = ['principais conquistas', 'experiência profissional', 'formação acadêmica', 'competências técnicas'];
-      const lower = s.toLocaleLowerCase('pt-BR');
-      const pontos = marcadores.map(m => lower.indexOf(m)).filter(i => i > 0);
-      return (pontos.length ? s.slice(0, Math.min(...pontos)) : s).trim();
-    };
-    dados.sobre_voce = cortarNoMarcador(dados.sobre_voce);
-    dados.experiencias = (dados.experiencias || []).map(e => ({ ...e, descricao: cortarNoMarcador(e.descricao) }));
-    return res.json({ ok: true, dados, arquivo_nome: req.body?.arquivo_nome || 'curriculo.pdf' });
+    const resultado = await analisarCurriculo(buffer);
+    return res.json({ ok: true, dados: resultado.dados, estrutura: resultado.estrutura, arquivo_nome: req.body?.arquivo_nome || 'curriculo.pdf' });
   } catch (e) {
     console.error('[CURRICULO PDF]', e.message);
-    return res.status(422).json({ erro: 'Não foi possível ler este PDF. Você pode preencher o cadastro manualmente.' });
+    const status = e.code === 'PDF_SEM_TEXTO' ? 422 : 422;
+    return res.status(status).json({ erro: e.message || 'Não foi possível ler este PDF. Você pode preencher o cadastro manualmente.' });
   }
 });
 
