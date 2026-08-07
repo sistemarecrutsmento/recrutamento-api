@@ -71,6 +71,7 @@ function naoAutorizadoOuInexistente(req, res, resource_type, resource_id) {
 const { audit } = require('./audit');
 const { create2faCode, verify2faCode, resend2faCode } = require('./twoFactor');
 const { getBackupMetadata } = require('./backup');
+const socialAuth = require('./socialAuth');
 
 // Cloudinary: aceita CLOUDINARY_URL no formato cloudinary://key:secret@cloud_name
 if (process.env.CLOUDINARY_URL) cloudinary.config({ url: process.env.CLOUDINARY_URL, secure: true });
@@ -114,6 +115,7 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
 // =========================================================================
 // HEADERS DE SEGURANÇA (defesa contra clickjacking, MIME sniffing, XSS)
@@ -1805,6 +1807,25 @@ const { esqueciSenha, redefinirSenha, validarToken } = require('./passwordReset'
 app.post('/api/auth/esqueci-senha', rateLimitByIp('esqueci'), esqueciSenha);
 app.post('/api/auth/redefinir-senha', rateLimitLogin, redefinirSenha);
 app.get('/api/auth/validar-token', rateLimitByIp('esqueci'), validarToken);
+
+// ============= LOGIN SOCIAL DO CANDIDATO (OAuth/OIDC + PKCE) =============
+// O provedor nunca recebe nem emite o JWT interno. O callback gera um código
+// de uso único e o frontend troca esse código pela mesma sessão JWT tradicional.
+app.get('/api/auth/social/:provider/start', async (req, res) => {
+  const provider = String(req.params.provider || '').toLowerCase();
+  if (!['google', 'apple'].includes(provider)) return res.status(404).json({ erro: 'Provedor não suportado' });
+  try { return await socialAuth.start(provider, req, res); }
+  catch (e) { console.error('[SOCIAL START]', e.message); return res.status(503).json({ erro: 'Login social temporariamente indisponível' }); }
+});
+app.get('/api/auth/social/google/callback', async (req, res) => {
+  try { return await socialAuth.callback('google', req, res); }
+  catch (e) { console.error('[SOCIAL GOOGLE CALLBACK]', e.message); return res.redirect(`${(process.env.CANDIDATE_FRONTEND_URL || 'https://vagasio.com.br/candidato/')}?social_error=Falha%20no%20login`); }
+});
+app.post('/api/auth/social/apple/callback', async (req, res) => {
+  try { return await socialAuth.callback('apple', req, res); }
+  catch (e) { console.error('[SOCIAL APPLE CALLBACK]', e.message); return res.redirect(`${(process.env.CANDIDATE_FRONTEND_URL || 'https://vagasio.com.br/candidato/')}?social_error=Falha%20no%20login`); }
+});
+app.post('/api/auth/social/exchange', rateLimitLogin, socialAuth.exchange);
 
 // ============= ADMIN/RECRUTADOR =============
 app.post('/api/admin/login', rateLimitLogin, async (req, res) => {

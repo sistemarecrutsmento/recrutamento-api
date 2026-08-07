@@ -486,7 +486,14 @@ async function init() {
       console.error('[MIGRATION 012] Erro não tratado (mas segui):', migrationErr.message);
     }
 
-    console.log('Tabelas criadas/verificadas + migrations Fase 1-012 aplicadas');
+    try {
+      const { up: migration013 } = require('./migrations/013_candidato_social_auth');
+      await migration013();
+    } catch (migrationErr) {
+      console.error('[MIGRATION 013] Erro não tratado (mas segui):', migrationErr.message);
+    }
+
+    console.log('Tabelas criadas/verificadas + migrations Fase 1-013 aplicadas');
   } finally {
     client.release();
   }
