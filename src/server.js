@@ -1751,7 +1751,7 @@ app.delete('/api/candidato/foto', authCandidato, async (req, res) => {
 
 // ============= VAGAS (PÚBLICO) =============
 app.get('/api/vagas', async (req, res) => {
-  const { cidade, area, tipo, nivel, busca } = req.query;
+  const { cidade, estado, area, tipo, nivel, busca } = req.query;
   // Whitelist explícita (não usa SELECT *) — evita leak de colunas internas
   // Filtra por status='publicada' (a coluna "publicada" não existe — é status)
   // Limite duro pra evitar DoS / queries pesadas
@@ -1760,6 +1760,7 @@ app.get('/api/vagas', async (req, res) => {
              FROM vagas WHERE status = 'publicada'`;
   const params = [];
   if (cidade) { params.push(`%${cidade}%`); sql += ` AND cidade ILIKE $${params.length}`; }
+  if (estado) { params.push(`%${estado}%`); sql += ` AND estado ILIKE $${params.length}`; }
   if (area) { params.push(area); sql += ` AND area = $${params.length}`; }
   if (tipo) { params.push(`%${tipo}%`); sql += ` AND tipo_contrato ILIKE $${params.length}`; }
   if (nivel) { params.push(`%${nivel}%`); sql += ` AND nivel ILIKE $${params.length}`; }

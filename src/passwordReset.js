@@ -132,9 +132,9 @@ async function redefinirSenha(req, res) {
   if (!token || !novaSenha) {
     return res.status(400).json({ erro: 'Token e nova senha são obrigatórios' });
   }
-  if (novaSenha.length < 6) {
+  if (novaSenha.length < 8) {
     await audit(req, 'password.changed', { result: 'failure', metadata: { motivo: 'senha_curta' } });
-    return res.status(400).json({ erro: 'Senha deve ter no mínimo 6 caracteres' });
+    return res.status(400).json({ erro: 'Senha deve ter no mínimo 8 caracteres' });
   }
 
   try {
