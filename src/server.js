@@ -1081,6 +1081,7 @@ app.post('/api/candidato/analisar-curriculo', rateLimitByIp('upload'), async (re
         const perfilTexto = (String(texto).match(/(?:PERFIL|RESUMO|OBJETIVO)\s*(?:PROFISSIONAL)?\s+([\s\S]*?)(?=\s+(?:PRINCIPAIS\s+CONQUISTAS|PROJETOS|EXPERI[ÊE]NCIA|FORMA[ÇC][ÃA]O|COMPET[ÊE]NCIAS?|EDUCA[ÇC][ÃA]O|HABILIDADES?)\b|$)/i) || [])[1];
         const textoPlano = String(texto).replace(/\s+/g, ' ').trim();
         const formacaoFallback = textoPlano.match(/(?:bacharelado|licenciatura|tecn[óo]logo|tecnologia|gradua[çc][ãa]o|p[óo]s-gradua[çc][ãa]o|mba|curso)\s+(?:em\s+)?(.+?)\s+-\s+(.+?)\s*\(([^)]+)\)/i);
+        const preenchido = v => String(v || '').trim();
         const experienciasIA = Array.isArray(ia.experiencias) ? ia.experiencias.map(e => ({
           ...e,
           descricao: cortarSecoes(e?.descricao)
@@ -1092,8 +1093,8 @@ app.post('/api/candidato/analisar-curriculo', rateLimitByIp('upload'), async (re
           estado: dados.estado || enderecoIA.estado || '', cidade: dados.cidade || enderecoIA.cidade || '',
           bairro: dados.bairro || enderecoIA.bairro || '', logradouro: dados.logradouro || enderecoIA.logradouro || '',
           numero: dados.numero || enderecoIA.numero || '', complemento: dados.complemento || enderecoIA.complemento || '',
-          formacao: formacaoIA.nivel || dados.formacao, curso: formacaoIA.curso || formacaoFallback?.[1]?.trim() || dados.curso,
-          instituicao: formacaoIA.instituicao || formacaoFallback?.[2]?.trim() || dados.instituicao, situacao: formacaoIA.situacao || formacaoFallback?.[3] || dados.situacao,
+          formacao: formacaoIA.nivel || dados.formacao, curso: preenchido(formacaoIA.curso) || formacaoFallback?.[1]?.trim() || dados.curso,
+          instituicao: preenchido(formacaoIA.instituicao) || formacaoFallback?.[2]?.trim() || dados.instituicao, situacao: preenchido(formacaoIA.situacao) || formacaoFallback?.[3] || dados.situacao,
           data_conclusao: formacaoIA.data_conclusao || dados.data_conclusao,
           experiencias: experienciasIA && experienciasIA.length ? experienciasIA : dados.experiencias
         });
