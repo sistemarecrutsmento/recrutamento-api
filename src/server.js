@@ -1776,17 +1776,23 @@ app.get('/api/vagas', async (req, res) => {
   // Whitelist explícita (não usa SELECT *) — evita leak de colunas internas
   // Filtra por status='publicada' (a coluna "publicada" não existe — é status)
   // Limite duro pra evitar DoS / queries pesadas
-  let sql = `SELECT id, titulo, empresa, descricao, requisitos, beneficios, salario_min, salario_max,
-                    tipo_contrato, nivel, area, cidade, estado, etapas
-             FROM vagas WHERE status = 'publicada'`;
+  // Uma vaga pública precisa estar publicada e vinculada a uma empresa ativa.
+  // Vagas antigas criadas pelo admin podem ter status='publicada', mas empresa_id NULL;
+  // sem vínculo empresarial não são destinadas ao catálogo público do candidato.
+  let sql = `SELECT v.id, v.titulo, v.empresa, v.descricao, v.requisitos, v.beneficios,
+                    v.salario_min, v.salario_max, v.tipo_contrato, v.nivel, v.area,
+                    v.cidade, v.estado, v.etapas
+             FROM vagas v
+             JOIN empresas e ON e.id = v.empresa_id AND e.ativo = true
+             WHERE v.status = 'publicada'`;
   const params = [];
-  if (cidade) { params.push(`%${cidade}%`); sql += ` AND cidade ILIKE $${params.length}`; }
-  if (estado) { params.push(`%${estado}%`); sql += ` AND estado ILIKE $${params.length}`; }
-  if (area) { params.push(area); sql += ` AND area = $${params.length}`; }
-  if (tipo) { params.push(`%${tipo}%`); sql += ` AND tipo_contrato ILIKE $${params.length}`; }
-  if (nivel) { params.push(`%${nivel}%`); sql += ` AND nivel ILIKE $${params.length}`; }
-  if (busca) { params.push(`%${busca}%`); sql += ` AND (titulo ILIKE $${params.length} OR empresa ILIKE $${params.length})`; }
-  sql += ' ORDER BY id DESC LIMIT 100';
+  if (cidade) { params.push(`%${cidade}%`); sql += ` AND v.cidade ILIKE $${params.length}`; }
+  if (estado) { params.push(`%${estado}%`); sql += ` AND v.estado ILIKE $${params.length}`; }
+  if (area) { params.push(area); sql += ` AND v.area = $${params.length}`; }
+  if (tipo) { params.push(`%${tipo}%`); sql += ` AND v.tipo_contrato ILIKE $${params.length}`; }
+  if (nivel) { params.push(`%${nivel}%`); sql += ` AND v.nivel ILIKE $${params.length}`; }
+  if (busca) { params.push(`%${busca}%`); sql += ` AND (v.titulo ILIKE $${params.length} OR v.empresa ILIKE $${params.length})`; }
+  sql += ' ORDER BY v.id DESC LIMIT 100';
   try {
     const { rows } = await pool.query(sql, params);
     res.json({ vagas: rows });
