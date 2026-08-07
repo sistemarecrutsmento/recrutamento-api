@@ -24,8 +24,8 @@ function dataInterna(valor) {
   const s = norm(valor);
   if (!s) return '';
   if (/\b(atual|atualmente|presente|present|current)\b/.test(s)) return '';
-  let m = s.match(/\b(19|20)\d{2}[-\/.](0?[1-9]|1[0-2])\b/);
-  if (m) return `${m[1]}${m[0].slice(2, 4)}-${String(m[2]).padStart(2, '0')}`;
+  let m = s.match(/\b((?:19|20)\d{2})[-\/.](0?[1-9]|1[0-2])\b/);
+  if (m) return `${m[1]}-${String(m[2]).padStart(2, '0')}`;
   m = s.match(/\b(0?[1-9]|1[0-2])[-\/.](19|20)\d{2}\b/);
   if (m) return `${m[2]}-${String(m[1]).padStart(2, '0')}`;
   const meses = { jan: '01', fev: '02', mar: '03', abr: '04', mai: '05', jun: '06', jul: '07', ago: '08', set: '09', out: '10', nov: '11', dez: '12' };
@@ -48,9 +48,16 @@ function extrairDeterministico(texto) {
   const nasc = flat.match(/(?:nascimento|nascida|nascido|birth)[^\d]{0,20}(\d{1,2}[/. -]\d{1,2}[/. -]\d{4})/i); r.dados_pessoais.data_nascimento = nasc ? normalizarDataNascimento(nasc[1]) : '';
   r.dados_pessoais.nome = (linhas.slice(0, 8).find(l => /^[A-Za-zÀ-ÿ' -]{4,80}$/.test(l) && l.split(/\s+/).length >= 2 && !/@/.test(l) && !/curr[íi]culo|resume|objetivo|perfil/i.test(l)) || '');
   const cep = flat.match(/\b\d{5}-?\d{3}\b/); r.endereco.cep = cep ? cep[0].replace(/(\d{5})(\d{3})/, '$1-$2') : '';
-  const uf = flat.match(/\b([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ .'-]{2,})\s*[,/-]\s*([A-Z]{2})\b/); if (uf) { r.endereco.cidade = clean(uf[1]); r.endereco.estado = uf[2]; }
+  const ufLine = linhas.find(l => /\b[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ .'-]{2,}\s*[,/-]\s*[A-Z]{2}\b/.test(l));
+  const uf = ufLine && ufLine.match(/\b([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ .'-]{2,})\s*[,/-]\s*([A-Z]{2})\b/);
+  if (uf) { r.endereco.cidade = clean(uf[1]); r.endereco.estado = uf[2]; }
   const addr = linhas.find(l => /\b(rua|r\.|avenida|av\.|travessa|tv\.|rodovia|estrada|alameda)\b/i.test(l)) || '';
   if (addr) { const street = addr.slice(addr.search(/\b(rua|r\.|avenida|av\.|travessa|tv\.|rodovia|estrada|alameda)\b/i)); const p = street.split(/\s*\|\s*|\s+-\s+/)[0].split(',').map(clean); r.endereco.logradouro = p[0] || ''; r.endereco.bairro = p[1] || ''; r.endereco.numero = (addr.match(/(?:n[ºo°]?|número)\s*(\d+)/i) || addr.match(/\b(\d{1,6})\b/) || ['',''])[1]; }
+  const sec = (patterns, stop) => { const i = linhas.findIndex(l => patterns.test(norm(l))); if (i < 0) return []; const j = linhas.findIndex((l, n) => n > i && stop.test(norm(l))); return linhas.slice(i + 1, j < 0 ? linhas.length : j); };
+  const perfilLinhas = sec(/^(perfil|resumo|objetivo|apresentacao)( profissional)?\b/, /^(principais|experi|forma|educa|compet|habil|idioma|curso)/);
+  if (perfilLinhas.length) r.perfil.sobre_voce = perfilLinhas.join(' ');
+  const compLinhas = sec(/^(competencias?|habilidades|skills|conhecimentos)( tecnicos?)?\b/, /^(idioma|forma|educa|experi|curso|certifica)/);
+  r.competencias = uniq(compLinhas.flatMap(l => l.split(/[,;|•]/).map(clean)).filter(l => l && !/^(sistemas|gestao|certificacoes?):?$/i.test(l)));
   const degree = flat.match(/(?:bacharelado|licenciatura|tecnólogo|tecnologia|graduação|pós-graduação|mba|curso)\s+(?:em\s+)?(.+?)\s+-\s+(.+?)\s*\(([^)]+)\)/i);
   if (degree) { r.formacao = [{ nivel: norm(degree[0]).startsWith('bacharelado') ? 'superior' : '', curso: clean(degree[1]), instituicao: clean(degree[2]), situacao: /andamento|cursando/i.test(degree[3]) ? 'cursando' : /conclu/i.test(degree[3]) ? 'concluido' : clean(degree[3]), data_conclusao: '' }]; }
   const inicio = linhas.findIndex(l => /^(experi[êe]ncia|hist[óo]rico profissional|trajet[óo]ria|carreira|professional experience|work experience)\b/i.test(l));
@@ -70,7 +77,9 @@ function sanearIA(raw) {
   r.endereco = { cep: clean(a.cep), estado: clean(a.estado).toUpperCase(), cidade: clean(a.cidade), bairro: clean(a.bairro), logradouro: clean(a.logradouro), numero: clean(a.numero), complemento: clean(a.complemento) };
   r.perfil.sobre_voce = clean(perfil.sobre_voce);
   const forms = Array.isArray(x.formacao) ? x.formacao : (x.formacao ? [x.formacao] : []);
-  r.formacao = forms.map(f => ({ nivel: clean(f.nivel), curso: clean(f.curso), instituicao: clean(f.instituicao), situacao: clean(f.situacao), data_conclusao: dataInterna(f.data_conclusao) })).filter(f => Object.values(f).some(Boolean));
+  const nivel = v => { const n = norm(v); if (/fundamental/.test(n)) return 'fundamental'; if (/medio/.test(n)) return 'medio'; if (/tecnico/.test(n)) return 'tecnico'; if (/pos|mba/.test(n)) return 'pos'; if (/mestrado/.test(n)) return 'mestrado'; if (/doutorado/.test(n)) return 'doutorado'; if (/superior|bacharel|licenc|tecnologo|graduacao/.test(n)) return 'superior'; return clean(v); };
+  const situacao = v => { const n = norm(v); if (/andamento|cursando|estudando/.test(n)) return 'cursando'; if (/conclu|formad/.test(n)) return 'concluido'; if (/tranc/.test(n)) return 'trancado'; return clean(v); };
+  r.formacao = forms.map(f => ({ nivel: nivel(f.nivel), curso: clean(f.curso), instituicao: clean(f.instituicao), situacao: situacao(f.situacao), data_conclusao: dataInterna(f.data_conclusao) })).filter(f => Object.values(f).some(Boolean));
   r.experiencias = (Array.isArray(x.experiencias) ? x.experiencias : []).map(e => ({ empresa: clean(e.empresa), cargo: clean(e.cargo), inicio: dataInterna(e.inicio), fim: dataInterna(e.fim), emprego_atual: Boolean(e.emprego_atual) || /atual|presente|current/i.test(clean(e.fim)), descricao: clean(e.descricao) })).filter(e => e.empresa || e.cargo || e.descricao);
   r.competencias = uniq(Array.isArray(x.competencias) ? x.competencias : []); r.idiomas = uniq(Array.isArray(x.idiomas) ? x.idiomas : []);
   return r;
@@ -83,7 +92,7 @@ function fundir(ia, det) {
   r.formacao = ia.formacao.length ? ia.formacao : det.formacao;
   const porEmpresa = new Map();
   for (const e of [...det.experiencias, ...ia.experiencias]) {
-    const chave = norm(e.empresa) || `cargo:${norm(e.cargo)}:${e.inicio}`;
+    const chave = `${norm(e.empresa)}|${norm(e.cargo)}|${e.inicio || ''}` || `cargo:${norm(e.cargo)}:${e.inicio}`;
     const anterior = porEmpresa.get(chave);
     if (!anterior) porEmpresa.set(chave, { ...e });
     else porEmpresa.set(chave, { ...anterior, ...Object.fromEntries(Object.entries(e).filter(([, v]) => nonempty(v) || typeof v === 'boolean')), descricao: nonempty(e.descricao) ? e.descricao : anterior.descricao });
@@ -105,11 +114,27 @@ async function interpretarComGroq(texto) {
   if (!resp.ok) throw new Error(`Groq ${resp.status}`); const j = await resp.json(); const c = j?.choices?.[0]?.message?.content; return c ? JSON.parse(String(c).replace(/^```json\s*|\s*```$/g, '').trim()) : null;
 }
 
+function resumoDiagnostico(nome, valor) {
+  const r = { etapa: nome, tipo: typeof valor };
+  if (typeof valor === 'string') { r.caracteres = valor.length; r.linhas = valor ? valor.split('\n').length : 0; }
+  if (valor && typeof valor === 'object') {
+    r.chaves = Object.keys(valor).filter(k => !k.startsWith('_'));
+    if (Array.isArray(valor.experiencias)) r.experiencias = valor.experiencias.length;
+    if (Array.isArray(valor.formacao)) r.formacoes = valor.formacao.length;
+    if (Array.isArray(valor.competencias)) r.competencias = valor.competencias.length;
+    r.presenca = { nome: !!valor.dados_pessoais?.nome, email: !!valor.dados_pessoais?.email, resumo: !!valor.perfil?.sobre_voce, endereco: Object.values(valor.endereco || {}).some(Boolean) };
+  }
+  return r;
+}
+
 async function analisarCurriculo(buffer) {
-  const parsed = await pdfParse(buffer); const texto = normalizarTexto(parsed.text || '');
+  const parsed = await pdfParse(buffer); const bruto = String(parsed.text || ''); const texto = normalizarTexto(bruto);
   if (texto.replace(/\s/g, '').length < 80) { const err = new Error('Este PDF não contém texto legível. Tente um PDF exportado com texto ou preencha manualmente.'); err.code = 'PDF_SEM_TEXTO'; throw err; }
-  const det = extrairDeterministico(texto); let ia = null; try { ia = sanearIA(await interpretarComGroq(texto)); } catch (e) { console.warn('[CURRICULO IA FALLBACK]', e.message); ia = sanearIA(null); }
-  const r = fundir(ia || sanearIA(null), det); return { dados: compatibilidadeVagasIO(r), estrutura: r, texto_caracteres: texto.length };
+  const det = extrairDeterministico(texto); let iaBruta = null; let ia = null; let iaErro = '';
+  try { iaBruta = await interpretarComGroq(texto); ia = sanearIA(iaBruta); } catch (e) { iaErro = e.message; console.warn('[CURRICULO IA FALLBACK]', e.message); ia = sanearIA(null); }
+  const r = fundir(ia, det); const final = compatibilidadeVagasIO(r);
+  const diagnostico = [resumoDiagnostico('A_texto_bruto', bruto), resumoDiagnostico('B_texto_normalizado', texto), resumoDiagnostico('C_parser_deterministico', det), resumoDiagnostico('D_ia_bruta', iaBruta || {}), resumoDiagnostico('E_ia_validada', ia), resumoDiagnostico('F_fusao', r), resumoDiagnostico('G_resposta_frontend', final), { etapa: 'ia_status', executada: !!iaBruta, erro: iaErro || null, caracteres_enviados_ia: Math.min(texto.length, 45000) }];
+  return { dados: final, estrutura: r, texto_caracteres: texto.length, diagnostico };
 }
 
 module.exports = { analisarCurriculo, normalizarTexto, sanearIA };

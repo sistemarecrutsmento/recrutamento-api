@@ -996,7 +996,7 @@ app.post('/api/candidato/analisar-curriculo', rateLimitByIp('upload'), async (re
     const buffer = Buffer.from(raw, 'base64');
     if (buffer.length > 7 * 1024 * 1024 || buffer.slice(0, 4).toString() !== '%PDF') return res.status(400).json({ erro: 'Envie um arquivo PDF válido de até 7 MB.' });
     const resultado = await analisarCurriculo(buffer);
-    return res.json({ ok: true, dados: resultado.dados, estrutura: resultado.estrutura, arquivo_nome: req.body?.arquivo_nome || 'curriculo.pdf' });
+    return res.json({ ok: true, dados: resultado.dados, estrutura: resultado.estrutura, diagnostico: resultado.diagnostico, arquivo_nome: req.body?.arquivo_nome || 'curriculo.pdf' });
   } catch (e) {
     console.error('[CURRICULO PDF]', e.message);
     const status = e.code === 'PDF_SEM_TEXTO' ? 422 : 422;
