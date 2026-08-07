@@ -1019,8 +1019,16 @@ app.post('/api/candidato/analisar-curriculo', rateLimitByIp('upload'), async (re
     const curso = formacaoLinhas.find(x => !/conclu|cursand|ensino|superior|técnic|médio|fundamental/i.test(x) && x.length >= 3) || '';
     const instituicao = formacaoLinhas.find(x => /universidade|faculdade|escola|instituto|colégio|colegio|senai|senac/i.test(x)) || '';
     const situacao = /cursando|em andamento/i.test(formacaoBloco) ? 'cursando' : /trancad/i.test(formacaoBloco) ? 'trancado' : /concluíd|concluido|formad/i.test(formacaoBloco) ? 'concluido' : '';
-    const experiencias = experienciaBloco ? [{ cargo: '', empresa: '', inicio: datas[0] || null, fim: datas[1] || null, emprego_atual: /atual|presente/i.test(experienciaBloco), descricao: experienciaBloco }] : [];
-    const dados = { nome, email, cpf, celular, data_nascimento, formacao, instituicao, curso, situacao, data_conclusao: dataCurso ? `${dataCurso}-01-01` : '', sexo: '', acessibilidade: '', cep: '', estado: '', cidade: '', bairro: '', logradouro: '', numero: '', complemento: '', sobre_voce: resumo || '', experiencias };
+    const experienciaLinhas = experienciaBloco.split(/\s{2,}|(?<=[.;])\s+/).map(x => x.trim()).filter(x => x.length >= 3);
+    const experienciaDatas = [...experienciaBloco.matchAll(/\b(\d{1,2})[\/.-](\d{4})\b/g)].map(m => `${m[2]}-${String(m[1]).padStart(2, '0')}-01`);
+    const experienciaSemDatas = experienciaLinhas.filter(x => !/\b\d{1,2}[\/.-]\d{4}\b|atual|presente/i.test(x));
+    const experiencias = experienciaBloco ? [{ cargo: experienciaSemDatas[0] || '', empresa: experienciaSemDatas[1] || '', inicio: experienciaDatas[0] || null, fim: experienciaDatas[1] || null, emprego_atual: /atual|presente/i.test(experienciaBloco), descricao: experienciaBloco }] : [];
+    const cepEncontrado = texto.match(/\b\d{5}-?\d{3}\b/)?.[0]?.replace(/(\d{5})(\d{3})/, '$1-$2') || '';
+    const linhaEndereco = linhas.find(x => /\b(rua|r\.|avenida|av\.|travessa|tv\.|rodovia|estrada|alameda|logradouro)\b/i.test(x)) || '';
+    const logradouro = linhaEndereco.replace(/,?\s*(?:n[ºo°]?|número)\s*\d+.*$/i, '').trim();
+    const numero = linhaEndereco.match(/(?:n[ºo°]?|número)\s*(\d+)/i)?.[1] || linhaEndereco.match(/,\s*(\d{1,6})(?:\s|$)/)?.[1] || '';
+    const cidadeUf = texto.match(/\b([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ .'-]{2,})\s*[-/]\s*([A-Z]{2})\b/);
+    const dados = { nome, email, cpf, celular, data_nascimento, formacao, instituicao, curso, situacao, data_conclusao: dataCurso ? `${dataCurso}-01-01` : '', sexo: '', acessibilidade: '', cep: cepEncontrado, estado: cidadeUf?.[2] || '', cidade: cidadeUf?.[1]?.trim() || '', bairro: '', logradouro, numero, complemento: '', sobre_voce: resumo || '', experiencias };
     return res.json({ ok: true, dados, arquivo_nome: req.body?.arquivo_nome || 'curriculo.pdf' });
   } catch (e) {
     console.error('[CURRICULO PDF]', e.message);
