@@ -1071,10 +1071,10 @@ app.post('/api/candidato/analisar-curriculo', rateLimitByIp('upload'), async (re
         const formacaoIA = ia.formacao || {};
         // Impede que o modelo misture seções: "sobre você" é apenas o perfil/resumo,
         // enquanto conquistas, formação e competências pertencem aos seus próprios campos.
-        const inicioSecao = '(?:PRINCIPAL(?:IS)?\\s+CONQUISTAS?|PROJETOS?|EXPERI[ÊE]NCIA(?:S)?|FORMA[ÇC][ÃA]O|COMPET[ÊE]NCIAS?|EDUCA[ÇC][ÃA]O|HABILIDADES?)\\s*(?:PROFISSIONAL|ACAD[ÊE]MICA|T[ÉE]CNICAS?)?\\s*:?' ;
-        const cortarSecoes = (valor) => String(valor || '').split(new RegExp('\\s+' + inicioSecao, 'i'))[0].trim();
-        const perfilTexto = (String(texto).match(new RegExp('(?:PERFIL|RESUMO|OBJETIVO)\\s*(?:PROFISSIONAL)?\\s+([\\s\\S]*?)(?=\\s+' + inicioSecao + '\\b|$)', 'i')) || [])[1];
-        const formacaoFallback = String(texto).match(/(?:bacharelado|licenciatura|tecn[óo]logo|tecnologia|gradua[çc][ãa]o|p[óo]s-gradua[çc][ãa]o|mba|curso)\s+(?:em\s+)?([^\n|-]+?)\s*-\s*([^\n(]+?)(?:\s*\(([^)]+)\))?(?=\s|$)/i);
+        const cortarSecoes = (valor) => String(valor || '').replace(/\s+(?:PRINCIPAIS\s+CONQUISTAS(?:\s+E\s+PROJETOS)?|PROJETOS|EXPERI[ÊE]NCIA(?:S)?(?:\s+PROFISSIONAL)?|FORMA[ÇC][ÃA]O(?:\s+ACAD[ÊE]MICA)?|COMPET[ÊE]NCIAS?(?:\s+T[ÉE]CNICAS?)?|EDUCA[ÇC][ÃA]O|HABILIDADES?)[\s\S]*$/i, '').trim();
+        const perfilTexto = (String(texto).match(/(?:PERFIL|RESUMO|OBJETIVO)\s*(?:PROFISSIONAL)?\s+([\s\S]*?)(?=\s+(?:PRINCIPAIS\s+CONQUISTAS|PROJETOS|EXPERI[ÊE]NCIA|FORMA[ÇC][ÃA]O|COMPET[ÊE]NCIAS?|EDUCA[ÇC][ÃA]O|HABILIDADES?)\b|$)/i) || [])[1];
+        const textoPlano = String(texto).replace(/\s+/g, ' ').trim();
+        const formacaoFallback = textoPlano.match(/(?:bacharelado|licenciatura|tecn[óo]logo|tecnologia|gradua[çc][ãa]o|p[óo]s-gradua[çc][ãa]o|mba|curso)\s+(?:em\s+)?(.+?)\s+-\s+(.+?)\s*\(([^)]+)\)/i);
         const experienciasIA = Array.isArray(ia.experiencias) ? ia.experiencias.map(e => ({
           ...e,
           descricao: cortarSecoes(e?.descricao)
