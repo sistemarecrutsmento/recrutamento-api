@@ -1057,7 +1057,9 @@ app.post('/api/candidato/analisar-curriculo', rateLimitByIp('upload'), async (re
     const linhaEndereco = linhas.find(x => /\b(rua|r\.|avenida|av\.|travessa|tv\.|rodovia|estrada|alameda|logradouro)\b/i.test(x)) || '';
     const cepEncontrado = texto.match(/\b\d{5}-?\d{3}\b/)?.[0]?.replace(/(\d{5})(\d{3})/, '$1-$2') || '';
     const cidadeUf = linhas.find(x => /^[A-Za-zÀ-ÿ .'-]+,\s*[A-Z]{2}\b/.test(x))?.match(/^(.+?),\s*([A-Z]{2})\b/) || texto.match(/\b([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ .'-]{2,})\s*[-/]\s*([A-Z]{2})\b/);
-    const enderecoPartes = linhaEndereco.split(/\s+-\s+|\s+\|\s+/)[0].split(',').map(x => x.trim()).filter(Boolean);
+    const inicioLogradouro = linhaEndereco.search(/\b(rua|r\.|avenida|av\.|travessa|tv\.|rodovia|estrada|alameda|logradouro)\b/i);
+    const enderecoTrecho = inicioLogradouro >= 0 ? linhaEndereco.slice(inicioLogradouro) : linhaEndereco;
+    const enderecoPartes = enderecoTrecho.split(/\s+-\s+|\s+\|\s+/)[0].split(',').map(x => x.trim()).filter(Boolean);
     const logradouro = enderecoPartes[0] || '';
     const bairro = enderecoPartes[1] || '';
     const numero = linhaEndereco.match(/(?:n[ºo°]?|número)\s*(\d+)/i)?.[1] || linhaEndereco.match(/\b(\d{1,6})\b/)?.[1] || '';
@@ -1070,10 +1072,10 @@ app.post('/api/candidato/analisar-curriculo', rateLimitByIp('upload'), async (re
         Object.assign(dados, {
           nome: ia.nome || dados.nome, email: ia.email || dados.email, cpf: ia.cpf || dados.cpf,
           celular: ia.celular || dados.celular, data_nascimento: ia.data_nascimento || dados.data_nascimento,
-          sobre_voce: ia.sobre_voce || dados.sobre_voce, cep: enderecoIA.cep || dados.cep,
-          estado: enderecoIA.estado || dados.estado, cidade: enderecoIA.cidade || dados.cidade,
-          bairro: enderecoIA.bairro || dados.bairro, logradouro: enderecoIA.logradouro || dados.logradouro,
-          numero: enderecoIA.numero || dados.numero, complemento: enderecoIA.complemento || dados.complemento,
+          sobre_voce: ia.sobre_voce || dados.sobre_voce, cep: dados.cep || enderecoIA.cep || '',
+          estado: dados.estado || enderecoIA.estado || '', cidade: dados.cidade || enderecoIA.cidade || '',
+          bairro: dados.bairro || enderecoIA.bairro || '', logradouro: dados.logradouro || enderecoIA.logradouro || '',
+          numero: dados.numero || enderecoIA.numero || '', complemento: dados.complemento || enderecoIA.complemento || '',
           formacao: formacaoIA.nivel || dados.formacao, curso: formacaoIA.curso || dados.curso,
           instituicao: formacaoIA.instituicao || dados.instituicao, situacao: formacaoIA.situacao || dados.situacao,
           data_conclusao: formacaoIA.data_conclusao || dados.data_conclusao,
