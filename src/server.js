@@ -991,7 +991,7 @@ app.post('/api/candidato/verificar', rateLimitLogin, async (req, res) => {
 // Os dados ausentes permanecem vazios para preenchimento manual no wizard.
 app.post('/api/candidato/analisar-curriculo', rateLimitByIp('upload'), async (req, res) => {
   try {
-    const raw = String(req.body?.arquivo_base64 || '').replace(/^data:application\\/pdf;base64,/, '');
+    const raw = String(req.body?.arquivo_base64 || '').replace(/^data:application\/pdf;base64,/, '');
     if (!raw || raw.length > 10 * 1024 * 1024) return res.status(400).json({ erro: 'Arquivo inválido ou maior que o limite permitido.' });
     const buffer = Buffer.from(raw, 'base64');
     if (buffer.length > 7 * 1024 * 1024 || buffer.slice(0, 4).toString() !== '%PDF') return res.status(400).json({ erro: 'Envie um arquivo PDF válido de até 7 MB.' });
