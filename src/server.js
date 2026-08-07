@@ -1071,8 +1071,10 @@ app.post('/api/candidato/analisar-curriculo', rateLimitByIp('upload'), async (re
         const formacaoIA = ia.formacao || {};
         // Impede que o modelo misture seções: "sobre você" é apenas o perfil/resumo,
         // enquanto conquistas, formação e competências pertencem aos seus próprios campos.
-        const cortarSecoes = (valor) => String(valor || '').split(/\n\s*(?:PRINCIPAIS?\s+CONQUISTAS?|PROJETOS?|EXPERI[ÊE]NCIA(?:S)?|FORMA[ÇC][ÃA]O|COMPET[ÊE]NCIAS?|EDUCA[ÇC][ÃA]O|HABILIDADES?)\s*(?:PROFISSIONAL|ACAD[ÊE]MICA|T[ÉE]CNICAS?)?\s*:?/i)[0].trim();
-        const perfilTexto = (String(texto).match(/(?:PERFIL|RESUMO|OBJETIVO)\s*(?:PROFISSIONAL)?\s*\n([\s\S]*?)(?=\n\s*(?:PRINCIPAIS?\s+CONQUISTAS?|PROJETOS?|EXPERI[ÊE]NCIA|FORMA[ÇC][ÃA]O|COMPET[ÊE]NCIAS?|EDUCA[ÇC][ÃA]O|HABILIDADES?)\b|$)/i) || [])[1];
+        const inicioSecao = '(?:PRINCIPAIS?\\s+CONQUISTAS?|PROJETOS?|EXPERI[ÊE]NCIA(?:S)?|FORMA[ÇC][ÃA]O|COMPET[ÊE]NCIAS?|EDUCA[ÇC][ÃA]O|HABILIDADES?)\\s*(?:PROFISSIONAL|ACAD[ÊE]MICA|T[ÉE]CNICAS?)?\\s*:?' ;
+        const cortarSecoes = (valor) => String(valor || '').split(new RegExp('\\s+' + inicioSecao, 'i'))[0].trim();
+        const perfilTexto = (String(texto).match(new RegExp('(?:PERFIL|RESUMO|OBJETIVO)\\s*(?:PROFISSIONAL)?\\s+([\\s\\S]*?)(?=\\s+' + inicioSecao + '\\b|$)', 'i')) || [])[1];
+        const formacaoFallback = String(texto).match(/((?:bacharelado|licenciatura|tecn[óo]logo|tecnologia|gradua[çc][ãa]o|p[óo]s-gradua[çc][ãa]o|mba|curso)\s+(?:em\s+)?[^\n|]+?)\s+-\s+([^\n(]+?)(?:\s*\(([^)]+)\))?(?=\s|$)/i);
         const experienciasIA = Array.isArray(ia.experiencias) ? ia.experiencias.map(e => ({
           ...e,
           descricao: cortarSecoes(e?.descricao)
@@ -1084,8 +1086,8 @@ app.post('/api/candidato/analisar-curriculo', rateLimitByIp('upload'), async (re
           estado: dados.estado || enderecoIA.estado || '', cidade: dados.cidade || enderecoIA.cidade || '',
           bairro: dados.bairro || enderecoIA.bairro || '', logradouro: dados.logradouro || enderecoIA.logradouro || '',
           numero: dados.numero || enderecoIA.numero || '', complemento: dados.complemento || enderecoIA.complemento || '',
-          formacao: formacaoIA.nivel || dados.formacao, curso: formacaoIA.curso || dados.curso,
-          instituicao: formacaoIA.instituicao || dados.instituicao, situacao: formacaoIA.situacao || dados.situacao,
+          formacao: formacaoIA.nivel || dados.formacao, curso: formacaoIA.curso || formacaoFallback?.[1] || dados.curso,
+          instituicao: formacaoIA.instituicao || formacaoFallback?.[2]?.trim() || dados.instituicao, situacao: formacaoIA.situacao || formacaoFallback?.[3] || dados.situacao,
           data_conclusao: formacaoIA.data_conclusao || dados.data_conclusao,
           experiencias: experienciasIA && experienciasIA.length ? experienciasIA : dados.experiencias
         });
