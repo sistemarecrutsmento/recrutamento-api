@@ -1002,11 +1002,25 @@ app.post('/api/candidato/analisar-curriculo', rateLimitByIp('upload'), async (re
     const celular = texto.match(/(?:\+?55\s?)?(?:\(?\d{2}\)?\s?)?9?\d{4}[- ]?\d{4}\b/)?.[0] || '';
     const dataBr = texto.match(/\b\d{1,2}[\/.-]\d{1,2}[\/.-]\d{4}\b/)?.[0] || '';
     const data_nascimento = dataBr ? (() => { const p = dataBr.split(/[\/.-]/); return `${p[2]}-${String(p[1]).padStart(2, '0')}-${String(p[0]).padStart(2, '0')}`; })() : '';
-    const linhas = texto.split(/\n|(?<=\.)\s{2,}/).map(x => x.trim()).filter(x => x.length >= 3 && x.length <= 90);
-    const nome = (linhas.find(x => !/@/.test(x) && !/curr[íi]culo|objetivo|experi[êe]ncia|forma[çc][ãa]o|contato/i.test(x) && /^[A-Za-zÀ-ÿ' -]+$/.test(x)) || '').trim();
+    const linhas = texto.split(/\n/).map(x => x.replace(/\s+/g, ' ').trim()).filter(x => x.length >= 2);
+    const normalizar = x => x.normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+    const cabecalhos = /^(resumo|perfil profissional|perfil|objetivo profissional|objetivo|sobre mim|sobre voce|experiencia profissional|experiencias profissionais|experiencia|experiências|formacao|formação|educacao|educação|escolaridade|qualificacoes|qualificações|habilidades|competencias|competências|dados pessoais|contato|endereco|endereço|cursos|idiomas|referencias|referências)$/i;
+    const indiceSecao = termos => { const lista = Array.isArray(termos) ? termos : [termos]; return linhas.findIndex(l => lista.some(t => normalizar(l).replace(/[:：]$/, '').trim() === normalizar(t))); };
+    const blocoSecao = termos => { const i = indiceSecao(termos); if (i < 0) return ''; const fim = linhas.findIndex((l, n) => n > i && cabecalhos.test(l.replace(/[:：]$/, '').trim())); return linhas.slice(i + 1, fim < 0 ? Math.min(linhas.length, i + 14) : fim).join(' ').trim(); };
+    const nome = (linhas.find(x => !/@/.test(x) && !/curr[íi]culo|objetivo|exper[ieê]ncia|forma[çc][ãa]o|contato/i.test(x) && /^[A-Za-zÀ-ÿ' -]+$/.test(x) && x.split(' ').length >= 2) || '').trim();
+    const resumo = blocoSecao(['resumo', 'perfil profissional', 'perfil', 'objetivo profissional', 'sobre mim', 'sobre você', 'sobre voce']);
+    const experienciaBloco = blocoSecao(['experiência profissional', 'experiencias profissionais', 'experiência', 'experiencias']);
+    const formacaoBloco = blocoSecao(['formação', 'formacao', 'educação', 'educacao', 'escolaridade']);
+    const datas = [...texto.matchAll(/\b(\d{1,2})[\/.-](\d{4})\b/g)].map(m => `${m[2]}-${String(m[1]).padStart(2, '0')}-01`);
+    const dataCurso = texto.match(/\b(19|20)\d{2}\b/)?.[0] || '';
     const formacaoMap = [['doutorado','doutorado'],['mestrado','mestrado'],['pós-graduação','pos'],['pos-graduação','pos'],['superior','superior'],['técnico','tecnico'],['ensino médio','medio'],['médio','medio'],['fundamental','fundamental']];
     const formacao = formacaoMap.find(([key]) => texto.toLowerCase().includes(key))?.[1] || '';
-    const dados = { nome, email, cpf, celular, data_nascimento, formacao, instituicao: '', curso: '', situacao: '', data_conclusao: '', sexo: '', acessibilidade: '', cep: '', estado: '', cidade: '', bairro: '', logradouro: '', numero: '', complemento: '', sobre_voce: '' };
+    const formacaoLinhas = formacaoBloco.split(/\s{2,}|(?<=[.;])\s+/).map(x => x.trim()).filter(Boolean);
+    const curso = formacaoLinhas.find(x => !/conclu|cursand|ensino|superior|técnic|médio|fundamental/i.test(x) && x.length >= 3) || '';
+    const instituicao = formacaoLinhas.find(x => /universidade|faculdade|escola|instituto|colégio|colegio|senai|senac/i.test(x)) || '';
+    const situacao = /cursando|em andamento/i.test(formacaoBloco) ? 'cursando' : /trancad/i.test(formacaoBloco) ? 'trancado' : /concluíd|concluido|formad/i.test(formacaoBloco) ? 'concluido' : '';
+    const experiencias = experienciaBloco ? [{ cargo: '', empresa: '', inicio: datas[0] || null, fim: datas[1] || null, emprego_atual: /atual|presente/i.test(experienciaBloco), descricao: experienciaBloco }] : [];
+    const dados = { nome, email, cpf, celular, data_nascimento, formacao, instituicao, curso, situacao, data_conclusao: dataCurso ? `${dataCurso}-01-01` : '', sexo: '', acessibilidade: '', cep: '', estado: '', cidade: '', bairro: '', logradouro: '', numero: '', complemento: '', sobre_voce: resumo || '', experiencias };
     return res.json({ ok: true, dados, arquivo_nome: req.body?.arquivo_nome || 'curriculo.pdf' });
   } catch (e) {
     console.error('[CURRICULO PDF]', e.message);
