@@ -8446,13 +8446,27 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
       );
       const vagaTags = tagRows.map(r => r.tag);
 
-      const { score, detalhes } = calcularMatch(candRows[0], vaga, vagaTags);
+      const candidato = candRows[0];
+      const camposMatch = [
+        ['nome', candidato.nome],
+        ['cidade', candidato.cidade],
+        ['estado', candidato.estado],
+        ['áreas de interesse', candidato.areas_interesse],
+        ['nível de experiência', candidato.nivel_experiencia],
+        ['competências', candidato.competencias]
+      ];
+      const camposFaltantes = camposMatch
+        .filter(([, valor]) => Array.isArray(valor) ? valor.length === 0 : !String(valor || '').trim())
+        .map(([nome]) => nome);
+      const { score, detalhes } = calcularMatch(candidato, vaga, vagaTags);
 
       res.json({
         vaga_id: vagaId,
         vaga_titulo: vaga.titulo,
         score,
         nivel: score >= 70 ? 'alto' : score >= 40 ? 'médio' : 'baixo',
+        perfil_completo: camposFaltantes.length === 0,
+        campos_faltantes: camposFaltantes,
         detalhes,
         aviso: 'Pontuação indicativa. Não representa decisão de contratação.'
       });
