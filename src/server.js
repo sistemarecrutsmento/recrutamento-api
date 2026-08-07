@@ -5852,6 +5852,46 @@ app.get('/api/empresa/candidatura/:id/documentos', requireEmpresaViewer, async (
   }
 });
 
+// Download autenticado do arquivo de documento para montagem de PDF no navegador.
+// O proxy evita bloqueios CORS do storage e mantém a autorização por empresa.
+app.get('/api/empresa/candidatura/:id/documentos/:docId/arquivo', requireEmpresaViewer, async (req, res) => {
+  const candidaturaId = Number(req.params.id);
+  const documentoId = Number(req.params.docId);
+  const empresaId = req.user.empresa_id;
+  if (!Number.isInteger(candidaturaId) || !Number.isInteger(documentoId) || candidaturaId <= 0 || documentoId <= 0) {
+    return res.status(400).json({ erro: 'Identificador de documento inválido' });
+  }
+  try {
+    const { rows } = await pool.query(`
+      SELECT d.arquivo_url, d.arquivo_nome, d.arquivo_tipo, d.arquivo_tamanho
+      FROM documentos_candidatura d
+      JOIN candidaturas c ON c.id = d.candidatura_id
+      JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id
+        AND eva.empresa_id = $3 AND eva.revogado_em IS NULL
+      WHERE d.id = $1 AND d.candidatura_id = $2
+      LIMIT 1
+    `, [documentoId, candidaturaId, empresaId]);
+    if (!rows.length || !rows[0].arquivo_url) return res.status(404).json({ erro: 'Arquivo não encontrado' });
+    let remote;
+    try { remote = new URL(rows[0].arquivo_url); } catch (_) { return res.status(400).json({ erro: 'URL de arquivo inválida' }); }
+    if (!['http:', 'https:'].includes(remote.protocol)) return res.status(400).json({ erro: 'Origem de arquivo inválida' });
+    const upstream = await axios.get(remote.toString(), {
+      responseType: 'stream', timeout: 30000, maxContentLength: 25 * 1024 * 1024,
+      validateStatus: status => status >= 200 && status < 300
+    });
+    res.set('Content-Type', upstream.headers['content-type'] || rows[0].arquivo_tipo || 'application/octet-stream');
+    const contentLength = upstream.headers['content-length'] || rows[0].arquivo_tamanho;
+    if (contentLength) res.set('Content-Length', String(contentLength));
+    res.set('Content-Disposition', `attachment; filename="${escapeContentDispositionFilename(rows[0].arquivo_nome || 'documento')}"`);
+    upstream.data.on('error', () => res.destroy());
+    upstream.data.pipe(res);
+  } catch (e) {
+    console.error('[empresa documento arquivo]', e.message);
+    if (!res.headersSent) res.status(502).json({ erro: 'Não foi possível baixar o arquivo' });
+    else res.destroy();
+  }
+});
+
 // Ação da empresa (aprovar, reprovar, avançar) — só etapa 4+
 app.post('/api/empresa/candidatura/:id/acao', requireRecrutadorOuAdmin, async (req, res) => {
   const { empresa_id, nome: empresa_nome } = req.user;
@@ -7996,6 +8036,68 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
   });
 
   // ── 2. TAGS DE VAGA ───────────────────────────────────────────────────────
+
+  // Convida um candidato do Banco de Talentos para uma vaga específica.
+  // O envio só ocorre após a ação explícita da empresa no botão de convite.
+  app.post('/api/empresa/candidatos/:id/convite', requireRecrutadorOuAdmin, async (req, res) => {
+    const candidatoId = Number(req.params.id);
+    const vagaId = Number(req.body?.vaga_id);
+    const mensagem = String(req.body?.mensagem || '').trim();
+    if (!Number.isInteger(candidatoId) || candidatoId <= 0 || !Number.isInteger(vagaId) || vagaId <= 0) {
+      return res.status(400).json({ erro: 'Candidato e vaga são obrigatórios' });
+    }
+    if (mensagem.length > 2000) return res.status(400).json({ erro: 'A mensagem não pode ultrapassar 2.000 caracteres' });
+    try {
+      const { rows } = await pool.query(`
+        SELECT c.id AS candidato_id, c.nome AS candidato_nome, c.email AS candidato_email,
+               v.id AS vaga_id, v.titulo, v.descricao, v.requisitos, v.beneficios,
+               v.cidade, v.estado, v.tipo_contrato, v.area,
+               COALESCE(e.nome, v.empresa, 'VagasIO') AS empresa_nome
+        FROM candidatos c
+        JOIN vagas v ON v.id = $2
+        JOIN empresas e ON e.id = $3
+        JOIN empresa_vaga_acesso eva ON eva.vaga_id = v.id
+          AND eva.empresa_id = $3 AND eva.revogado_em IS NULL
+        WHERE c.id = $1
+          AND EXISTS (
+            SELECT 1 FROM candidaturas cx
+            JOIN empresa_vaga_acesso exa ON exa.vaga_id = cx.vaga_id
+              AND exa.empresa_id = $3 AND exa.revogado_em IS NULL
+            WHERE cx.candidato_id = c.id
+          )
+        LIMIT 1
+      `, [candidatoId, vagaId, req.user.empresa_id]);
+      if (!rows.length) return res.status(404).json({ erro: 'Candidato ou vaga não encontrado' });
+      const c = rows[0];
+      if (!c.candidato_email) return res.status(400).json({ erro: 'Este candidato não possui e-mail cadastrado' });
+      const base = String(process.env.FRONTEND_URL || 'https://vagasio.com.br').replace(/\\/$/, '');
+      const vagaUrl = `${base}/candidato/vaga.html?id=${encodeURIComponent(vagaId)}`;
+      const plain = value => String(value || '').trim();
+      const detalhe = mensagem ? `<div style="background:#fff8e6;border-left:4px solid #c9a961;padding:14px 16px;margin:20px 0;white-space:pre-wrap"><strong>Mensagem do recrutador</strong><br>${escapeEmailHtml(mensagem)}</div>` : '';
+      const html = `<div style="font-family:Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;background:#fafafa;color:#252525">
+        <div style="background:#722f37;color:#fff;padding:22px;border-radius:8px;text-align:center"><h2 style="margin:0">${escapeEmailHtml(c.empresa_nome)}</h2><p style="margin:8px 0 0">Convite para participar de um processo seletivo</p></div>
+        <div style="background:#fff;padding:26px 22px;border-radius:8px;margin-top:16px">
+          <p>Olá, <strong>${escapeEmailHtml(c.candidato_nome)}</strong>!</p>
+          <p>Seu perfil chamou a atenção da equipe de recrutamento para a vaga:</p>
+          <h2 style="color:#722f37;margin:18px 0 8px">${escapeEmailHtml(c.titulo)}</h2>
+          <p><strong>Empresa:</strong> ${escapeEmailHtml(c.empresa_nome)}<br><strong>Local:</strong> ${escapeEmailHtml([c.cidade,c.estado].filter(Boolean).join('/') || 'Não informado')}<br><strong>Contrato:</strong> ${escapeEmailHtml(c.tipo_contrato || 'Não informado')}<br><strong>Área:</strong> ${escapeEmailHtml(c.area || 'Não informada')}</p>
+          ${plain(c.descricao) ? `<h3>Sobre a vaga</h3><p style="white-space:pre-wrap">${escapeEmailHtml(c.descricao)}</p>` : ''}
+          ${plain(c.requisitos) ? `<h3>Requisitos</h3><p style="white-space:pre-wrap">${escapeEmailHtml(c.requisitos)}</p>` : ''}
+          ${plain(c.beneficios) ? `<h3>Benefícios</h3><p style="white-space:pre-wrap">${escapeEmailHtml(c.beneficios)}</p>` : ''}
+          ${detalhe}
+          <p style="text-align:center;margin:26px 0 8px"><a href="${escapeEmailHtml(vagaUrl)}" style="background:#722f37;color:#fff;padding:13px 24px;border-radius:6px;text-decoration:none;font-weight:700">Ver detalhes e participar</a></p>
+          <p style="font-size:12px;color:#777">A participação depende do seu interesse e da conclusão da candidatura no portal.</p>
+        </div>
+      </div>`;
+      const text = `Olá, ${c.candidato_nome}!\\n\\n${c.empresa_nome} convidou você para participar do processo seletivo da vaga ${c.titulo}.\\nLocal: ${[c.cidade,c.estado].filter(Boolean).join('/') || 'Não informado'}\\n\\nVeja os detalhes e participe: ${vagaUrl}${mensagem ? `\\n\\nMensagem do recrutador:\\n${mensagem}` : ''}`;
+      await enviarEmail({ to: c.candidato_email, subject: `Convite para participar do processo seletivo — ${c.titulo}`, html, text });
+      await audit(req, 'empresa.candidato.invited', { resource_type: 'candidato', resource_id: candidatoId, metadata: { vaga_id: vagaId } });
+      res.json({ ok: true, email: c.candidato_email, vaga: { id: c.vaga_id, titulo: c.titulo } });
+    } catch (e) {
+      console.error('[empresa candidato convite]', e.message);
+      res.status(503).json({ erro: 'Não foi possível enviar o convite por e-mail' });
+    }
+  });
 
   // GET /api/empresa/vagas/:id/tags
   app.get('/api/empresa/vagas/:id/tags', requireEmpresaViewer, async (req, res) => {
