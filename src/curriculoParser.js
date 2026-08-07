@@ -26,10 +26,10 @@ function dataInterna(valor) {
   if (/\b(atual|atualmente|presente|present|current)\b/.test(s)) return '';
   let m = s.match(/\b((?:19|20)\d{2})[-\/.](0?[1-9]|1[0-2])\b/);
   if (m) return `${m[1]}-${String(m[2]).padStart(2, '0')}`;
-  m = s.match(/\b(0?[1-9]|1[0-2])[-\/.](19|20)\d{2}\b/);
+  m = s.match(/\b(0?[1-9]|1[0-2])[-\/.]((?:19|20)\d{2})\b/);
   if (m) return `${m[2]}-${String(m[1]).padStart(2, '0')}`;
   const meses = { jan: '01', fev: '02', mar: '03', abr: '04', mai: '05', jun: '06', jul: '07', ago: '08', set: '09', out: '10', nov: '11', dez: '12' };
-  m = s.match(/\b(jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)[a-z]*\.?\s+(19|20)\d{2}\b/);
+  m = s.match(/\b(jan|fev|mar|abr|mai|jun|jul|ago|set|out|nov|dez)[a-z]*\.?\s+((?:19|20)\d{2})\b/);
   if (m) return `${m[2]}-${meses[m[1]]}`;
   m = s.match(/\b((?:19|20)\d{2})\b/);
   return m ? m[1] : '';
