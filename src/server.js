@@ -7,6 +7,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const axios = require('axios');
 const cloudinary = require('cloudinary').v2;
+const pdfParse = require('pdf-parse');
 require('dotenv').config();
 
 // =========================================================================
@@ -983,6 +984,34 @@ app.post('/api/candidato/verificar', rateLimitLogin, async (req, res) => {
   const refresh = criarRefreshToken();
   await persistirRefresh('candidato', null, email.toLowerCase(), refresh, req, { user_role: 'candidato' });
   res.json({ ok: true, token: accessToken, refreshToken: refresh, email: email.toLowerCase() });
+});
+
+// ============= CANDIDATO - LEITURA DE CURRÍCULO =============
+// Leitura inicial sem criar conta: o PDF é processado em memória e nunca é salvo nesta etapa.
+// Os dados ausentes permanecem vazios para preenchimento manual no wizard.
+app.post('/api/candidato/analisar-curriculo', rateLimitByIp('upload'), async (req, res) => {
+  try {
+    const raw = String(req.body?.arquivo_base64 || '').replace(/^data:application\\/pdf;base64,/, '');
+    if (!raw || raw.length > 10 * 1024 * 1024) return res.status(400).json({ erro: 'Arquivo inválido ou maior que o limite permitido.' });
+    const buffer = Buffer.from(raw, 'base64');
+    if (buffer.length > 7 * 1024 * 1024 || buffer.slice(0, 4).toString() !== '%PDF') return res.status(400).json({ erro: 'Envie um arquivo PDF válido de até 7 MB.' });
+    const parsed = await pdfParse(buffer);
+    const texto = String(parsed.text || '').replace(/[\\t\\r]+/g, ' ').replace(/ {2,}/g, ' ').trim();
+    const email = texto.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/i)?.[0]?.toLowerCase() || '';
+    const cpf = texto.match(/\\b\\d{3}[. -]?\\d{3}[. -]?\\d{3}[- ]?\\d{2}\\b/)?.[0]?.replace(/\\D/g, '') || '';
+    const celular = texto.match(/(?:\\+?55\\s?)?(?:\\(?\\d{2}\\)?\\s?)?9?\\d{4}[- ]?\\d{4}\\b/)?.[0] || '';
+    const dataBr = texto.match(/\\b\\d{1,2}[\\/.-]\\d{1,2}[\\/.-]\\d{4}\\b/)?.[0] || '';
+    const data_nascimento = dataBr ? (() => { const p = dataBr.split(/[\\/.-]/); return `${p[2]}-${String(p[1]).padStart(2, '0')}-${String(p[0]).padStart(2, '0')}`; })() : '';
+    const linhas = texto.split(/\\n|(?<=\\.)\\s{2,}/).map(x => x.trim()).filter(x => x.length >= 3 && x.length <= 90);
+    const nome = (linhas.find(x => !/@/.test(x) && !/curr[íi]culo|objetivo|experi[êe]ncia|forma[çc][ãa]o|contato/i.test(x) && /^[A-Za-zÀ-ÿ' -]+$/.test(x)) || '').trim();
+    const formacaoMap = [['doutorado','doutorado'],['mestrado','mestrado'],['pós-graduação','pos'],['pos-graduação','pos'],['superior','superior'],['técnico','tecnico'],['ensino médio','medio'],['médio','medio'],['fundamental','fundamental']];
+    const formacao = formacaoMap.find(([key]) => texto.toLowerCase().includes(key))?.[1] || '';
+    const dados = { nome, email, cpf, celular, data_nascimento, formacao, instituicao: '', curso: '', situacao: '', data_conclusao: '', sexo: '', acessibilidade: '', cep: '', estado: '', cidade: '', bairro: '', logradouro: '', numero: '', complemento: '', sobre_voce: '' };
+    return res.json({ ok: true, dados, arquivo_nome: req.body?.arquivo_nome || 'curriculo.pdf' });
+  } catch (e) {
+    console.error('[CURRICULO PDF]', e.message);
+    return res.status(422).json({ erro: 'Não foi possível ler este PDF. Você pode preencher o cadastro manualmente.' });
+  }
 });
 
 // ============= CANDIDATO - CADASTRO COM SENHA (NOVO) =============
