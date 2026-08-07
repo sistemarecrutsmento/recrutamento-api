@@ -2524,6 +2524,81 @@ app.post('/api/admin/vagas', authAdmin, async (req, res) => {
   }
 });
 
+// P0 — inventário temporário somente leitura.
+// Restrito aos IDs levantados na investigação; não altera dados e não usa SELECT *.
+app.get('/api/admin/p0-inventory', authAdmin, async (req, res) => {
+  const p0Ids = [
+    166, 167, 168, 174, 182, 183, 184, 185, 186, 189,
+    197, 198, 199, 200, 201, 206, 214, 215, 216, 219, 220,
+    235, 243, 244, 245, 246, 247, 262, 270, 271, 272, 273, 274,
+    280, 288, 289, 290, 291, 292, 297, 305, 306, 307, 308, 309, 310,
+    315, 316, 334, 342, 343, 344, 360, 361, 362, 363, 364, 365, 366,
+    367, 368, 369, 370, 371, 373, 374, 375, 376, 377, 378, 379, 380,
+    381, 387, 388, 390, 391, 397, 398, 400, 402, 406, 407, 408, 410,
+    412, 414, 416, 417, 418, 419, 420, 421, 423, 424, 425, 427, 428, 429, 430
+  ];
+  try {
+    const { rows } = await pool.query(`
+      SELECT
+        v.id,
+        v.titulo,
+        v.empresa,
+        v.empresa_id,
+        v.status,
+        v.criada_por,
+        v.criada_em,
+        CASE WHEN e.id IS NULL THEN NULL ELSE json_build_object(
+          'id', e.id,
+          'nome', e.nome,
+          'ativo', e.ativo,
+          'criado_por', e.criado_por,
+          'criado_em', e.criado_em,
+          'plano', e.plano,
+          'plano_id', e.plano_id,
+          'slug', e.slug
+        ) END AS empresa_vinculada,
+        COALESCE((
+          SELECT json_agg(json_build_object(
+            'tipo', eva.tipo,
+            'revogado_em', eva.revogado_em
+          ) ORDER BY eva.concedido_em, eva.empresa_id)
+          FROM empresa_vaga_acesso eva
+          WHERE eva.vaga_id = v.id
+        ), '[]'::json) AS empresa_vaga_acesso,
+        (SELECT COUNT(*)::int FROM candidaturas c WHERE c.vaga_id = v.id) AS candidaturas_count,
+        COALESCE((
+          SELECT json_agg(json_build_object(
+            'created_at', al.created_at,
+            'action', al.action,
+            'user_type', al.user_type,
+            'user_email', al.user_email,
+            'resource_type', al.resource_type,
+            'resource_id', al.resource_id,
+            'result', al.result,
+            'metadata', al.metadata
+          ) ORDER BY al.created_at)
+          FROM audit_logs al
+          WHERE (al.resource_type = 'vaga' AND al.resource_id = v.id)
+             OR (e.id IS NOT NULL AND al.resource_type = 'empresa' AND al.resource_id = e.id)
+        ), '[]'::json) AS audit_logs
+      FROM vagas v
+      LEFT JOIN empresas e ON e.id = v.empresa_id
+      WHERE v.id = ANY($1::int[])
+      ORDER BY v.id
+    `, [p0Ids]);
+    res.json({
+      ok: true,
+      somente_leitura: true,
+      ids_consultados: p0Ids,
+      total: rows.length,
+      vagas: rows
+    });
+  } catch (e) {
+    console.error('[P0 INVENTORY]', e.message);
+    res.status(500).json({ erro: 'Erro ao consultar inventário P0' });
+  }
+});
+
 app.get('/api/admin/vagas', authAdmin, async (req, res) => {
   // Filtros aceitos:
   //   ?status=publicada|pausada|fechada
