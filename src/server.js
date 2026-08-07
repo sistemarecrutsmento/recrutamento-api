@@ -8012,7 +8012,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
           c.logradouro, c.numero, c.complemento, c.formacao, c.instituicao,
           c.curso, c.situacao, c.data_conclusao, c.primeiro_emprego,
           c.sobre_voce, c.experiencia, c.foto_url, c.areas_interesse,
-          c.competencias, c.banco_talentos, c.criado_em
+          c.nivel_experiencia, c.competencias, c.banco_talentos, c.criado_em
         FROM candidatos c
         JOIN candidaturas can ON can.candidato_id = c.id
         JOIN empresa_vaga_acesso eva ON eva.vaga_id = can.vaga_id AND eva.revogado_em IS NULL
