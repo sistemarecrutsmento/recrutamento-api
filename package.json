@@ -20,7 +20,8 @@
     "pg": "^8.12.0",
     "axios": "^1.7.4",
     "cloudinary": "^2.5.1",
-    "googleapis": "^100.0.0"
+    "googleapis": "^100.0.0",
+    "pdf-parse": "^1.1.1"
   },
   "build_ts": "2026-07-28T18:34:18Z"
 }
