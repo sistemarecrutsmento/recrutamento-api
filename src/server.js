@@ -8070,7 +8070,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
       if (!rows.length) return res.status(404).json({ erro: 'Candidato ou vaga não encontrado' });
       const c = rows[0];
       if (!c.candidato_email) return res.status(400).json({ erro: 'Este candidato não possui e-mail cadastrado' });
-      const base = String(process.env.FRONTEND_URL || 'https://vagasio.com.br').replace(/\\/$/, '');
+      const base = String(process.env.FRONTEND_URL || 'https://vagasio.com.br').replace(/\/$/, '');
       const vagaUrl = `${base}/candidato/vaga.html?id=${encodeURIComponent(vagaId)}`;
       const plain = value => String(value || '').trim();
       const detalhe = mensagem ? `<div style="background:#fff8e6;border-left:4px solid #c9a961;padding:14px 16px;margin:20px 0;white-space:pre-wrap"><strong>Mensagem do recrutador</strong><br>${escapeEmailHtml(mensagem)}</div>` : '';
