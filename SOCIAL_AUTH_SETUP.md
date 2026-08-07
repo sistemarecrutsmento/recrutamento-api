@@ -1,5 +1,7 @@
 # Login social do candidato — configuração externa
 
+A ativação atual está focada no Google. O Apple permanece preparado no backend para uma etapa futura, mas não aparece no Portal do Candidato.
+
 O fluxo já está implementado com OAuth/OIDC, PKCE, `state` de uso único, validação de `nonce`, validação de identidade e troca por sessão JWT/refresh existente.
 
 ## Google
