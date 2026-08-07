@@ -1099,6 +1099,16 @@ app.post('/api/candidato/analisar-curriculo', rateLimitByIp('upload'), async (re
         });
       }
     } catch (iaError) { console.warn('[CURRICULO IA FALLBACK]', iaError.message); }
+    // Última barreira antes de enviar ao frontend: nenhum campo pode carregar a seção seguinte.
+    const cortarNoMarcador = (valor) => {
+      const s = String(valor || '');
+      const marcadores = ['principais conquistas', 'experiência profissional', 'formação acadêmica', 'competências técnicas'];
+      const lower = s.toLocaleLowerCase('pt-BR');
+      const pontos = marcadores.map(m => lower.indexOf(m)).filter(i => i > 0);
+      return (pontos.length ? s.slice(0, Math.min(...pontos)) : s).trim();
+    };
+    dados.sobre_voce = cortarNoMarcador(dados.sobre_voce);
+    dados.experiencias = (dados.experiencias || []).map(e => ({ ...e, descricao: cortarNoMarcador(e.descricao) }));
     return res.json({ ok: true, dados, arquivo_nome: req.body?.arquivo_nome || 'curriculo.pdf' });
   } catch (e) {
     console.error('[CURRICULO PDF]', e.message);
