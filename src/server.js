@@ -46,11 +46,6 @@ const ADMIN_NOTIF_EMAIL = process.env.ADMIN_NOTIF_EMAIL || process.env.ADMIN_EMA
 const { authMiddleware, authCandidato, authAdmin, authEmpresa, authAdminOnly, authCandidatoOrEmpresaOrAdmin, authCandidatoOrAdminStrict, requireAdminEmpresa, requireAdminOuRecrutadorEquipe, requireRecrutadorOuAdmin, requireEmpresaViewer, JWT_VERIFY_OPTIONS } = require('./auth');
 const { sanitizeText, sanitizeFilename, escapeContentDispositionFilename } = require('./sanitize');
 
-// Escaping helper used by the admin 2FA e-mail before route-local helpers load.
-function escapeEmailHtmlSafe(value) {
-  return String(value || '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
-}
-
 // =========================================================================
 // WHITELISTS DE COLUNAS (defesa contra vazamento de dados sensíveis)
 // =========================================================================
@@ -1919,7 +1914,7 @@ app.post('/api/admin/login', rateLimitLogin, async (req, res) => {
                 <h2 style="margin:0;font-size:20px">Vagas.io</h2>
               </div>
               <div style="background: #fff; padding: 28px 24px; border-radius: 8px; margin-top: 16px;">
-                <p style="color: #2b2b2b; font-size: 15px; line-height: 1.5;">Olá, <strong>${escapeEmailHtmlSafe(nome)}</strong>!</p>
+                <p style="color: #2b2b2b; font-size: 15px; line-height: 1.5;">Olá, <strong>${escapeEmailHtml(nome)}</strong>!</p>
                 <p style="color: #2b2b2b; font-size: 15px; line-height: 1.5;">Seu código de verificação é:</p>
                 <div style="text-align:center;margin:24px 0;padding:16px;background:#f5f5f5;border-radius:8px;font-size:32px;font-weight:bold;letter-spacing:8px;color:#7a1f3d">${codigo}</div>
                 <p style="color: #888; font-size: 13px;">Este código expira em 10 minutos.</p>
@@ -2008,7 +2003,7 @@ app.post('/api/admin/2fa/reenviar', rateLimitByIp('twofa'), async (req, res) => 
                   <h2 style="margin:0;font-size:20px">Vagas.io</h2>
                 </div>
                 <div style="background: #fff; padding: 28px 24px; border-radius: 8px; margin-top: 16px;">
-                  <p style="color: #2b2b2b; font-size: 15px; line-height: 1.5;">Olá, <strong>${escapeEmailHtmlSafe(r.rows[0].nome)}</strong>!</p>
+                  <p style="color: #2b2b2b; font-size: 15px; line-height: 1.5;">Olá, <strong>${escapeEmailHtml(r.rows[0].nome)}</strong>!</p>
                   <p style="color: #2b2b2b; font-size: 15px; line-height: 1.5;">Seu novo código de verificação é:</p>
                   <div style="text-align:center;margin:24px 0;padding:16px;background:#f5f5f5;border-radius:8px;font-size:32px;font-weight:bold;letter-spacing:8px;color:#7a1f3d">${novoCodigo}</div>
                   <p style="color: #888; font-size: 13px;">Este código expira em 10 minutos.</p>
@@ -7779,7 +7774,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
   const { totpVerify, generateTotpSecret, totpOtpauthUrl, generateBackupCodes, verifyBackupCode } = require('./totp');
 
   // POST /api/empresa/2fa/iniciar — gera segredo TOTP e URL de QR Code (NÃO ativa ainda)
-  app.post('/api/empresa/2fa/iniciar', requireAdminEmpresa, async (req, res) => {
+  app.post('/api/empresa/2fa/iniciar', requireEmpresaViewer, async (req, res) => {
     try {
       const { id, email } = req.user;
       // Se já tem 2FA ativo, exige confirmação de senha para resetar
@@ -7806,7 +7801,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
   });
 
   // POST /api/empresa/2fa/confirmar — confirma e ATIVA o 2FA com primeiro código
-  app.post('/api/empresa/2fa/confirmar', requireAdminEmpresa, async (req, res) => {
+  app.post('/api/empresa/2fa/confirmar', requireEmpresaViewer, async (req, res) => {
     try {
       const { id } = req.user;
       const { codigo } = req.body || {};
@@ -7907,7 +7902,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
   });
 
   // POST /api/empresa/2fa/desativar — desativa 2FA com confirmação de senha
-  app.post('/api/empresa/2fa/desativar', requireAdminEmpresa, async (req, res) => {
+  app.post('/api/empresa/2fa/desativar', requireEmpresaViewer, async (req, res) => {
     try {
       const { id, email } = req.user;
       const { senha } = req.body || {};
