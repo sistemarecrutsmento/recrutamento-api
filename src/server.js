@@ -1773,6 +1773,9 @@ app.delete('/api/candidato/foto', authCandidato, async (req, res) => {
 // ============= VAGAS (PÚBLICO) =============
 app.get('/api/vagas', async (req, res) => {
   const { cidade, estado, area, tipo, nivel, busca } = req.query;
+  const paginada = req.query.limite !== undefined || req.query.offset !== undefined;
+  const limite = Math.min(Math.max(parseInt(req.query.limite, 10) || 20, 1), 100);
+  const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0);
   // Whitelist explícita (não usa SELECT *) — evita leak de colunas internas
   // Filtra por status='publicada' (a coluna "publicada" não existe — é status)
   // Limite duro pra evitar DoS / queries pesadas
@@ -1792,10 +1795,12 @@ app.get('/api/vagas', async (req, res) => {
   if (tipo) { params.push(`%${tipo}%`); sql += ` AND v.tipo_contrato ILIKE $${params.length}`; }
   if (nivel) { params.push(`%${nivel}%`); sql += ` AND v.nivel ILIKE $${params.length}`; }
   if (busca) { params.push(`%${busca}%`); sql += ` AND (v.titulo ILIKE $${params.length} OR v.empresa ILIKE $${params.length})`; }
-  sql += ' ORDER BY v.id DESC LIMIT 100';
+  sql += paginada ? ` ORDER BY v.id DESC LIMIT $${params.length + 1} OFFSET $${params.length + 2}` : ' ORDER BY v.id DESC LIMIT 100';
+  if (paginada) params.push(limite + 1, offset);
   try {
-    const { rows } = await pool.query(sql, params);
-    res.json({ vagas: rows });
+    const result = await pool.query(sql, params);
+    const rows = paginada && result.rows.length > limite ? result.rows.slice(0, limite) : result.rows;
+    res.json({ vagas: rows, mais: paginada && result.rows.length > limite });
   } catch (e) {
     console.error('[vagas lista]', e.message);
     res.status(500).json({ erro: 'Erro ao listar vagas' });
