@@ -8,6 +8,7 @@ const jwt = require('jsonwebtoken');
 const axios = require('axios');
 const cloudinary = require('cloudinary').v2;
 const { analisarCurriculo } = require('./curriculoParser');
+const { validateBase64File } = require('./fileValidation');
 require('dotenv').config();
 
 // =========================================================================
@@ -115,7 +116,19 @@ app.use(cors({
   },
   credentials: true
 }));
-app.use(express.json({ limit: '100mb' }));
+// Endpoints que recebem arquivos em Base64 têm limites próprios, aplicados
+// antes do parser global. O limite binário real continua sendo validado por
+// validateBase64File() em cada rota.
+app.use('/api/candidato/analisar-curriculo', express.json({ limit: '10mb' }));
+app.use('/api/candidato/foto', express.json({ limit: '8mb' }));
+app.use('/api/candidatura/:id/documentos', express.json({ limit: '50mb' }));
+app.use('/api/chat/:candidatura_id/upload', express.json({ limit: '9mb' }));
+app.use('/api/admin/candidatura/:id/enviar-proposta', express.json({ limit: '9mb' }));
+app.use('/api/empresa/candidatura/:id/proposta', express.json({ limit: '9mb' }));
+
+// JSON normal: payloads de negócio não precisam de dezenas de megabytes.
+app.use(express.json({ limit: '2mb' }));
+
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
 // =========================================================================
@@ -440,19 +453,16 @@ app.get('/api/public/empresa/:slug/vagas/:id', async (req, res) => {
   }
 });
 
-app.get('/api/_version', (req,res) => res.json({commit:'22f61ca41a', ts:new Date().toISOString()}));
+// Endpoints públicos de disponibilidade: não expõem nome do sistema,
+// horário, commit, versão, ambiente ou detalhes de infraestrutura.
+app.get('/api/_version', (req, res) => res.json({ ok: true }));
 app.get('/api/saude', async (req, res) => {
-  let db_ok = false;
+  let dbOk = false;
   try {
     await pool.query('SELECT 1');
-    db_ok = true;
+    dbOk = true;
   } catch (_) {}
-  res.status(db_ok ? 200 : 503).json({
-    ok: db_ok,
-    sistema: process.env.SISTEMA_NOME,
-    hora: new Date().toISOString(),
-    db: db_ok ? 'ok' : 'unavailable'
-  });
+  res.status(dbOk ? 200 : 503).json({ ok: dbOk });
 });
 
 // ── CI: token admin sem 2FA ─────────────────────────────────────────────────
@@ -493,14 +503,9 @@ app.post('/api/ci/admin-token', async (req, res) => {
 // DEBUG FASE 6 — versão top-level (não depende do wrapper async)
 // /api/_debug/fase6 removido (dados internos de schema)
 
-// ETAPA 2: rota pública para diagnóstico de deploy (sem info sensível)
-app.get('/api/_build', (req, res) => res.json({
-  ok: true,
-  versao: '1.0.2',
-  etapa2: true,
-  refresh_disponivel: true,
-  hora: new Date().toISOString()
-}));
+// Sentinela pública de disponibilidade/deploy. Detalhes de build ficam fora
+// da resposta pública; diagnóstico detalhado deve ocorrer por CI/observabilidade.
+app.get('/api/_build', (req, res) => res.json({ ok: true }));
 
 // =========================================================================
 // ROTAS DE DEBUG (APENAS DESENVOLVIMENTO / DEBUG EXPLÍCITO)
@@ -947,7 +952,8 @@ app.post('/api/candidato/verificar', rateLimitLogin, async (req, res) => {
   if (!email || !codigo) return res.status(400).json({ erro: 'E-mail e código obrigatórios' });
 
   const { rows } = await pool.query(
-    `SELECT * FROM codigos_verificacao
+    `SELECT id, email, codigo, expira_em, usado
+     FROM codigos_verificacao
      WHERE email = $1 AND codigo = $2 AND usado = false AND expira_em > NOW()
      ORDER BY id DESC LIMIT 1`,
     [email.toLowerCase(), codigo]
@@ -989,10 +995,9 @@ app.post('/api/candidato/verificar', rateLimitLogin, async (req, res) => {
 // Os dados ausentes permanecem vazios para preenchimento manual no wizard.
 app.post('/api/candidato/analisar-curriculo', rateLimitByIp('upload'), async (req, res) => {
   try {
-    const raw = String(req.body?.arquivo_base64 || '').replace(/^data:application\/pdf;base64,/, '');
-    if (!raw || raw.length > 10 * 1024 * 1024) return res.status(400).json({ erro: 'Arquivo inválido ou maior que o limite permitido.' });
-    const buffer = Buffer.from(raw, 'base64');
-    if (buffer.length > 7 * 1024 * 1024 || buffer.slice(0, 4).toString() !== '%PDF') return res.status(400).json({ erro: 'Envie um arquivo PDF válido de até 7 MB.' });
+    const validacao = validateBase64File(req.body?.arquivo_base64, 'application/pdf', 7 * 1024 * 1024, req.body?.arquivo_nome);
+    if (!validacao.ok) return res.status(400).json({ erro: 'Envie um arquivo PDF válido de até 7 MB.' });
+    const buffer = validacao.buffer;
     const resultado = await analisarCurriculo(buffer);
     return res.json({ ok: true, dados: resultado.dados, estrutura: resultado.estrutura, diagnostico: resultado.diagnostico, arquivo_nome: req.body?.arquivo_nome || 'curriculo.pdf' });
   } catch (e) {
@@ -1660,7 +1665,7 @@ app.post('/api/candidato/candidatar/:vagaId', authCandidato, async (req, res) =>
     const { rows } = await pool.query(
       `INSERT INTO candidaturas (vaga_id, candidato_id, status, etapa_atual, historico)
        VALUES ($1, $2, 'em_andamento', 0, $3)
-       RETURNING *`,
+       RETURNING id, vaga_id, candidato_id, status, etapa_atual, historico, criada_em`,
       [req.params.vagaId, c[0].id, JSON.stringify([
         { etapa: 0, status: 'concluida', acao: 'inscricao', data: new Date().toISOString(), mensagem: 'Inscrição realizada' }
       ])]
@@ -1737,14 +1742,13 @@ app.post('/api/candidato/candidatar/:vagaId', authCandidato, async (req, res) =>
 // Upload / atualização da foto de perfil (base64 inline — sem storage externo)
 app.put('/api/candidato/foto', authCandidato, async (req, res) => {
   const { foto_url } = req.body;
-  if (!foto_url) return res.status(400).json({ erro: 'foto_url é obrigatório' });
-  if (typeof foto_url !== 'string' || !foto_url.startsWith('data:image/')) {
-    return res.status(400).json({ erro: 'Formato inválido (esperado data:image/...)' });
+  if (!foto_url || typeof foto_url !== 'string') return res.status(400).json({ erro: 'foto_url é obrigatório' });
+  const fotoMime = foto_url.match(/^data:([^;,]+);base64,/i)?.[1]?.toLowerCase();
+  if (!fotoMime || !['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'].includes(fotoMime)) {
+    return res.status(400).json({ erro: 'Formato de imagem não permitido' });
   }
-  // Limite ~6.7MB encoded (5MB original)
-  if (foto_url.length > 7 * 1024 * 1024) {
-    return res.status(413).json({ erro: 'Imagem muito grande (máx ~5MB)' });
-  }
+  const fotoValidada = validateBase64File(foto_url, fotoMime, 5 * 1024 * 1024);
+  if (!fotoValidada.ok) return res.status(400).json({ erro: fotoValidada.erro });
   try {
     const { rows } = await pool.query(
       'UPDATE candidatos SET foto_url = $1 WHERE email = $2 RETURNING foto_url',
@@ -1910,7 +1914,7 @@ app.post('/api/admin/login', rateLimitLogin, async (req, res) => {
                 <h2 style="margin:0;font-size:20px">Vagas.io</h2>
               </div>
               <div style="background: #fff; padding: 28px 24px; border-radius: 8px; margin-top: 16px;">
-                <p style="color: #2b2b2b; font-size: 15px; line-height: 1.5;">Olá, <strong>${nome}</strong>!</p>
+                <p style="color: #2b2b2b; font-size: 15px; line-height: 1.5;">Olá, <strong>${escapeEmailHtml(nome)}</strong>!</p>
                 <p style="color: #2b2b2b; font-size: 15px; line-height: 1.5;">Seu código de verificação é:</p>
                 <div style="text-align:center;margin:24px 0;padding:16px;background:#f5f5f5;border-radius:8px;font-size:32px;font-weight:bold;letter-spacing:8px;color:#7a1f3d">${codigo}</div>
                 <p style="color: #888; font-size: 13px;">Este código expira em 10 minutos.</p>
@@ -1999,7 +2003,7 @@ app.post('/api/admin/2fa/reenviar', rateLimitByIp('twofa'), async (req, res) => 
                   <h2 style="margin:0;font-size:20px">Vagas.io</h2>
                 </div>
                 <div style="background: #fff; padding: 28px 24px; border-radius: 8px; margin-top: 16px;">
-                  <p style="color: #2b2b2b; font-size: 15px; line-height: 1.5;">Olá, <strong>${r.rows[0].nome}</strong>!</p>
+                  <p style="color: #2b2b2b; font-size: 15px; line-height: 1.5;">Olá, <strong>${escapeEmailHtml(r.rows[0].nome)}</strong>!</p>
                   <p style="color: #2b2b2b; font-size: 15px; line-height: 1.5;">Seu novo código de verificação é:</p>
                   <div style="text-align:center;margin:24px 0;padding:16px;background:#f5f5f5;border-radius:8px;font-size:32px;font-weight:bold;letter-spacing:8px;color:#7a1f3d">${novoCodigo}</div>
                   <p style="color: #888; font-size: 13px;">Este código expira em 10 minutos.</p>
@@ -2516,7 +2520,8 @@ app.post('/api/admin/vagas', authAdmin, async (req, res) => {
     ];
     const { rows } = await pool.query(
       `INSERT INTO vagas (titulo, empresa, cidade, estado, tipo_contrato, nivel, area, salario_min, salario_max, descricao, requisitos, beneficios, etapas, criada_por)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+       RETURNING id, titulo, empresa, empresa_id, cidade, estado, tipo_contrato, nivel, area, salario_min, salario_max, descricao, requisitos, beneficios, etapas, status, criada_por, criada_em`,
       [v.titulo, v.empresa, v.cidade, v.estado, v.tipo_contrato, v.nivel, v.area, v.salario_min, v.salario_max, v.descricao, v.requisitos, v.beneficios, JSON.stringify(etapas), req.user.id]
     );
     await audit(req, 'admin.vaga.created', { resource_type: 'vaga', resource_id: rows[0].id, metadata: { titulo: v.titulo, empresa: v.empresa } });
@@ -2728,7 +2733,7 @@ app.put('/api/admin/vagas/:id', authAdmin, async (req, res) => {
   if (updates.length === 0) return res.status(400).json({ erro: 'Nenhum campo para atualizar' });
   values.push(req.params.id);
   const { rows } = await pool.query(
-    `UPDATE vagas SET ${updates.join(', ')} WHERE id = $${values.length} RETURNING *`,
+    `UPDATE vagas SET ${updates.join(', ')} WHERE id = $${values.length} RETURNING id, titulo, empresa, empresa_id, cidade, estado, tipo_contrato, nivel, area, salario_min, salario_max, descricao, requisitos, beneficios, etapas, status, criada_por, criada_em`,
     values
   );
   if (rows.length === 0) return res.status(404).json({ erro: 'Vaga não encontrada' });
@@ -2749,7 +2754,13 @@ app.delete('/api/admin/vagas/:id', authAdmin, async (req, res) => {
 
 app.get('/api/admin/vagas/:id', authAdmin, async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT * FROM vagas WHERE id = $1', [req.params.id]);
+    const { rows } = await pool.query(
+      `SELECT id, titulo, empresa, empresa_id, cidade, estado, tipo_contrato, nivel, area,
+              salario_min, salario_max, descricao, requisitos, beneficios, etapas, status,
+              criada_por, criada_em, atualizada_em
+       FROM vagas WHERE id = $1`,
+      [req.params.id]
+    );
     if (rows.length === 0) return res.status(404).json({ erro: 'Vaga não encontrada' });
     res.json({ vaga: rows[0] });
   } catch (e) {
@@ -2866,7 +2877,13 @@ app.get('/api/admin/vagas-com-candidaturas', authAdmin, async (req, res) => {
 app.get('/api/admin/vagas/:id/candidaturas', authAdmin, async (req, res) => {
   try {
     const vagaId = req.params.id;
-    const { rows: vagaRows } = await pool.query('SELECT * FROM vagas WHERE id = $1', [vagaId]);
+    const { rows: vagaRows } = await pool.query(
+      `SELECT id, titulo, empresa, empresa_id, cidade, estado, tipo_contrato, nivel, area,
+              salario_min, salario_max, descricao, requisitos, beneficios, etapas, status,
+              criada_por, criada_em, atualizada_em
+       FROM vagas WHERE id = $1`,
+      [vagaId]
+    );
     if (vagaRows.length === 0) return res.status(404).json({ erro: 'Vaga não encontrada' });
     const vaga = vagaRows[0];
     const { rows } = await pool.query(`
@@ -2907,14 +2924,16 @@ app.get('/api/admin/candidatura/:id', authAdmin, async (req, res) => {
 
     // Buscar experiencias do candidato
     const { rows: exps } = await pool.query(
-      'SELECT * FROM experiencias WHERE candidato_id = $1 ORDER BY inicio DESC NULLS LAST, id DESC',
+      'SELECT id, candidato_id, cargo, empresa, inicio, fim, emprego_atual, descricao FROM experiencias WHERE candidato_id = $1 ORDER BY inicio DESC NULLS LAST, id DESC',
       [candidatura.candidato_id]
     );
     candidatura.experiencias = exps;
 
     // Buscar entrevistas (a mais recente ativa vence; canceladas não contam)
     const { rows: entrevistas } = await pool.query(
-      `SELECT * FROM entrevistas
+      `SELECT id, candidatura_id, etapa, data_hora, duracao_minutos, local,
+              link_reuniao, observacoes, status, criado_em, criado_por
+       FROM entrevistas
        WHERE candidatura_id = $1 AND status != 'cancelada'
        ORDER BY criado_em DESC`,
       [req.params.id]
@@ -2977,11 +2996,16 @@ app.post('/api/candidatura/:id/documentos', authCandidato, async (req, res) => {
     if (!Array.isArray(documentos) || documentos.length === 0) {
       return res.status(400).json({ erro: 'Nenhum documento enviado' });
     }
-    // Limite: 5MB em base64 (~3.7MB binário)
-    const MAX = 5 * 1024 * 1024;
+    // Valida todos os arquivos antes de apagar envios anteriores.
+    const MAX_BYTES = 5 * 1024 * 1024;
     for (const d of documentos) {
-      if (d.arquivo_base64 && d.arquivo_base64.length > MAX) {
-        return res.status(413).json({ erro: `Arquivo "${d.arquivo_nome || d.tipo}" passa de 5MB.` });
+      if (!d.arquivo_base64) continue;
+      const mime = d.arquivo_tipo || d.arquivo_base64.match(/^data:([^;,]+);base64,/i)?.[1];
+      const validacao = validateBase64File(d.arquivo_base64, mime, MAX_BYTES, d.arquivo_nome);
+      if (!validacao.ok) {
+        return res.status(validacao.erro.includes('maior') ? 413 : 400).json({
+          erro: `Arquivo "${d.arquivo_nome || d.tipo || 'anexo'}": ${validacao.erro}`
+        });
       }
     }
     // Apaga envios anteriores do mesmo tipo (candidato pode reenviar)
@@ -3515,7 +3539,7 @@ app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
     const r = await pool.query(`
       INSERT INTO entrevistas (candidatura_id, etapa, data_hora, duracao_minutos, local, link_reuniao, google_event_id, observacoes, criado_por)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-      RETURNING *
+      RETURNING id, candidatura_id, etapa, data_hora, duracao_minutos, local, link_reuniao, google_event_id, observacoes, status, criado_em, criado_por
     `, [candidatura_id, etapa, dataHoraFinal, duracao_minutos || 60, local || null, linkGerado, googleEventId, observacoes || null, req.admin?.id || null]);
     const entrevista = r.rows[0];
     // Adiciona no histórico da candidatura
@@ -3571,7 +3595,7 @@ app.post('/api/admin/entrevista/:id/cancelar', authAdmin, async (req, res) => {
     const id = parseInt(req.params.id);
     const { motivo } = req.body || {};
 
-    const { rows: eRows } = await pool.query('SELECT * FROM entrevistas WHERE id = $1', [id]);
+    const { rows: eRows } = await pool.query('SELECT id, candidatura_id, etapa, data_hora, duracao_minutos, local, link_reuniao, google_event_id, observacoes, status, criado_em, criado_por FROM entrevistas WHERE id = $1', [id]);
     if (eRows.length === 0) return res.status(404).json({ erro: 'Entrevista não encontrada' });
     const entrevista = eRows[0];
 
@@ -3681,7 +3705,8 @@ app.put('/api/admin/entrevista/:id', authAdmin, async (req, res) => {
     if (updates.length === 0) return res.status(400).json({ erro: 'Nada para atualizar' });
     updates.push(`atualizado_em = NOW()`);
     values.push(req.params.id);
-    const r = await pool.query(`UPDATE entrevistas SET ${updates.join(', ')} WHERE id = $${i} RETURNING *`, values);
+    const r = await pool.query(`UPDATE entrevistas SET ${updates.join(', ')} WHERE id = $${i}
+      RETURNING id, candidatura_id, etapa, data_hora, duracao_minutos, local, link_reuniao, google_event_id, observacoes, status, criado_em, criado_por`, values);
     if (r.rows.length === 0) return res.status(404).json({ erro: 'Entrevista não encontrada' });
     res.json({ ok: true, entrevista: r.rows[0] });
   } catch (e) {
@@ -3800,10 +3825,15 @@ app.post('/api/admin/candidatura/:id/status', authAdmin, async (req, res) => {
     observacoes[String(cand.etapa_atual || 0)] = String(comentario).trim();
   }
 
-  await pool.query(
-    'UPDATE candidaturas SET status = $1, etapa_atual = $2, historico = $3, observacoes_etapas = $4 WHERE id = $5',
-    [novoStatus, novaEtapa, JSON.stringify(historico), JSON.stringify(observacoes), req.params.id]
+  const atualizacao = await pool.query(
+    `UPDATE candidaturas
+     SET status = $1, etapa_atual = $2, historico = $3, observacoes_etapas = $4
+     WHERE id = $5 AND etapa_atual = $6 AND status = $7`,
+    [novoStatus, novaEtapa, JSON.stringify(historico), JSON.stringify(observacoes), req.params.id, cand.etapa_atual, cand.status]
   );
+  if (atualizacao.rowCount !== 1) {
+    return res.status(409).json({ erro: 'A candidatura foi alterada por outra requisição. Recarregue e tente novamente.' });
+  }
 
   // FASE 7 — notificação no feed global (ação manual do admin/recrutador)
   {
@@ -4019,7 +4049,7 @@ app.post('/api/chat/:candidatura_id/mensagens', authCandidatoOrAdminStrict, asyn
     const autorNome = req.user.tipo === 'admin' ? (req.user.nome || 'Recrutador') : c.cand_nome;
 
     const { rows: msg } = await pool.query(
-      'INSERT INTO mensagens_processo (candidatura_id, autor_tipo, autor_nome, texto, contexto) VALUES ($1,$2,$3,$4,$5) RETURNING *',
+      'INSERT INTO mensagens_processo (candidatura_id, autor_tipo, autor_nome, texto, contexto) VALUES ($1,$2,$3,$4,$5) RETURNING id, candidatura_id, autor_tipo, autor_nome, texto, contexto, criado_em, remetente_id',
       [cid, autorTipo, autorNome, textoLimpo, 'chat']
     );
 
@@ -4065,11 +4095,6 @@ app.post('/api/chat/:candidatura_id/upload', authCandidatoOrAdminStrict, rateLim
     if (!arquivo || !arquivo.nome || !arquivo.mime || !arquivo.base64) {
       return res.status(400).json({ erro: 'Arquivo inválido' });
     }
-    // Valida tamanho (base64 fica ~33% maior; 8MB base64 = ~6MB real)
-    if (arquivo.base64.length > 8 * 1024 * 1024) {
-      return res.status(413).json({ erro: 'Arquivo muito grande. Limite: 6MB' });
-    }
-    // Valida tipo (whitelist básico)
     const mimePermitidos = [
       'image/jpeg','image/jpg','image/png','image/gif','image/webp',
       'application/pdf',
@@ -4082,11 +4107,13 @@ app.post('/api/chat/:candidatura_id/upload', authCandidatoOrAdminStrict, rateLim
     if (!mimePermitidos.includes(arquivo.mime)) {
       return res.status(400).json({ erro: 'Tipo de arquivo não permitido' });
     }
-    // Calcula tamanho real (base64 -> bytes)
-    const tamanhoBytes = Math.floor(arquivo.base64.length * 3 / 4);
-    if (tamanhoBytes > 6 * 1024 * 1024) {
-      return res.status(413).json({ erro: 'Arquivo muito grande. Limite: 6MB' });
+    // Valida conteúdo real e tamanho binário antes de gravar mensagem/arquivo.
+    const arquivoValidado = validateBase64File(arquivo.base64, arquivo.mime, 6 * 1024 * 1024, arquivo.nome);
+    if (!arquivoValidado.ok) {
+      return res.status(arquivoValidado.erro.includes('maior') ? 413 : 400).json({ erro: arquivoValidado.erro });
     }
+    const base64Canonico = arquivoValidado.buffer.toString('base64');
+    const tamanhoBytes = arquivoValidado.buffer.length;
     // Verifica permissão (igual endpoint de mensagens)
     const { rows: cand } = await pool.query(`
       SELECT c.id, c.candidato_id, cd.email, cd.nome as cand_nome, v.titulo
@@ -4111,14 +4138,14 @@ app.post('/api/chat/:candidatura_id/upload', authCandidatoOrAdminStrict, rateLim
     const textoFinal = sanitizeText((texto && texto.trim()) || `📎 ${arquivoNomeSanitizado}`);
     // 1) Insere a mensagem
     const { rows: msgRows } = await pool.query(
-      'INSERT INTO mensagens_processo (candidatura_id, autor_tipo, autor_nome, texto, contexto) VALUES ($1,$2,$3,$4,$5) RETURNING *',
+      'INSERT INTO mensagens_processo (candidatura_id, autor_tipo, autor_nome, texto, contexto) VALUES ($1,$2,$3,$4,$5) RETURNING id, candidatura_id, autor_tipo, autor_nome, texto, contexto, criado_em, remetente_id',
       [cid, autorTipo, autorNome, textoFinal, 'chat']
     );
     const msg = msgRows[0];
     // 2) Insere o arquivo vinculado
     const { rows: arqRows } = await pool.query(
       'INSERT INTO chat_arquivos (mensagem_id, candidatura_id, nome_original, mime_type, tamanho_bytes, base64_data) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, nome_original, mime_type, tamanho_bytes',
-      [msg.id, cid, arquivoNomeSanitizado, arquivo.mime, tamanhoBytes, arquivo.base64]
+      [msg.id, cid, arquivoNomeSanitizado, arquivoValidado.mime, tamanhoBytes, base64Canonico]
     );
     res.json({ ok: true, mensagem: msg, arquivo: arqRows[0] });
   } catch (e) {
@@ -4245,7 +4272,7 @@ function indicesFluxoProposta(etapas) {
 // ===== Admin: enviar proposta ao candidato =====
 // Recebe texto da proposta + opcional PDF (data URL base64) ou já com URL pública
 app.post('/api/admin/candidatura/:id/enviar-proposta', authAdmin, async (req, res) => {
-  const { texto, pdf_url, pdf_public_id } = req.body;
+  const { texto, pdf_url, pdf_public_id, pdf_nome } = req.body;
   if (!texto && !pdf_url) return res.status(400).json({ erro: 'Envie um texto ou um PDF da proposta' });
 
   const { rows: c } = await pool.query(`
@@ -4261,11 +4288,16 @@ app.post('/api/admin/candidatura/:id/enviar-proposta', authAdmin, async (req, re
   let pdfFinalUrl = pdf_url || null;
   let pdfFinalId = pdf_public_id || null;
   if (pdf_url && String(pdf_url).startsWith('data:application/pdf')) {
+    const pdfValidado = validateBase64File(pdf_url, 'application/pdf', 6 * 1024 * 1024, pdf_nome);
+    if (!pdfValidado.ok) {
+      return res.status(pdfValidado.erro.includes('maior') ? 413 : 400).json({ erro: pdfValidado.erro });
+    }
     if (!process.env.CLOUDINARY_URL && !process.env.CLOUDINARY_CLOUD_NAME) {
       return res.status(500).json({ erro: 'Cloudinary não configurado para receber PDF' });
     }
     try {
-      const up = await cloudinary.uploader.upload(pdf_url, {
+      const pdfCanonico = `data:application/pdf;base64,${pdfValidado.buffer.toString('base64')}`;
+      const up = await cloudinary.uploader.upload(pdfCanonico, {
         folder: 'propostas',
         resource_type: 'raw',
         public_id: `proposta_${cand.id}_${Date.now()}`
@@ -4785,7 +4817,7 @@ app.post('/api/admin/empresas', authAdminOnly, async (req, res) => {
     }
     const { rows } = await pool.query(
       `INSERT INTO empresas (nome, cnpj, email_principal, telefone, criado_por, ativo, plano, plano_id, slug)
-       VALUES ($1,$2,$3,$4,$5,true,$6,$7,$8) RETURNING *`,
+       VALUES ($1,$2,$3,$4,$5,true,$6,$7,$8) RETURNING id, nome, cnpj, email_principal, telefone, criado_por, ativo, plano, plano_id, slug, criado_em`,
       [String(nome).trim(), cnpj || null, email_principal || null, telefone || null, req.user.id, planoSlug, planoId, slug]
     );
     const empresa = rows[0];
@@ -4826,7 +4858,7 @@ app.put('/api/admin/empresas/:id', authAdminOnly, async (req, res) => {
         email_principal = COALESCE($3, email_principal),
         telefone = COALESCE($4, telefone),
         ativo = COALESCE($5, ativo)
-       WHERE id = $6 RETURNING *`,
+       WHERE id = $6 RETURNING id, nome, cnpj, email_principal, telefone, ativo, plano, plano_id, slug, criado_em`,
       [nome, cnpj, email_principal, telefone, ativo, id]
     );
     if (rows.length === 0) return res.status(404).json({ erro: 'Empresa não encontrada' });
@@ -4920,7 +4952,7 @@ app.post('/api/admin/empresa-vaga', authAdminOnly, async (req, res) => {
       `INSERT INTO empresa_vaga_acesso (empresa_id, vaga_id, concedido_por, tipo)
        VALUES ($1,$2,$3,'propria')
        ON CONFLICT (empresa_id, vaga_id) DO NOTHING
-       RETURNING *`,
+       RETURNING empresa_id, vaga_id, concedido_por, concedido_em, tipo`,
       [empresa_id, vaga_id, req.user.id]
     );
     res.json({ ok: true, acesso: rows[0] || 'já existia' });
@@ -5237,7 +5269,9 @@ app.post('/api/empresa/vagas', requireRecrutadorOuAdmin, async (req, res) => {
         salario_min, salario_max, descricao, requisitos, beneficios,
         etapas, status, criada_por
       ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
-      RETURNING *`,
+      RETURNING id, titulo, empresa, empresa_id, cidade, estado, tipo_contrato, nivel, area,
+                salario_min, salario_max, descricao, requisitos, beneficios, etapas, status,
+                criada_por, criada_em`,
       [
         v.titulo,
         empresa_nome,         // TEXT legado
@@ -5358,7 +5392,7 @@ app.put('/api/empresa/vagas/:id', requireRecrutadorOuAdmin, async (req, res) => 
     if (updates.length === 0) return res.status(400).json({ erro: 'Nenhum campo para atualizar' });
     values.push(id);
     const { rows } = await pool.query(
-      `UPDATE vagas SET ${updates.join(', ')} WHERE id = $${values.length} RETURNING *`,
+      `UPDATE vagas SET ${updates.join(', ')} WHERE id = $${values.length} RETURNING id, titulo, empresa, empresa_id, cidade, estado, tipo_contrato, nivel, area, salario_min, salario_max, descricao, requisitos, beneficios, etapas, status, criada_por, criada_em`,
       values
     );
     if (Array.isArray(v.filial_ids)) {
@@ -5398,7 +5432,7 @@ app.patch('/api/empresa/vagas/:id/status', requireRecrutadorOuAdmin, async (req,
       return res.status(403).json({ erro: 'Vaga não pertence à sua empresa ou não é editável neste contexto' });
     }
     const { rows } = await pool.query(
-      `UPDATE vagas SET status = $1 WHERE id = $2 RETURNING *`,
+      `UPDATE vagas SET status = $1 WHERE id = $2 RETURNING id, titulo, empresa, empresa_id, cidade, estado, tipo_contrato, nivel, area, salario_min, salario_max, descricao, requisitos, beneficios, etapas, status, criada_por, criada_em`,
       [status, id]
     );
     await audit(req, 'empresa.vaga.status_changed', { resource_type: 'vaga', resource_id: id, metadata: { status } });
@@ -5970,7 +6004,7 @@ app.get('/api/empresa/candidatura/:id', requireEmpresaViewer, async (req, res) =
 
     // Buscar experiencias do candidato (mesma tabela usada pelo admin)
     const { rows: exps } = await pool.query(
-      'SELECT * FROM experiencias WHERE candidato_id = $1 ORDER BY inicio DESC NULLS LAST, id DESC',
+      'SELECT id, candidato_id, cargo, empresa, inicio, fim, emprego_atual, descricao FROM experiencias WHERE candidato_id = $1 ORDER BY inicio DESC NULLS LAST, id DESC',
       [candidatura.candidato_id]
     );
     candidatura.experiencias = exps;
@@ -6130,10 +6164,15 @@ app.post('/api/empresa/candidatura/:id/acao', requireRecrutadorOuAdmin, async (r
       hist.push({ tipo: 'comentario', por: `empresa:${empresa_nome}`, quando: agora, texto: parecer });
     }
 
-    await pool.query(
-      `UPDATE candidaturas SET historico = $1::jsonb, status = $2, etapa_atual = $3, atualizada_em = NOW() WHERE id = $4`,
-      [JSON.stringify(hist), novoStatus, novaEtapa, id]
+    const atualizacao = await pool.query(
+      `UPDATE candidaturas
+       SET historico = $1::jsonb, status = $2, etapa_atual = $3, atualizada_em = NOW()
+       WHERE id = $4 AND etapa_atual = $5 AND status = $6`,
+      [JSON.stringify(hist), novoStatus, novaEtapa, id, cand.etapa_atual, cand.status]
     );
+    if (atualizacao.rowCount !== 1) {
+      return res.status(409).json({ erro: 'A candidatura foi alterada por outra requisição. Recarregue e tente novamente.' });
+    }
 
     // [Fase 8] empresa_notificacoes substituída por notificacoes (Fase 7) — INSERT removido.
 
@@ -6337,10 +6376,16 @@ app.patch('/api/empresa/candidaturas/:id/etapa', requireRecrutadorOuAdmin, async
         );
       }
 
-      await pool.query(
-        `UPDATE candidaturas SET historico = $1::jsonb, etapa_atual = $2, status = $3, atualizada_em = NOW() WHERE id = $4`,
-        [JSON.stringify(hist), novaEtapa, novoStatus, id]
+      const atualizacao = await pool.query(
+        `UPDATE candidaturas
+         SET historico = $1::jsonb, etapa_atual = $2, status = $3, atualizada_em = NOW()
+         WHERE id = $4 AND etapa_atual = $5 AND status = $6`,
+        [JSON.stringify(hist), novaEtapa, novoStatus, id, cand.etapa_atual, cand.status]
       );
+      if (atualizacao.rowCount !== 1) {
+        await pool.query('ROLLBACK');
+        return res.status(409).json({ erro: 'A candidatura foi alterada por outra requisição. Recarregue e tente novamente.' });
+      }
 
       await pool.query('COMMIT');
     } catch (e) {
@@ -6898,7 +6943,9 @@ process.on('unhandledRejection', (e) => {
       const whereClause = wheres.length > 0 ? 'WHERE ' + wheres.join(' AND ') : '';
       const count = await pool.query(`SELECT COUNT(*) FROM audit_logs ${whereClause}`, values);
       const { rows } = await pool.query(
-        `SELECT * FROM audit_logs ${whereClause} ORDER BY created_at DESC LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
+        `SELECT id, user_id, user_type, user_email, action, resource_type,
+                resource_id, ip, user_agent, result, metadata, created_at
+         FROM audit_logs ${whereClause} ORDER BY created_at DESC LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
         [...values, queryLimit, queryOffset]
       );
       res.json({ logs: rows, total: parseInt(count.rows[0].count, 10) });
@@ -6947,9 +6994,8 @@ process.on('unhandledRejection', (e) => {
   // =========================================================================
   // REFRESH TOKEN (Etapa 2, 2026-07-27)
   // =========================================================================
-  // Recebe refresh token (opaco, não JWT) → valida no DB → gera novo access + novo refresh.
-  // Implementa ROTAÇÃO: cada uso emite novo refresh e revoga o antigo. Reutilização
-  // do refresh antigo = comprometido → revoga TODOS os tokens do usuário.
+  // Recebe refresh token (opaco, não JWT) → consome atomicamente no DB →
+  // gera novo access + novo refresh. Reutilização do refresh antigo é rejeitada.
   app.post('/api/auth/refresh', async (req, res) => {
     try {
       const { refreshToken } = req.body || {};
@@ -6983,8 +7029,7 @@ process.on('unhandledRejection', (e) => {
         empresa_nome
       });
       const novoRefresh = criarRefreshToken();
-      // Revoga o refresh usado e persiste o novo (ROTAÇÃO)
-      await revogarRefresh(refreshToken, 'rotacionado');
+      // O refresh antigo já foi consumido atomicamente em consumirRefresh().
       await persistirRefresh(
         t.user_type,
         t.user_id,
@@ -8201,7 +8246,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
       `, [candidatoId, empresaId]);
       if (!rows.length) return res.status(404).json({ erro: 'Candidato não encontrado' });
       const { rows: experiencias } = await pool.query(
-        'SELECT * FROM experiencias WHERE candidato_id = $1 ORDER BY inicio DESC NULLS LAST, id DESC',
+        'SELECT id, candidato_id, cargo, empresa, inicio, fim, emprego_atual, descricao FROM experiencias WHERE candidato_id = $1 ORDER BY inicio DESC NULLS LAST, id DESC',
         [candidatoId]
       );
       const candidato = { ...rows[0], experiencias };
