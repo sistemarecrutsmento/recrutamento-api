@@ -493,7 +493,14 @@ async function init() {
       console.error('[MIGRATION 013] Erro não tratado (mas segui):', migrationErr.message);
     }
 
-    console.log('Tabelas criadas/verificadas + migrations Fase 1-013 aplicadas');
+    try {
+      const { up: migration014 } = require('./migrations/014_empresa_vaga_filiais');
+      await migration014();
+    } catch (migrationErr) {
+      console.error('[MIGRATION 014] Erro não tratado (mas segui):', migrationErr.message);
+    }
+
+    console.log('Tabelas criadas/verificadas + migrations Fase 1-014 aplicadas');
   } finally {
     client.release();
   }

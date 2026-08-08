@@ -4949,7 +4949,7 @@ app.get('/api/admin/empresa-vaga/:empresa_id', authAdmin, async (req, res) => {
       SELECT v.id, v.titulo, v.empresa, v.status, eva.concedido_em
       FROM empresa_vaga_acesso eva
       JOIN vagas v ON v.id = eva.vaga_id
-      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL
+      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)}
       ORDER BY v.titulo
     `, [empresa_id]);
     res.json({ vagas: rows });
@@ -5261,6 +5261,15 @@ app.post('/api/empresa/vagas', requireRecrutadorOuAdmin, async (req, res) => {
     );
     const vaga = vagaRows[0];
 
+    // Direcionamento opcional para usuários Filial da própria empresa.
+    const filialIds = Array.isArray(v.filial_ids) ? [...new Set(v.filial_ids.map(Number).filter(Number.isInteger))] : [];
+    if (filialIds.length) {
+      await pool.query(`INSERT INTO empresa_usuario_vagas (empresa_id, usuario_id, vaga_id)
+        SELECT $1, eu.id, $2 FROM empresa_usuarios eu
+        WHERE eu.empresa_id = $1 AND eu.role = 'viewer' AND eu.ativo = true AND eu.id = ANY($3::int[])
+        ON CONFLICT (empresa_id, usuario_id, vaga_id) DO NOTHING`, [empresa_id, vaga.id, filialIds]);
+    }
+
     // Vincula automaticamente a vaga à empresa (pra ela ver no dashboard)
     // NOTA: concedido_por é FK pra admins(id). Como o usuário é empresa_usuarios (não admin),
     // passamos NULL pra evitar violação de FK. Auto-criação é da própria empresa.
@@ -5302,7 +5311,7 @@ app.get('/api/empresa/vagas', requireEmpresaViewer, async (req, res) => {
         END AS origem
       FROM empresa_vaga_acesso eva
       JOIN vagas v ON v.id = eva.vaga_id
-      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL
+      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)}
       ORDER BY eva.concedido_em DESC
     `, [empresa_id]);
     res.json({ vagas: rows });
@@ -5348,6 +5357,14 @@ app.put('/api/empresa/vagas/:id', requireRecrutadorOuAdmin, async (req, res) => 
       `UPDATE vagas SET ${updates.join(', ')} WHERE id = $${values.length} RETURNING *`,
       values
     );
+    if (Array.isArray(v.filial_ids)) {
+      const filialIds = [...new Set(v.filial_ids.map(Number).filter(Number.isInteger))];
+      await pool.query('DELETE FROM empresa_usuario_vagas WHERE empresa_id = $1 AND vaga_id = $2', [empresa_id, id]);
+      if (filialIds.length) await pool.query(`INSERT INTO empresa_usuario_vagas (empresa_id, usuario_id, vaga_id)
+        SELECT $1, eu.id, $2 FROM empresa_usuarios eu
+        WHERE eu.empresa_id = $1 AND eu.role = 'viewer' AND eu.ativo = true AND eu.id = ANY($3::int[])
+        ON CONFLICT (empresa_id, usuario_id, vaga_id) DO NOTHING`, [empresa_id, id, filialIds]);
+    }
     await audit(req, 'empresa.vaga.updated', { resource_type: 'vaga', resource_id: id, metadata: { campos: Object.keys(v) } });
     res.json({ ok: true, vaga: rows[0] });
   } catch (e) {
@@ -5380,6 +5397,15 @@ app.patch('/api/empresa/vagas/:id/status', requireRecrutadorOuAdmin, async (req,
   }
 });
 
+// Filiais só enxergam vagas explicitamente direcionadas a elas.
+function empresaVagaFilialScope(req, alias = 'eva') {
+  if (req.user?.role !== 'viewer') return 'TRUE';
+  const uid = Number(req.user?.id);
+  return Number.isInteger(uid) && uid > 0
+    ? `EXISTS (SELECT 1 FROM empresa_usuario_vagas euv_scope WHERE euv_scope.empresa_id = ${alias}.empresa_id AND euv_scope.usuario_id = ${uid} AND euv_scope.vaga_id = ${alias}.vaga_id)`
+    : 'FALSE';
+}
+
 // Dashboard da empresa
 app.get('/api/empresa/dashboard', requireEmpresaViewer, async (req, res) => {
   const { empresa_id } = req.user;
@@ -5401,7 +5427,7 @@ app.get('/api/empresa/dashboard', requireEmpresaViewer, async (req, res) => {
         (SELECT COUNT(*) FROM candidaturas c WHERE c.vaga_id = v.id AND c.status = 'contratado') as contratados
       FROM empresa_vaga_acesso eva
       JOIN vagas v ON v.id = eva.vaga_id
-      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL
+      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)}
       ORDER BY v.criada_em DESC
     `, [empresa_id]);
 
@@ -5409,43 +5435,43 @@ app.get('/api/empresa/dashboard', requireEmpresaViewer, async (req, res) => {
     const kpis = await pool.query(`
       SELECT
         (SELECT COUNT(*) FROM vagas v JOIN empresa_vaga_acesso eva ON eva.vaga_id = v.id AND eva.revogado_em IS NULL
-         WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND v.status = 'publicada')::int as vagas_ativas,
+         WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)} AND v.status = 'publicada')::int as vagas_ativas,
         (SELECT COUNT(*) FROM vagas v JOIN empresa_vaga_acesso eva ON eva.vaga_id = v.id AND eva.revogado_em IS NULL
-         WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND v.status = 'publicada' AND v.criada_em > $2)::int as vagas_ativas_novas_7d,
+         WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)} AND v.status = 'publicada' AND v.criada_em > $2)::int as vagas_ativas_novas_7d,
         (SELECT COUNT(*) FROM vagas v JOIN empresa_vaga_acesso eva ON eva.vaga_id = v.id AND eva.revogado_em IS NULL
-         WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND v.status = 'publicada' AND v.criada_em > $3)::int as vagas_ativas_novas_14d,
+         WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)} AND v.status = 'publicada' AND v.criada_em > $3)::int as vagas_ativas_novas_14d,
         (SELECT COUNT(DISTINCT c.candidato_id) FROM candidaturas c
          JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.revogado_em IS NULL
-         WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL)::int as total_candidatos,
+         WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)})::int as total_candidatos,
         (SELECT COUNT(DISTINCT c.candidato_id) FROM candidaturas c
          JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.revogado_em IS NULL
-         WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND c.criada_em > $2)::int as candidatos_novos_7d,
+         WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)} AND c.criada_em > $2)::int as candidatos_novos_7d,
         (SELECT COUNT(DISTINCT c.candidato_id) FROM candidaturas c
          JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.revogado_em IS NULL
-         WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND c.criada_em > $3)::int as candidatos_novos_14d,
+         WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)} AND c.criada_em > $3)::int as candidatos_novos_14d,
         (SELECT COUNT(*) FROM candidaturas c
          JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.revogado_em IS NULL
-         WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND c.status NOT IN ('reprovado','contratado','rejeitado'))::int as processos_ativos,
+         WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)} AND c.status NOT IN ('reprovado','contratado','rejeitado'))::int as processos_ativos,
         (SELECT COUNT(*) FROM candidaturas c
          JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.revogado_em IS NULL
-         WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND c.criada_em > $2)::int as processos_novos_7d,
+         WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)} AND c.criada_em > $2)::int as processos_novos_7d,
         (SELECT COUNT(*) FROM candidaturas c
          JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.revogado_em IS NULL
-         WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND c.criada_em > $3)::int as processos_novos_14d,
+         WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)} AND c.criada_em > $3)::int as processos_novos_14d,
         (SELECT COUNT(*) FROM entrevistas e
          JOIN candidaturas cand ON cand.id = e.candidatura_id
          JOIN empresa_vaga_acesso eva ON eva.vaga_id = cand.vaga_id AND eva.revogado_em IS NULL
-         WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND e.data_hora >= NOW() AND e.status = 'agendada')::int as entrevistas_agendadas,
+         WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)} AND e.data_hora >= NOW() AND e.status = 'agendada')::int as entrevistas_agendadas,
         (SELECT COUNT(*) FROM entrevistas e
          JOIN candidaturas cand ON cand.id = e.candidatura_id
          JOIN empresa_vaga_acesso eva ON eva.vaga_id = cand.vaga_id AND eva.revogado_em IS NULL
-         WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND e.data_hora >= NOW() AND e.data_hora < NOW() + INTERVAL '7 days' AND e.status = 'agendada')::int as entrevistas_proximos_7d,
+         WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)} AND e.data_hora >= NOW() AND e.data_hora < NOW() + INTERVAL '7 days' AND e.status = 'agendada')::int as entrevistas_proximos_7d,
         (SELECT COUNT(*) FROM candidaturas c
          JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.revogado_em IS NULL
-         WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND c.status IN ('contratado') AND c.atualizada_em > $4)::int as contratacoes_30d,
+         WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)} AND c.status IN ('contratado') AND c.atualizada_em > $4)::int as contratacoes_30d,
         (SELECT COUNT(*) FROM candidaturas c
          JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.revogado_em IS NULL
-         WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND c.status IN ('contratado') AND c.atualizada_em > $5 AND c.atualizada_em <= $4)::int as contratacoes_30d_anterior
+         WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)} AND c.status IN ('contratado') AND c.atualizada_em > $5 AND c.atualizada_em <= $4)::int as contratacoes_30d_anterior
     `, [empresa_id, sevenDaysAgo, fourteenDaysAgo, thirtyDaysAgo, sixtyDaysAgo]);
     const k = kpis.rows[0];
 
@@ -5454,7 +5480,7 @@ app.get('/api/empresa/dashboard', requireEmpresaViewer, async (req, res) => {
       SELECT c.etapa_atual, COUNT(*)::int as total
       FROM candidaturas c
       JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.revogado_em IS NULL
-      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND c.status NOT IN ('reprovado','rejeitado')
+      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)} AND c.status NOT IN ('reprovado','rejeitado')
       GROUP BY c.etapa_atual
       ORDER BY c.etapa_atual
     `, [empresa_id]);
@@ -5467,7 +5493,7 @@ app.get('/api/empresa/dashboard', requireEmpresaViewer, async (req, res) => {
       SELECT COALESCE(AVG(EXTRACT(DAY FROM (c.atualizada_em - c.criada_em))), 0)::int as dias
       FROM candidaturas c
       JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.revogado_em IS NULL
-      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND c.status IN ('contratado') AND c.atualizada_em IS NOT NULL
+      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)} AND c.status IN ('contratado') AND c.atualizada_em IS NOT NULL
     `, [empresa_id]);
     const tempoMedio = tempoMedioQ.rows[0]?.dias || 0;
 
@@ -5480,7 +5506,7 @@ app.get('/api/empresa/dashboard', requireEmpresaViewer, async (req, res) => {
       FROM vagas v
       JOIN empresa_vaga_acesso eva ON eva.vaga_id = v.id AND eva.revogado_em IS NULL
       LEFT JOIN candidaturas c ON c.vaga_id = v.id AND c.status IN ('contratado','rejeitado','reprovado')
-      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND v.status = 'fechada' AND v.criada_em > $2
+      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)} AND v.status = 'fechada' AND v.criada_em > $2
     `, [empresa_id, thirtyDaysAgo]);
     const total_fechadas_30d = taxa30Q.rows[0]?.total_fechadas || 0;
     const com_contratacao_30d = taxa30Q.rows[0]?.com_contratacao || 0;
@@ -5493,7 +5519,7 @@ app.get('/api/empresa/dashboard', requireEmpresaViewer, async (req, res) => {
       SELECT COUNT(*)::int as total
       FROM vagas v
       JOIN empresa_vaga_acesso eva ON eva.vaga_id = v.id AND eva.revogado_em IS NULL
-      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND v.status = 'fechada'
+      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)} AND v.status = 'fechada'
     `, [empresa_id]);
     const vagas_encerradas = encerradasQ.rows[0]?.total || 0;
 
@@ -5504,7 +5530,7 @@ app.get('/api/empresa/dashboard', requireEmpresaViewer, async (req, res) => {
         COUNT(*)::int as total
       FROM candidaturas c
       JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.revogado_em IS NULL
-      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL
+      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)}
     `, [empresa_id]);
     const reprovados = desistenciaQ.rows[0]?.reprovados || 0;
     const totalCand = desistenciaQ.rows[0]?.total || 0;
@@ -5520,7 +5546,7 @@ app.get('/api/empresa/dashboard', requireEmpresaViewer, async (req, res) => {
       JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.revogado_em IS NULL
       JOIN candidatos cd ON cd.id = c.candidato_id
       JOIN vagas v ON v.id = c.vaga_id
-      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND e.data_hora >= NOW() AND e.status = 'agendada'
+      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)} AND e.data_hora >= NOW() AND e.status = 'agendada'
       ORDER BY e.data_hora ASC
       LIMIT 10
     `, [empresa_id]);
@@ -5546,7 +5572,7 @@ app.get('/api/empresa/dashboard', requireEmpresaViewer, async (req, res) => {
         JOIN vagas v ON v.id = c.vaga_id
         JOIN candidatos cd ON cd.id = c.candidato_id
         CROSS JOIN LATERAL jsonb_array_elements(COALESCE(c.historico, '[]'::jsonb)) h
-        WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL
+        WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)}
           AND COALESCE(NULLIF(h->>'em','')::timestamptz,
                        NULLIF(h->>'data','')::timestamptz,
                        NULLIF(h->>'quando','')::timestamptz,
@@ -5577,7 +5603,7 @@ app.get('/api/empresa/dashboard', requireEmpresaViewer, async (req, res) => {
       JOIN empresa_vaga_acesso eva ON eva.vaga_id = v.id AND eva.revogado_em IS NULL
       LEFT JOIN candidaturas c ON c.vaga_id = v.id
         AND c.status NOT IN ('reprovado','rejeitado','contratado')
-      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL
+      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)}
       GROUP BY v.id, v.titulo, v.status, v.criada_em
       HAVING COUNT(c.id) > 0
       ORDER BY processos_ativos DESC, v.criada_em DESC
@@ -5590,7 +5616,7 @@ app.get('/api/empresa/dashboard', requireEmpresaViewer, async (req, res) => {
       FROM vagas v
       JOIN empresa_vaga_acesso eva ON eva.vaga_id = v.id AND eva.revogado_em IS NULL
       LEFT JOIN candidaturas c ON c.vaga_id = v.id
-      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL
+      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)}
         AND v.status = 'publicada' AND v.criada_em < NOW() - INTERVAL '30 days'
       GROUP BY v.id, v.titulo, v.status, v.criada_em
       ORDER BY v.criada_em ASC
@@ -5602,7 +5628,7 @@ app.get('/api/empresa/dashboard', requireEmpresaViewer, async (req, res) => {
       FROM vagas v
       JOIN empresa_vaga_acesso eva ON eva.vaga_id = v.id AND eva.revogado_em IS NULL
       LEFT JOIN candidaturas c ON c.vaga_id = v.id
-      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL
+      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)}
       GROUP BY v.id, v.titulo
       ORDER BY total_candidatos DESC
       LIMIT 5
@@ -5675,13 +5701,15 @@ app.get('/api/empresa/vagas/:vaga_id', requireEmpresaViewer, async (req, res) =>
   const { vaga_id } = req.params;
   try {
     const acesso = await pool.query(
-      'SELECT 1 FROM empresa_vaga_acesso WHERE empresa_id = $1 AND vaga_id = $2 AND revogado_em IS NULL',
+      `SELECT 1 FROM empresa_vaga_acesso eva WHERE eva.empresa_id = $1 AND eva.vaga_id = $2 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)}`,
       [empresa_id, vaga_id]
     );
     if (acesso.rows.length === 0) return res.status(403).json({ erro: 'Sem acesso a esta vaga' });
     const { rows } = await pool.query(
-      'SELECT id, titulo, empresa, cidade, estado, tipo_contrato, nivel, area, salario_min, salario_max, descricao, requisitos, beneficios, etapas, status, criada_em FROM vagas WHERE id = $1',
-      [vaga_id]
+      `SELECT v.id, v.titulo, v.empresa, v.cidade, v.estado, v.tipo_contrato, v.nivel, v.area, v.salario_min, v.salario_max, v.descricao, v.requisitos, v.beneficios, v.etapas, v.status, v.criada_em,
+        COALESCE((SELECT json_agg(euv.usuario_id) FROM empresa_usuario_vagas euv WHERE euv.empresa_id = $2 AND euv.vaga_id = v.id), '[]'::json) AS filial_ids
+       FROM vagas v WHERE v.id = $1`,
+      [vaga_id, empresa_id]
     );
     if (rows.length === 0) return res.status(404).json({ erro: 'Vaga não encontrada' });
     res.json({ vaga: rows[0] });
@@ -5698,7 +5726,7 @@ app.get('/api/empresa/vagas/:vaga_id/candidatos', requireEmpresaViewer, async (r
   try {
     // Verifica se a empresa tem acesso a essa vaga
     const acesso = await pool.query(
-      'SELECT 1 FROM empresa_vaga_acesso WHERE empresa_id = $1 AND vaga_id = $2 AND revogado_em IS NULL',
+      `SELECT 1 FROM empresa_vaga_acesso eva WHERE eva.empresa_id = $1 AND eva.vaga_id = $2 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)}`,
       [empresa_id, vaga_id]
     );
     if (acesso.rows.length === 0) return res.status(403).json({ erro: 'Sem acesso a esta vaga' });
@@ -5740,7 +5768,7 @@ app.get('/api/empresa/vagas-todas', requireEmpresaViewer, async (req, res) => {
           COUNT(*) FILTER (WHERE status = 'contratado') as contratados
         FROM candidaturas GROUP BY vaga_id
       ) c_agg ON c_agg.vaga_id = v.id
-      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL
+      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)}
       ORDER BY v.criada_em DESC
     `, [empresa_id]);
     res.json({ vagas: rows });
@@ -5764,7 +5792,7 @@ app.get('/api/empresa/vagas-com-candidaturas', requireEmpresaViewer, async (req,
       FROM empresa_vaga_acesso eva
       JOIN vagas v ON v.id = eva.vaga_id
       LEFT JOIN candidaturas c ON c.vaga_id = v.id
-      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL
+      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)}
       GROUP BY v.id
       HAVING COUNT(c.id) > 0
       ORDER BY v.criada_em DESC
@@ -5825,7 +5853,7 @@ app.get('/api/empresa/agenda', requireEmpresaViewer, async (req, res) => {
       JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.revogado_em IS NULL AND eva.empresa_id = $1
       JOIN candidatos cd ON cd.id = c.candidato_id
       JOIN vagas v ON v.id = c.vaga_id
-      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL ${whereExtra}
+      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)} ${whereExtra}
       ORDER BY e.data_hora ASC
     `, params);
     res.json({ entrevistas: rows });
@@ -5905,7 +5933,7 @@ app.get('/api/empresa/candidatura/:id', requireEmpresaViewer, async (req, res) =
              cd.primeiro_emprego, cd.sobre_voce, cd.experiencia, cd.foto_url,
              cd.areas_interesse, cd.banco_talentos,
              v.titulo as vaga_titulo, v.etapas, v.empresa as vaga_empresa, v.cidade as v_cidade, v.estado as v_estado,
-        (SELECT 1 FROM empresa_vaga_acesso WHERE empresa_id = $1 AND vaga_id = c.vaga_id AND revogado_em IS NULL) as tem_acesso
+        (SELECT 1 FROM empresa_vaga_acesso eva_scope WHERE eva_scope.empresa_id = $1 AND eva_scope.vaga_id = c.vaga_id AND eva_scope.revogado_em IS NULL AND ${empresaVagaFilialScope(req, 'eva_scope')}) as tem_acesso
       FROM candidaturas c
       JOIN candidatos cd ON cd.id = c.candidato_id
       JOIN vagas v ON v.id = c.vaga_id
@@ -5957,7 +5985,7 @@ app.get('/api/empresa/candidatura/:id/documentos', requireEmpresaViewer, async (
     // OWNERSHIP: empresa só vê docs de candidaturas de vagas vinculadas à empresa
     const { rows: cand } = await pool.query(
       `SELECT c.id, c.vaga_id,
-              (SELECT 1 FROM empresa_vaga_acesso WHERE empresa_id = $1 AND vaga_id = c.vaga_id AND revogado_em IS NULL) as tem_acesso
+              (SELECT 1 FROM empresa_vaga_acesso eva_scope WHERE eva_scope.empresa_id = $1 AND eva_scope.vaga_id = c.vaga_id AND eva_scope.revogado_em IS NULL AND ${empresaVagaFilialScope(req, 'eva_scope')}) as tem_acesso
        FROM candidaturas c WHERE c.id = $2`,
       [empresa_id, candidaturaId]
     );
@@ -6698,7 +6726,7 @@ app.get('/api/empresa/chat-rh-lista', requireEmpresaViewer, async (req, res) => 
       JOIN candidatos cand ON cand.id = c.candidato_id
       JOIN vagas v ON v.id = c.vaga_id
       JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.revogado_em IS NULL
-      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL
+      WHERE eva.empresa_id = $1 AND eva.revogado_em IS NULL AND ${empresaVagaFilialScope(req)}
         AND c.status NOT IN ('rejeitado', 'contratado', 'reprovado')
       ORDER BY ultima_data DESC NULLS LAST
     `, [empresa_id]);
@@ -8046,7 +8074,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
 
       // Base: candidatos que têm candidatura em vagas desta empresa
       // Permite filtrar por qualquer combinação de campos existentes
-      let where = [`eva.empresa_id = $1`];
+      let where = [`eva.empresa_id = $1`, empresaVagaFilialScope(req)];
       const params = [emp];
 
       if (q) {
@@ -8235,7 +8263,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
       const emp = req.user.empresa_id;
       // Verifica acesso da empresa à vaga
       const { rows: acesso } = await pool.query(
-        `SELECT 1 FROM empresa_vaga_acesso WHERE empresa_id = $1 AND vaga_id = $2 AND revogado_em IS NULL`, [emp, vagaId]
+        `SELECT 1 FROM empresa_vaga_acesso eva_scope WHERE eva_scope.empresa_id = $1 AND eva_scope.vaga_id = $2 AND eva_scope.revogado_em IS NULL AND ${empresaVagaFilialScope(req, 'eva_scope')}`, [emp, vagaId]
       );
       if (!acesso.length) return res.status(403).json({ erro: 'Sem acesso a esta vaga' });
 
@@ -8260,7 +8288,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
         return res.status(400).json({ erro: 'Tag inválida (1–60 caracteres)' });
       }
       const { rows: acesso } = await pool.query(
-        `SELECT 1 FROM empresa_vaga_acesso WHERE empresa_id = $1 AND vaga_id = $2 AND revogado_em IS NULL`, [emp, vagaId]
+        `SELECT 1 FROM empresa_vaga_acesso eva_scope WHERE eva_scope.empresa_id = $1 AND eva_scope.vaga_id = $2 AND eva_scope.revogado_em IS NULL AND ${empresaVagaFilialScope(req, 'eva_scope')}`, [emp, vagaId]
       );
       if (!acesso.length) return res.status(403).json({ erro: 'Sem acesso a esta vaga' });
 
@@ -8286,7 +8314,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
       const emp = req.user.empresa_id;
 
       const { rows: acesso } = await pool.query(
-        `SELECT 1 FROM empresa_vaga_acesso WHERE empresa_id = $1 AND vaga_id = $2 AND revogado_em IS NULL`, [emp, vagaId]
+        `SELECT 1 FROM empresa_vaga_acesso eva_scope WHERE eva_scope.empresa_id = $1 AND eva_scope.vaga_id = $2 AND eva_scope.revogado_em IS NULL AND ${empresaVagaFilialScope(req, 'eva_scope')}`, [emp, vagaId]
       );
       if (!acesso.length) return res.status(403).json({ erro: 'Sem acesso a esta vaga' });
 
@@ -8312,7 +8340,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
       const tagsList = [...new Set(tags.map(t => String(t).trim().toLowerCase()).filter(t => t.length > 0 && t.length <= 60))];
 
       const { rows: acesso } = await pool.query(
-        `SELECT 1 FROM empresa_vaga_acesso WHERE empresa_id = $1 AND vaga_id = $2 AND revogado_em IS NULL`, [emp, vagaId]
+        `SELECT 1 FROM empresa_vaga_acesso eva_scope WHERE eva_scope.empresa_id = $1 AND eva_scope.vaga_id = $2 AND eva_scope.revogado_em IS NULL AND ${empresaVagaFilialScope(req, 'eva_scope')}`, [emp, vagaId]
       );
       if (!acesso.length) return res.status(403).json({ erro: 'Sem acesso a esta vaga' });
 
