@@ -7217,15 +7217,16 @@ app.post('/api/empresa/convites', requireAdminOuRecrutadorEquipe, async (req, re
     }
     const expira = new Date(Date.now() + 7 * 86400000);
     const ins = await client.query(`INSERT INTO empresa_convites (empresa_id, nome, email, cargo, role, token_hash, expira_em, criado_por) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id, nome, email, cargo, role, criado_em, expira_em`, [empresaId, nome, email, cargo, role, tokenHash, expira, req.user.id]);
-    await enviarEmail({
+    await client.query('COMMIT');
+    // O convite já está salvo; o envio não pode manter a transação/DB bloqueados.
+    enviarEmailBg(enviarEmail, {
       to: email,
       subject: 'Convite para acessar o portal da empresa',
       html: `<p>Olá, ${escapeEmailHtml(nome)}.</p><p>Você recebeu um convite para acessar o portal da empresa como <strong>${escapeEmailHtml(role)}</strong>.</p><p>O convite expira em 7 dias.</p><p>Acesse pelo link abaixo e defina sua senha:</p><p>${escapeEmailHtml(inviteUrl)}</p>`,
       text: `Olá, ${nome}. Você recebeu um convite para acessar o portal da empresa como ${role}. O convite expira em 7 dias. Acesse: ${inviteUrl}`
     });
-    await client.query('COMMIT');
     await audit(req, 'empresa.convite.created', { resource_type: 'empresa_convite', resource_id: ins.rows[0].id, metadata: { empresa_id: empresaId, role } });
-    res.status(201).json({ ok: true, convite: ins.rows[0] });
+    res.status(201).json({ ok: true, convite: ins.rows[0], convite_url: inviteUrl });
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});
     console.error('[EMPRESA CONVITE POST]', e.message);
