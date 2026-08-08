@@ -42,7 +42,7 @@ const { criarAccessToken, criarRefreshToken, persistirRefresh, consumirRefresh, 
 
 // Email do admin pra receber notificações de ação do candidato
 const ADMIN_NOTIF_EMAIL = process.env.ADMIN_NOTIF_EMAIL || process.env.ADMIN_EMAIL || 'fabio08dejesusjunior@gmail.com';
-const { authMiddleware, authCandidato, authAdmin, authEmpresa, authAdminOnly, authCandidatoOrEmpresaOrAdmin, authCandidatoOrAdminStrict, requireAdminEmpresa, requireRecrutadorOuAdmin, requireEmpresaViewer, JWT_VERIFY_OPTIONS } = require('./auth');
+const { authMiddleware, authCandidato, authAdmin, authEmpresa, authAdminOnly, authCandidatoOrEmpresaOrAdmin, authCandidatoOrAdminStrict, requireAdminEmpresa, requireAdminOuRecrutadorEquipe, requireRecrutadorOuAdmin, requireEmpresaViewer, JWT_VERIFY_OPTIONS } = require('./auth');
 const { sanitizeText, sanitizeFilename, escapeContentDispositionFilename } = require('./sanitize');
 
 // =========================================================================
@@ -6973,7 +6973,7 @@ process.on('unhandledRejection', (e) => {
   // =========================================================================
 
   // Lista usuarios da empresa logada (read-only, qualquer role)
-  app.get('/api/empresa/usuarios', requireEmpresaViewer, async (req, res) => {
+  app.get('/api/empresa/usuarios', requireAdminOuRecrutadorEquipe, async (req, res) => {
     const { empresa_id } = req.user;
     try {
       const { rows } = await pool.query(`
@@ -7170,7 +7170,7 @@ function conviteFrontendUrl(req, rawToken) {
   } catch (_) { return null; }
 }
 
-app.get('/api/empresa/convites', requireAdminEmpresa, async (req, res) => {
+app.get('/api/empresa/convites', requireAdminOuRecrutadorEquipe, async (req, res) => {
   try {
     const { rows } = await pool.query(`
       SELECT id, nome, email, cargo, role, criado_em, expira_em, reenviado_em
@@ -7185,12 +7185,13 @@ app.get('/api/empresa/convites', requireAdminEmpresa, async (req, res) => {
   }
 });
 
-app.post('/api/empresa/convites', requireAdminEmpresa, async (req, res) => {
+app.post('/api/empresa/convites', requireAdminOuRecrutadorEquipe, async (req, res) => {
   const empresaId = req.user.empresa_id;
   const nome = String(req.body?.nome || '').trim();
   const email = String(req.body?.email || '').trim().toLowerCase();
   const cargo = String(req.body?.cargo || '').trim() || null;
   const role = String(req.body?.role || 'recrutador').trim();
+  if (req.user.role === 'recrutador' && role !== 'viewer') return res.status(403).json({ erro: 'Recrutadores só podem cadastrar usuários Filial' });
   if (!nome || !email || nome.length > 160 || email.length > 254 || cargo && cargo.length > 160 || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ erro: 'Nome e e-mail válidos são obrigatórios' });
   if (!['admin_empresa','recrutador','viewer'].includes(role)) return res.status(400).json({ erro: 'Função inválida' });
   const rawToken = crypto.randomBytes(32).toString('hex');
@@ -7345,7 +7346,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
   });
 
   // PUT /api/empresa/minha-empresa — atualiza perfil da empresa logada
-  app.put('/api/empresa/minha-empresa', requireRecrutadorOuAdmin, async (req, res) => {
+  app.put('/api/empresa/minha-empresa', requireAdminEmpresa, async (req, res) => {
     try {
       const { empresa_id } = req.user;
       const {
@@ -7677,7 +7678,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
   const { totpVerify, generateTotpSecret, totpOtpauthUrl, generateBackupCodes, verifyBackupCode } = require('./totp');
 
   // POST /api/empresa/2fa/iniciar — gera segredo TOTP e URL de QR Code (NÃO ativa ainda)
-  app.post('/api/empresa/2fa/iniciar', requireEmpresaViewer, async (req, res) => {
+  app.post('/api/empresa/2fa/iniciar', requireAdminEmpresa, async (req, res) => {
     try {
       const { id, email } = req.user;
       // Se já tem 2FA ativo, exige confirmação de senha para resetar
@@ -7704,7 +7705,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
   });
 
   // POST /api/empresa/2fa/confirmar — confirma e ATIVA o 2FA com primeiro código
-  app.post('/api/empresa/2fa/confirmar', requireEmpresaViewer, async (req, res) => {
+  app.post('/api/empresa/2fa/confirmar', requireAdminEmpresa, async (req, res) => {
     try {
       const { id } = req.user;
       const { codigo } = req.body || {};
@@ -7805,7 +7806,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
   });
 
   // POST /api/empresa/2fa/desativar — desativa 2FA com confirmação de senha
-  app.post('/api/empresa/2fa/desativar', requireEmpresaViewer, async (req, res) => {
+  app.post('/api/empresa/2fa/desativar', requireAdminEmpresa, async (req, res) => {
     try {
       const { id, email } = req.user;
       const { senha } = req.body || {};
@@ -9063,6 +9064,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
     return { user_type: null, user_id: null };
   }
   app.get('/api/email/preferencias', requireAuthAny, async (req, res) => {
+    if (req.user?.tipo === 'empresa' && req.user?.role !== 'admin_empresa') return res.status(403).json({ erro: 'Apenas o administrador pode acessar as preferências da conta' });
     try {
       const { user_type, user_id } = resolveEmailUser(req);
       if (!user_type) return res.status(401).json({ erro: 'Não autenticado' });
@@ -9076,6 +9078,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
 
   // PATCH /api/email/preferencias — altera uma ou mais categorias
   app.patch('/api/email/preferencias', requireAuthAny, async (req, res) => {
+    if (req.user?.tipo === 'empresa' && req.user?.role !== 'admin_empresa') return res.status(403).json({ erro: 'Apenas o administrador pode alterar as preferências da conta' });
     try {
       const { user_type, user_id } = resolveEmailUser(req);
       if (!user_type) return res.status(401).json({ erro: 'Não autenticado' });
