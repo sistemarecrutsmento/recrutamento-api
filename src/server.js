@@ -829,7 +829,7 @@ app.get('/api/cep/:cep', async (req, res) => {
   }
 });
 
-// Cache de falhas de SMTP: se Gmail falhou, devolvemos codigo_debug
+// Cache de falhas de SMTP: falhas são tratadas internamente, sem expor o código
 let smtpFalhando = false;
 async function enviarCodigoSeguro(email, codigo) {
   if (smtpFalhando) return false;
@@ -927,13 +927,11 @@ app.post('/api/candidato/iniciar', rateLimitByIp('iniciar'), async (req, res) =>
     [email.toLowerCase(), codigo, expira]
   );
 
-  // SEMPRE devolve o codigo_debug para o front mostrar (já que o SMTP do Gmail
-  // tem bloqueios contra IPs do Render). O front exibe um box amarelo com o código.
-  // O e-mail real TAMBÉM é disparado em background (caso funcione).
+  // O código permanece apenas no backend para envio por e-mail.
+  // Nunca deve ser incluído na resposta pública da API.
   const resposta = {
     ok: true,
-    mensagem: 'Código gerado',
-    codigo_debug: codigo
+    mensagem: 'Se o e-mail estiver apto para verificação, o código será enviado.'
   };
 
   // Tenta enviar em background (NUNCA bloqueia a resposta)
@@ -5326,9 +5324,15 @@ app.put('/api/empresa/vagas/:id', requireRecrutadorOuAdmin, async (req, res) => 
   try {
     const { id } = req.params;
     const { empresa_id } = req.user;
-    // Garante que a vaga pertence à empresa (via empresa_vaga_acesso)
+    // Acesso de visualização não equivale a permissão de edição.
+    // Esta rota só permite alterar vagas próprias da empresa autenticada.
     const check = await pool.query(
-      `SELECT 1 FROM empresa_vaga_acesso WHERE vaga_id = $1 AND empresa_id = $2`,
+      `SELECT 1
+       FROM vagas v
+       JOIN empresa_vaga_acesso eva ON eva.vaga_id = v.id
+         AND eva.empresa_id = $2 AND eva.revogado_em IS NULL
+       WHERE v.id = $1 AND v.empresa_id = $2
+         AND ${empresaVagaFilialScope(req, 'eva')}`,
       [id, empresa_id]
     );
     if (check.rows.length === 0) {
@@ -5381,9 +5385,17 @@ app.patch('/api/empresa/vagas/:id/status', requireRecrutadorOuAdmin, async (req,
     if (!['publicada', 'pausada', 'rascunho', 'encerrada'].includes(status)) {
       return res.status(400).json({ erro: 'Status inválido. Use: publicada, pausada, rascunho ou encerrada' });
     }
-    const check = await pool.query(`SELECT 1 FROM empresa_vaga_acesso WHERE vaga_id = $1 AND empresa_id = $2`, [id, req.user.empresa_id]);
+    // Alteração de status exige vaga própria, não apenas acesso compartilhado.
+    const check = await pool.query(`
+      SELECT 1
+      FROM vagas v
+      JOIN empresa_vaga_acesso eva ON eva.vaga_id = v.id
+        AND eva.empresa_id = $2 AND eva.revogado_em IS NULL
+      WHERE v.id = $1 AND v.empresa_id = $2
+        AND ${empresaVagaFilialScope(req, 'eva')}
+    `, [id, req.user.empresa_id]);
     if (check.rows.length === 0) {
-      return res.status(403).json({ erro: 'Vaga não pertence à sua empresa' });
+      return res.status(403).json({ erro: 'Vaga não pertence à sua empresa ou não é editável neste contexto' });
     }
     const { rows } = await pool.query(
       `UPDATE vagas SET status = $1 WHERE id = $2 RETURNING *`,
@@ -5403,6 +5415,15 @@ function empresaVagaFilialScope(req, alias = 'eva') {
   const uid = Number(req.user?.id);
   return Number.isInteger(uid) && uid > 0
     ? `EXISTS (SELECT 1 FROM empresa_usuario_vagas euv_scope WHERE euv_scope.empresa_id = ${alias}.empresa_id AND euv_scope.usuario_id = ${uid} AND euv_scope.vaga_id = ${alias}.vaga_id)`
+    : 'FALSE';
+}
+
+// Escopo equivalente quando a consulta parte diretamente de vagas (sem eva).
+function empresaVagaFilialScopeByVaga(req, alias = 'v') {
+  if (req.user?.role !== 'viewer') return 'TRUE';
+  const uid = Number(req.user?.id);
+  return Number.isInteger(uid) && uid > 0
+    ? `EXISTS (SELECT 1 FROM empresa_usuario_vagas euv_scope WHERE euv_scope.empresa_id = ${alias}.empresa_id AND euv_scope.usuario_id = ${uid} AND euv_scope.vaga_id = ${alias}.id)`
     : 'FALSE';
 }
 
@@ -5868,11 +5889,12 @@ app.get('/api/empresa/candidatura/:id/chat', requireEmpresaViewer, async (req, r
   const { empresa_id } = req.user;
   const { id } = req.params;
   try {
-    // Verifica acesso
+    // Verifica acesso, incluindo o escopo da filial para viewers.
     const acc = await pool.query(`
       SELECT c.id FROM candidaturas c
       JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.revogado_em IS NULL
       WHERE c.id = $1 AND eva.revogado_em IS NULL AND eva.empresa_id = $2
+        AND ${empresaVagaFilialScope(req, 'eva')}
     `, [id, empresa_id]);
     if (acc.rows.length === 0) return res.status(403).json({ erro: 'Sem acesso a esta candidatura' });
 
@@ -5900,11 +5922,12 @@ app.post('/api/empresa/candidatura/:id/chat', requireRecrutadorOuAdmin, async (r
   mensagem = sanitizeText(mensagem.trim());
   if (mensagem.length > 2000) return res.status(400).json({ erro: 'Mensagem muito longa (máx 2000 caracteres)' });
   try {
-    // Verifica acesso
+    // Verifica acesso, incluindo o escopo da filial para viewers.
     const acc = await pool.query(`
       SELECT c.id FROM candidaturas c
       JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.revogado_em IS NULL
       WHERE c.id = $1 AND eva.revogado_em IS NULL AND eva.empresa_id = $2
+        AND ${empresaVagaFilialScope(req, 'eva')}
     `, [id, empresa_id]);
     if (acc.rows.length === 0) return res.status(403).json({ erro: 'Sem acesso a esta candidatura' });
 
@@ -6023,6 +6046,7 @@ app.get('/api/empresa/candidatura/:id/documentos/:docId/arquivo', requireEmpresa
       JOIN candidaturas c ON c.id = d.candidatura_id
       JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id
         AND eva.empresa_id = $3 AND eva.revogado_em IS NULL
+        AND ${empresaVagaFilialScope(req, 'eva')}
       WHERE d.id = $1 AND d.candidatura_id = $2
       LIMIT 1
     `, [documentoId, candidaturaId, empresaId]);
@@ -6065,6 +6089,7 @@ app.post('/api/empresa/candidatura/:id/acao', requireRecrutadorOuAdmin, async (r
       JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.revogado_em IS NULL
       JOIN vagas v ON v.id = c.vaga_id
       WHERE c.id = $1 AND eva.revogado_em IS NULL AND eva.empresa_id = $2
+        AND ${empresaVagaFilialScope(req, 'eva')}
     `, [id, empresa_id]);
     if (acc.rows.length === 0) return res.status(403).json({ erro: 'Sem acesso a esta candidatura' });
     const cand = acc.rows[0];
@@ -6136,6 +6161,7 @@ app.post('/api/empresa/candidatura/:id/proposta', requireRecrutadorOuAdmin, asyn
       SELECT c.*, v.titulo, v.etapas, cd.nome, cd.email, cd.id AS candidato_id_full
       FROM candidaturas c
       JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.revogado_em IS NULL AND eva.empresa_id = $1
+        AND ${empresaVagaFilialScope(req, 'eva')}
       JOIN vagas v ON v.id = c.vaga_id
       JOIN candidatos cd ON cd.id = c.candidato_id
       WHERE c.id = $2
@@ -6212,6 +6238,7 @@ app.patch('/api/empresa/candidaturas/:id/etapa', requireRecrutadorOuAdmin, async
       JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.revogado_em IS NULL
       JOIN vagas v ON v.id = c.vaga_id
       WHERE c.id = $1 AND eva.revogado_em IS NULL AND eva.empresa_id = $2
+        AND ${empresaVagaFilialScope(req, 'eva')}
     `, [id, empresa_id]);
     if (acc.rows.length === 0) return res.status(403).json({ erro: 'Sem acesso a esta candidatura' });
     const cand = acc.rows[0];
@@ -6348,7 +6375,8 @@ app.get('/api/empresa/candidaturas/:id/historico', requireEmpresaViewer, async (
        FROM candidaturas c
        JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.revogado_em IS NULL
        JOIN vagas v ON v.id = c.vaga_id
-       WHERE c.id = $1 AND eva.revogado_em IS NULL AND eva.empresa_id = $2`,
+       WHERE c.id = $1 AND eva.revogado_em IS NULL AND eva.empresa_id = $2
+         AND ${empresaVagaFilialScope(req, 'eva')}`,
       [id, empresa_id]
     );
     if (acc.rows.length === 0) {
@@ -7687,18 +7715,12 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
   });
 
   // ── D. RECUPERAÇÃO DE SENHA — Empresa ──────────────────────────────────────
-  // Reutiliza passwordReset.js mas adaptado para empresa_usuarios.
-  // As rotas genéricas já existem em /api/auth/esqueci-senha e /api/auth/redefinir-senha
-  // e suportam user_tipo='empresa'. Adicionamos endpoint específico de empresa
-  // para o frontend empresa/login.html poder chamar com frontendUrl correto.
+  // Reutiliza passwordReset.js. O destino do link é escolhido no backend
+  // conforme o tipo do usuário; nenhum domínio vindo do cliente é aceito.
 
   app.post('/api/empresa/esqueci-senha', rateLimitByIp('esqueci'), async (req, res) => {
-    // Redireciona para a implementação centralizada, injetando frontendUrl de empresa
     req.body = req.body || {};
-    if (!req.body.frontendUrl) {
-      req.body.frontendUrl = (process.env.FRONTEND_URL || 'https://vagasio.com.br') + '/empresa/redefinir-senha.html';
-    }
-    req.body._user_tipo_hint = 'empresa'; // Hint para passwordReset.js priorizar empresa_usuarios
+    req.body._user_tipo_hint = 'empresa'; // prioriza empresa_usuarios
     return esqueciSenha(req, res);
   });
 
@@ -8174,6 +8196,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
         JOIN candidaturas can ON can.candidato_id = c.id
         JOIN empresa_vaga_acesso eva ON eva.vaga_id = can.vaga_id AND eva.revogado_em IS NULL
         WHERE c.id = $1 AND eva.revogado_em IS NULL AND eva.empresa_id = $2
+          AND ${empresaVagaFilialScope(req, 'eva')}
         LIMIT 1
       `, [candidatoId, empresaId]);
       if (!rows.length) return res.status(404).json({ erro: 'Candidato não encontrado' });
@@ -8487,6 +8510,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
         FROM vagas v
         JOIN empresa_vaga_acesso eva ON eva.vaga_id = v.id AND eva.revogado_em IS NULL
         WHERE v.id = $1 AND eva.revogado_em IS NULL AND eva.empresa_id = $2
+          AND ${empresaVagaFilialScope(req, 'eva')}
       `, [vagaId, emp]);
       if (!vagaRows.length) return res.status(404).json({ erro: 'Vaga não encontrada ou sem acesso' });
       const vaga = vagaRows[0];
@@ -8632,7 +8656,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
   // =========================================================================
 
   // ── Helper: verifica se candidatura pertence à empresa ──────────────────
-  async function verificarAcessoEmpresaConversa(candidatura_id, empresa_id) {
+  async function verificarAcessoEmpresaConversa(candidatura_id, empresa_id, req) {
     const { rows } = await pool.query(`
       SELECT c.id, c.candidato_id, c.vaga_id, c.status, c.etapa_atual,
              cd.nome AS candidato_nome, cd.email AS candidato_email,
@@ -8645,6 +8669,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
       JOIN empresas e ON e.id = $2
       WHERE c.id = $1
         AND v.empresa_id = $2
+        AND ${empresaVagaFilialScopeByVaga(req, 'v')}
     `, [candidatura_id, empresa_id]);
     return rows.length > 0 ? rows[0] : null;
   }
@@ -8791,7 +8816,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
     const offset = (Math.max(parseInt(pagina) || 1, 1) - 1) * lim;
     try {
       const params = [empresa_id];
-      let where = `v.empresa_id = $1 AND c.status NOT IN ('cancelado')`;
+      let where = `v.empresa_id = $1 AND ${empresaVagaFilialScopeByVaga(req, 'v')} AND c.status NOT IN ('cancelado')`;
       if (q) {
         params.push(`%${q}%`);
         where += ` AND (cd.nome ILIKE $${params.length} OR cd.email ILIKE $${params.length})`;
@@ -8849,7 +8874,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
     const cid = parseInt(req.params.cid);
     if (!cid) return res.status(400).json({ erro: 'ID inválido' });
     try {
-      const info = await verificarAcessoEmpresaConversa(cid, empresa_id);
+      const info = await verificarAcessoEmpresaConversa(cid, empresa_id, req);
       if (!info) return res.status(404).json({ erro: 'Conversa não encontrada' });
       const mensagens = await buscarMensagensConversa(cid);
       res.json({ conversa: info, mensagens });
@@ -8869,7 +8894,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
     texto = sanitizeText(texto.trim());
     if (texto.length > 2000) return res.status(400).json({ erro: 'Mensagem muito longa (máx 2000 chars)' });
     try {
-      const info = await verificarAcessoEmpresaConversa(cid, empresa_id);
+      const info = await verificarAcessoEmpresaConversa(cid, empresa_id, req);
       if (!info) return res.status(404).json({ erro: 'Conversa não encontrada' });
       if (info.chat_encerrado_empresa_em) return res.status(409).json({ erro: 'Conversa encerrada' });
       // Inserir mensagem
@@ -8904,7 +8929,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
     const cid = parseInt(req.params.cid);
     if (!cid) return res.status(400).json({ erro: 'ID inválido' });
     try {
-      const info = await verificarAcessoEmpresaConversa(cid, empresa_id);
+      const info = await verificarAcessoEmpresaConversa(cid, empresa_id, req);
       if (!info) return res.status(404).json({ erro: 'Conversa não encontrada' });
       const { rowCount } = await pool.query(
         `UPDATE mensagens_processo
@@ -8927,7 +8952,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
     const cid = parseInt(req.params.cid);
     if (!cid) return res.status(400).json({ erro: 'ID inválido' });
     try {
-      const info = await verificarAcessoEmpresaConversa(cid, empresa_id);
+      const info = await verificarAcessoEmpresaConversa(cid, empresa_id, req);
       if (!info) return res.status(404).json({ erro: 'Conversa não encontrada' });
       await pool.query(
         `UPDATE candidaturas SET chat_encerrado_empresa_em = NOW() WHERE id = $1`,
