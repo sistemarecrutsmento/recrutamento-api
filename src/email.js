@@ -155,7 +155,13 @@ async function enviarEmail({ to, subject, html, text, from }) {
   // 1ª opção: Resend (se configurado) — permite from customizado
   if (getResendKey()) {
     console.log('[email] Enviando via Resend para:', to, '| subject:', subject);
-    return enviarViaResendComFallback({ from, to, subject, html, text });
+    try {
+      return await enviarViaResendComFallback({ from, to, subject, html, text });
+    } catch (e) {
+      console.warn('[email] Resend indisponível; tentando provedor alternativo:', e.message);
+      // Não bloqueia convites e códigos quando a chave/domínio do Resend falhar.
+      if (!getWeb3FormsKey() && !getTransporter()) throw e;
+    }
   }
   // 2ª opção: Web3Forms (se configurado)
   if (getWeb3FormsKey()) {
