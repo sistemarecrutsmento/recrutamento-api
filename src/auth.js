@@ -164,6 +164,18 @@ function requireAdminEmpresa(req, res, next) {
 
 // admin_empresa OU recrutador: leituras ja passam (podem tudo operacional)
 // Usado em POST/PUT/PATCH de vagas, candidatos, chat etc.
+// admin_empresa OU recrutador: acesso à área Equipe, mas o recrutador só pode convidar Filial.
+function requireAdminOuRecrutadorEquipe(req, res, next) {
+  return authMiddleware(req, res, () => {
+    if (req.user.tipo !== 'empresa') return res.status(403).json({ erro: 'Acesso apenas para usuarios de empresa' });
+    if (req.user.role !== EMPRESA_ROLES.ADMIN && req.user.role !== EMPRESA_ROLES.RECRUTADOR) {
+      return res.status(403).json({ erro: 'Acesso restrito a administrador ou recrutador' });
+    }
+    if (!req.user.empresa_id || typeof req.user.empresa_id !== 'number') return res.status(401).json({ erro: 'Token invalido: empresa_id ausente' });
+    return ensureEmpresaAccessAtivo(req, res, next);
+  });
+}
+
 function requireRecrutadorOuAdmin(req, res, next) {
   return authMiddleware(req, res, () => {
     if (req.user.tipo !== 'empresa') {
@@ -206,6 +218,7 @@ module.exports = {
   authCandidatoOrEmpresaOrAdmin,
   authCandidatoOrAdminStrict,
   requireAdminEmpresa,
+  requireAdminOuRecrutadorEquipe,
   requireRecrutadorOuAdmin,
   requireEmpresaViewer,
   EMPRESA_ROLES,
