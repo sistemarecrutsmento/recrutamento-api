@@ -74,8 +74,19 @@ async function buscarUsuarioPorEmail(email, tipoHint = null) {
 }
 
 // ===== POST /api/auth/esqueci-senha =====
+function frontendSeguroParaTipo(tipo) {
+  const base = String(process.env.FRONTEND_URL || 'https://vagasio.com.br').replace(/\/$/, '');
+  const candidatos = {
+    candidato: process.env.CANDIDATE_FRONTEND_URL || `${base}/candidato`,
+    empresa: process.env.EMPRESA_FRONTEND_URL || `${base}/empresa`,
+    admin: process.env.ADMIN_FRONTEND_URL || `${base}/admin`,
+    recrutador: process.env.ADMIN_FRONTEND_URL || `${base}/admin`
+  };
+  return String(candidatos[tipo] || candidatos.candidato).replace(/\/$/, '');
+}
+
 async function esqueciSenha(req, res) {
-  const { email, frontendUrl, _user_tipo_hint } = req.body || {};
+  const { email, _user_tipo_hint } = req.body || {};
   if (!email) return res.status(400).json({ erro: 'E-mail é obrigatório' });
 
   // SEMPRE responde 200 (não revela se o e-mail existe)
@@ -84,7 +95,7 @@ async function esqueciSenha(req, res) {
   try {
     const usuario = await buscarUsuarioPorEmail(email, _user_tipo_hint || null);
     if (!usuario) {
-      console.log(`[esqueci-senha] e-mail não encontrado: ${email}`);
+      console.log('[esqueci-senha] solicitação recebida; nenhum usuário elegível encontrado');
       await audit(req, 'password.reset_requested', { result: 'failure', metadata: { email, motivo: 'email_nao_encontrado' } });
       return res.json(respostaOk);
     }
@@ -99,8 +110,9 @@ async function esqueciSenha(req, res) {
       [usuario.id, usuario.tipo, tokenH, expira]
     );
 
-    // Link de redefinição
-    const base = (frontendUrl || process.env.FRONTEND_URL || 'https://sistemarecrutsmento.github.io/vagas').replace(/\/$/, '');
+    // Link de redefinição: origem escolhida exclusivamente pelo servidor.
+    // Nunca usar domínio informado pelo cliente para transportar o token.
+    const base = frontendSeguroParaTipo(usuario.tipo);
     const link = `${base}/redefinir-senha.html?token=${token}`;
 
     // Enviar e-mail em background
@@ -116,7 +128,7 @@ async function esqueciSenha(req, res) {
       html
     });
 
-    console.log(`[esqueci-senha] token gerado pra ${email} (id=${usuario.id}, tipo=${usuario.tipo})`);
+    console.log('[esqueci-senha] recuperação de senha enviada');
     await audit(req, 'password.reset_requested', { result: 'success', metadata: { email, user_tipo: usuario.tipo } });
     return res.json(respostaOk);
   } catch (err) {
@@ -191,7 +203,7 @@ async function redefinirSenha(req, res) {
       console.error('[redefinir-senha] revogação de refresh tokens falhou (não crítico):', revokeErr.message);
     }
 
-    console.log(`[redefinir-senha] senha atualizada: user_id=${reset.user_id}, tipo=${reset.user_tipo}`);
+    console.log('[redefinir-senha] senha redefinida e sessões anteriores invalidadas');
     await audit(req, 'password.changed', { result: 'success', metadata: { user_tipo: reset.user_tipo } });
     return res.json({ ok: true, mensagem: 'Senha redefinida com sucesso' });
   } catch (err) {
