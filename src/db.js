@@ -509,7 +509,18 @@ async function init() {
       console.error('[MIGRATION 015] Erro não tratado (mas segui):', migrationErr.message);
     }
 
-    console.log('Tabelas criadas/verificadas + migrations Fase 1-015 aplicadas');
+    // Migrations 016-017 — checkout e webhooks Asaas.
+    try {
+      const { up: migration016 } = require('./migrations/016_checkout_asaas');
+      await migration016();
+      console.log('[MIGRATION 016] OK');
+    } catch (migrationErr) { console.error('[MIGRATION 016] Erro não tratado (mas segui):', migrationErr.message); }
+    try {
+      const { up: migration017 } = require('./migrations/017_asaas_webhooks');
+      await migration017();
+      console.log('[MIGRATION 017] OK');
+    } catch (migrationErr) { console.error('[MIGRATION 017] Erro não tratado (mas segui):', migrationErr.message); }
+    console.log('Tabelas criadas/verificadas + migrations Fase 1-017 aplicadas');
   } finally {
     client.release();
   }
