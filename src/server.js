@@ -7385,6 +7385,40 @@ app.post('/api/empresa/notificacoes/lidas', requireEmpresaViewer, async (req, re
 });
 
 // ===========================================================
+// ATIVIDADES RECENTES DA EQUIPE — somente ações auditáveis
+// ===========================================================
+app.get('/api/empresa/atividades', requireEmpresaViewer, async (req, res) => {
+  const horas = Math.min(24, Math.max(1, Number(req.query.horas) || 1));
+  try {
+    const { rows } = await pool.query(`
+      SELECT al.id, al.created_at, al.user_id, al.user_email, al.action,
+             al.resource_type, al.resource_id, al.result, al.metadata,
+             COALESCE(eu.nome, al.user_email, 'Usuário') AS usuario_nome,
+             COALESCE(v.titulo, al.metadata->>'titulo') AS recurso_nome
+      FROM audit_logs al
+      LEFT JOIN empresa_usuarios eu ON eu.id = al.user_id AND eu.empresa_id = $1
+      LEFT JOIN vagas v ON al.resource_type = 'vaga' AND v.id = al.resource_id AND v.empresa_id = $1
+      WHERE al.created_at >= NOW() - ($2::int * INTERVAL '1 hour')
+        AND al.result = 'success'
+        AND al.action NOT LIKE 'login.%'
+        AND al.action NOT LIKE 'security.%'
+        AND al.action NOT LIKE '%.viewed'
+        AND (
+          eu.empresa_id = $1
+          OR v.empresa_id = $1
+          OR al.metadata->>'empresa_id' = $1::text
+        )
+      ORDER BY al.created_at DESC
+      LIMIT 100
+    `, [req.user.empresa_id, horas]);
+    res.json({ atividades: rows, horas });
+  } catch (e) {
+    console.error('[EMPRESA ATIVIDADES]', e.message);
+    res.status(500).json({ erro: 'Erro ao carregar atividades da equipe' });
+  }
+});
+
+// ===========================================================
 // CONVITES REAIS DE USUÁRIOS DA EMPRESA
 // ===========================================================
 function hashConviteToken(raw) {

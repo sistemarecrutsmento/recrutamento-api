@@ -17,6 +17,12 @@ function hashToken(token) {
 }
 
 // ===== Templates de e-mail =====
+function escapeHtml(value) {
+  return String(value ?? '').replace(/[&<>"']/g, c => ({
+    '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+  }[c]));
+}
+
 function emailRedefinicaoHtml({ nome, link, minutos }) {
   return `
   <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 560px; margin: 0 auto; padding: 24px;">
@@ -24,15 +30,15 @@ function emailRedefinicaoHtml({ nome, link, minutos }) {
       <h1 style="color: #722F37; font-size: 24px; margin: 0;">Vagas.io</h1>
     </div>
     <div style="background: #fff; padding: 28px 24px; border-radius: 8px; border: 1px solid #E5E5E5;">
-      <p style="color: #1A1A1A; font-size: 16px; line-height: 1.5;">Olá, <strong>${nome || ''}</strong>!</p>
+      <p style="color: #1A1A1A; font-size: 16px; line-height: 1.5;">Olá, <strong>${escapeHtml(nome)}</strong>!</p>
       <p style="color: #1A1A1A; font-size: 15px; line-height: 1.5;">Recebemos um pedido pra redefinir a senha da sua conta. Se foi você, clique no botão abaixo:</p>
       <div style="text-align: center; margin: 28px 0;">
-        <a href="${link}" style="background: #722F37; color: #fff; padding: 14px 32px; border-radius: 6px; text-decoration: none; font-weight: 700; display: inline-block; font-size: 15px;">Redefinir minha senha</a>
+        <a href="${escapeHtml(link)}" style="background: #722F37; color: #fff; padding: 14px 32px; border-radius: 6px; text-decoration: none; font-weight: 700; display: inline-block; font-size: 15px;">Redefinir minha senha</a>
       </div>
       <p style="color: #6B6B6B; font-size: 14px; line-height: 1.5;">Este link é válido por <strong>${minutos} minutos</strong>.</p>
       <p style="color: #6B6B6B; font-size: 14px; line-height: 1.5;">Se você <strong>não fez</strong> esse pedido, é só ignorar este e-mail — sua senha continua a mesma.</p>
       <hr style="border: none; border-top: 1px solid #E5E5E5; margin: 20px 0;" />
-      <p style="color: #999; font-size: 12px; line-height: 1.4;">Ou copie e cole este link no navegador:<br /><a href="${link}" style="color: #722F37; word-break: break-all;">${link}</a></p>
+      <p style="color: #999; font-size: 12px; line-height: 1.4;">Ou copie e cole este link no navegador:<br /><a href="${escapeHtml(link)}" style="color: #722F37; word-break: break-all;">${escapeHtml(link)}</a></p>
     </div>
     <div style="text-align: center; padding: 14px 8px 0; color: #999; font-size: 11px;">
       Você está recebendo este e-mail porque um pedido de redefinição foi feito em vagasio.com.br.
@@ -152,7 +158,10 @@ async function redefinirSenha(req, res) {
   try {
     const tokenH = hashToken(token);
     const r = await pool.query(
-      `SELECT * FROM password_resets WHERE token_hash = $1 AND usado_em IS NULL AND expira_em > NOW() ORDER BY created_at DESC LIMIT 1`,
+      `SELECT id, user_id, user_tipo, usado_em, expira_em
+       FROM password_resets
+       WHERE token_hash = $1 AND usado_em IS NULL AND expira_em > NOW()
+       ORDER BY created_at DESC LIMIT 1`,
       [tokenH]
     );
     if (r.rows.length === 0) {
