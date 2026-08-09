@@ -9648,6 +9648,38 @@ app.get('/api/admin/me', authAdmin, async (req, res) => {
     }
   });
 
+  app.post('/api/empresa/assinatura/checkout', requireRecrutadorOuAdmin, async (req, res) => {
+    try {
+      if (!asaas.configurado()) return res.status(503).json({ erro: 'Gateway de pagamento ainda não configurado' });
+      const empresaId = Number(req.user.empresa_id);
+      const { rows } = await pool.query(`
+        SELECT e.id, e.nome, e.email_principal, e.cnpj, e.telefone, e.plano_id,
+               e.trial_fim, e.asaas_checkout_id, e.asaas_checkout_url,
+               p.nome AS plano_nome, p.preco_mensal
+        FROM empresas e LEFT JOIN planos p ON p.id = e.plano_id WHERE e.id = $1`, [empresaId]);
+      if (!rows.length) return res.status(404).json({ erro: 'Empresa não encontrada' });
+      const e = rows[0];
+      if (e.asaas_checkout_url) return res.json({ ok: true, checkout_url: e.asaas_checkout_url, existente: true });
+      const valor = Number(e.preco_mensal) / 100;
+      if (!Number.isFinite(valor) || valor <= 0) return res.status(400).json({ erro: 'Plano sem preço mensal configurado' });
+      if (!e.trial_fim) return res.status(400).json({ erro: 'Período de teste ainda não foi iniciado' });
+      const base = process.env.FRONTEND_URL || 'https://vagasio.com.br';
+      const checkout = await asaas.criarCheckoutRecorrente({
+        customerData: { name: e.nome, email: e.email_principal, cpfCnpj: e.cnpj || undefined, phone: e.telefone || undefined },
+        item: { name: `Vagas.io — Plano ${e.plano_nome || 'empresarial'}`, description: 'Assinatura mensal Vagas.io', quantity: 1, value: valor },
+        nextDueDate: new Date(e.trial_fim).toISOString().slice(0, 10),
+        callback: { successUrl: `${base}/empresa/index.html?page=configuracoes&pagamento=sucesso`, cancelUrl: `${base}/empresa/index.html?page=configuracoes&pagamento=cancelado`, expiredUrl: `${base}/empresa/index.html?page=configuracoes&pagamento=expirado` }
+      });
+      const url = checkout.url || checkout.link || checkout.paymentUrl;
+      if (!url) return res.status(502).json({ erro: 'O gateway não retornou o link de checkout' });
+      await pool.query('UPDATE empresas SET asaas_checkout_id = $1, asaas_checkout_url = $2, pagamento_configurado = true WHERE id = $3', [checkout.id || null, url, empresaId]);
+      res.status(201).json({ ok: true, checkout_url: url, existente: false });
+    } catch (e) {
+      console.error('[asaas checkout]', e.message);
+      return res.status(502).json({ erro: 'Não foi possível criar o checkout de pagamento' });
+    }
+  });
+
   // FIX Etapa 2 (2026-07-27): HANDLER GLOBAL 404 — JSON seguro.
   // =========================================================================
   // Impede que Express retorne HTML "<pre>Cannot GET ...</pre>" em rotas inexistentes.
