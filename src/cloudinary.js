@@ -15,6 +15,7 @@ async function uploadBuffer(buffer, originalName, folder = 'documentos') {
       {
         folder,
         resource_type: 'auto', // detecta imagem, pdf, etc
+        type: 'authenticated',
         public_id: `${Date.now()}-${Math.random().toString(36).slice(2,8)}`,
         overwrite: true
       },
