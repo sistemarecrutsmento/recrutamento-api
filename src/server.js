@@ -1850,11 +1850,13 @@ app.get('/api/vagas/:id', async (req, res) => {
   }
   try {
     const { rows } = await pool.query(
-      `SELECT id, titulo, empresa, descricao, requisitos, beneficios, salario_min, salario_max,
-              tipo_contrato, nivel, area, cidade, estado, etapas,
-              CASE WHEN status = 'publicada' THEN 'publicada' ELSE NULL END as status,
-              ARRAY(SELECT tag FROM vaga_tags WHERE vaga_id = vagas.id ORDER BY criado_em) AS tags
-       FROM vagas WHERE id = $1 AND status = 'publicada'`,
+      `SELECT v.id, v.titulo, v.empresa, v.descricao, v.requisitos, v.beneficios, v.salario_min, v.salario_max,
+              v.tipo_contrato, v.nivel, v.area, v.cidade, v.estado, v.etapas,
+              CASE WHEN v.status = 'publicada' THEN 'publicada' ELSE NULL END as status,
+              ARRAY(SELECT tag FROM vaga_tags WHERE vaga_id = v.id ORDER BY criado_em) AS tags
+       FROM vagas v
+       WHERE v.id = $1 AND v.status = 'publicada'
+         AND EXISTS (SELECT 1 FROM empresas e WHERE e.id = v.empresa_id AND e.ativo = true)`, 
       [id]
     );
     if (rows.length === 0) return res.status(404).json({ erro: 'Vaga não encontrada' });
@@ -8512,6 +8514,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
         `SELECT t.tag FROM vaga_tags t
          JOIN vagas v ON v.id = t.vaga_id
          WHERE t.vaga_id = $1 AND v.status = 'publicada'
+           AND EXISTS (SELECT 1 FROM empresas e WHERE e.id = v.empresa_id AND e.ativo = true)
          ORDER BY t.criado_em`, [parseInt(req.params.id)]
       );
       res.json({ tags: rows.map(r => r.tag) });
@@ -8529,6 +8532,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
                v.salario_min, v.salario_max, v.descricao, v.status, v.criada_em
         FROM vagas v
         JOIN vaga_tags t ON t.vaga_id = v.id
+        JOIN empresas e ON e.id = v.empresa_id AND e.ativo = true
         WHERE t.tag = $1 AND v.status = 'publicada'
         ORDER BY v.criada_em DESC
         LIMIT 50
