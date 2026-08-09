@@ -7389,6 +7389,7 @@ app.post('/api/empresa/notificacoes/lidas', requireEmpresaViewer, async (req, re
 // ===========================================================
 app.get('/api/empresa/atividades', requireEmpresaViewer, async (req, res) => {
   const horas = Math.min(24, Math.max(1, Number(req.query.horas) || 1));
+  const usuarioId = Number.isInteger(Number(req.query.usuario_id)) ? Number(req.query.usuario_id) : null;
   try {
     const { rows } = await pool.query(`
       SELECT al.id, al.created_at, al.user_id, al.user_email, al.action,
@@ -7400,6 +7401,7 @@ app.get('/api/empresa/atividades', requireEmpresaViewer, async (req, res) => {
       LEFT JOIN vagas v ON al.resource_type = 'vaga' AND v.id = al.resource_id AND v.empresa_id = $1
       WHERE al.created_at >= NOW() - ($2::int * INTERVAL '1 hour')
         AND al.result = 'success'
+        AND ($3::int IS NULL OR al.user_id = $3::int)
         AND al.action NOT LIKE 'login.%'
         AND al.action NOT LIKE 'security.%'
         AND al.action NOT LIKE '%.viewed'
@@ -7410,7 +7412,7 @@ app.get('/api/empresa/atividades', requireEmpresaViewer, async (req, res) => {
         )
       ORDER BY al.created_at DESC
       LIMIT 100
-    `, [req.user.empresa_id, horas]);
+    `, [req.user.empresa_id, horas, usuarioId]);
     res.json({ atividades: rows, horas });
   } catch (e) {
     console.error('[EMPRESA ATIVIDADES]', e.message);
