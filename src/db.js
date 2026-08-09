@@ -500,7 +500,16 @@ async function init() {
       console.error('[MIGRATION 014] Erro não tratado (mas segui):', migrationErr.message);
     }
 
-    console.log('Tabelas criadas/verificadas + migrations Fase 1-014 aplicadas');
+    // Migration 015 — trial de 30 dias e estado da assinatura.
+    try {
+      const { up: migration015 } = require('./migrations/015_assinaturas_trial');
+      await migration015();
+      console.log('[MIGRATION 015] OK');
+    } catch (migrationErr) {
+      console.error('[MIGRATION 015] Erro não tratado (mas segui):', migrationErr.message);
+    }
+
+    console.log('Tabelas criadas/verificadas + migrations Fase 1-015 aplicadas');
   } finally {
     client.release();
   }
