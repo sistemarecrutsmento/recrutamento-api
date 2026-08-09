@@ -1,7 +1,7 @@
 {
   "name": "recrutamento-api",
   "version": "1.0.3",
-  "description": "API do Recrutamento e Sele\u00e7\u00e3o",
+  "description": "API do Recrutamento e Seleção",
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
@@ -21,7 +21,8 @@
     "axios": "^1.7.4",
     "cloudinary": "^2.5.1",
     "googleapis": "^100.0.0",
-    "pdf-parse": "^1.1.1"
+    "pdf-parse": "^1.1.1",
+    "web-push": "^3.6.7"
   },
   "build_ts": "2026-07-28T18:34:18Z"
 }
