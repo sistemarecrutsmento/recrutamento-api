@@ -9664,7 +9664,6 @@ app.get('/api/admin/me', authAdmin, async (req, res) => {
         UPDATE empresas
         SET assinatura_status = 'expired', ativo = false
         WHERE assinatura_status = 'trial' AND trial_fim IS NOT NULL AND trial_fim <= NOW()
-          AND COALESCE(pagamento_configurado, false) = false
       `);
     } catch (e) {
       console.error('[trial] processamento diário falhou:', e.message);
