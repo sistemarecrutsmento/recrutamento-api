@@ -4305,8 +4305,11 @@ function indicesFluxoProposta(etapas) {
 // ===== Admin: enviar proposta ao candidato =====
 // Recebe texto da proposta + opcional PDF (data URL base64) ou já com URL pública
 app.post('/api/admin/candidatura/:id/enviar-proposta', authAdmin, async (req, res) => {
-  const { texto, pdf_url, pdf_public_id, pdf_nome } = req.body;
+  const { texto, pdf_url, pdf_nome } = req.body;
   if (!texto && !pdf_url) return res.status(400).json({ erro: 'Envie um texto ou um PDF da proposta' });
+  if (pdf_url && !String(pdf_url).startsWith('data:application/pdf')) {
+    return res.status(400).json({ erro: 'O PDF deve ser anexado pelo formulário; URLs externas não são aceitas' });
+  }
 
   const { rows: c } = await pool.query(`
     SELECT c.*, v.titulo, cd.nome, cd.email
@@ -4318,9 +4321,9 @@ app.post('/api/admin/candidatura/:id/enviar-proposta', authAdmin, async (req, re
   const cand = c[0];
 
   // Se veio PDF em base64 (data URL), faz upload pro Cloudinary
-  let pdfFinalUrl = pdf_url || null;
-  let pdfFinalId = pdf_public_id || null;
-  if (pdf_url && String(pdf_url).startsWith('data:application/pdf')) {
+  let pdfFinalUrl = null;
+  let pdfFinalId = null;
+  if (pdf_url) {
     const pdfValidado = validateBase64File(pdf_url, 'application/pdf', 6 * 1024 * 1024, pdf_nome);
     if (!pdfValidado.ok) {
       return res.status(pdfValidado.erro.includes('maior') ? 413 : 400).json({ erro: pdfValidado.erro });
@@ -6226,9 +6229,15 @@ app.post('/api/empresa/candidatura/:id/proposta', requireRecrutadorOuAdmin, asyn
   const { empresa_id } = req.user;
   const candId = Number(req.params.id);
   try {
-    const { texto, pdf_url, pdf_public_id } = req.body || {};
+    const { texto, pdf_url, pdf_nome } = req.body || {};
     if (!texto && !pdf_url) {
-      return res.status(400).json({ erro: 'Envie um texto ou uma URL do PDF da proposta' });
+      return res.status(400).json({ erro: 'Envie um texto ou um PDF da proposta' });
+    }
+    // PDFs de propostas nunca são persistidos a partir de URLs externas.
+    // O cliente envia apenas data:application/pdf; o servidor faz o upload
+    // autenticado e só depois grava o public_id interno.
+    if (pdf_url && !String(pdf_url).startsWith('data:application/pdf')) {
+      return res.status(400).json({ erro: 'O PDF deve ser anexado pelo formulário; URLs externas não são aceitas' });
     }
     // Ownership via empresa_vaga_acesso (anti-IDOR)
     const { rows: c } = await pool.query(`
@@ -6250,6 +6259,33 @@ app.post('/api/empresa/candidatura/:id/proposta', requireRecrutadorOuAdmin, asyn
     if (['contratado','rejeitado','reprovado'].includes(cand.status)) {
       return res.status(409).json({ erro: `Candidatura já está "${cand.status}"` });
     }
+
+    let pdfFinalUrl = null;
+    let pdfFinalId = null;
+    if (pdf_url) {
+      const pdfValidado = validateBase64File(pdf_url, 'application/pdf', 6 * 1024 * 1024, pdf_nome);
+      if (!pdfValidado.ok) {
+        return res.status(pdfValidado.erro.includes('maior') ? 413 : 400).json({ erro: pdfValidado.erro });
+      }
+      if (!process.env.CLOUDINARY_URL && !process.env.CLOUDINARY_CLOUD_NAME) {
+        return res.status(500).json({ erro: 'Cloudinary não configurado para receber PDF' });
+      }
+      try {
+        const pdfCanonico = `data:application/pdf;base64,${pdfValidado.buffer.toString('base64')}`;
+        const up = await cloudinary.uploader.upload(pdfCanonico, {
+          folder: 'propostas',
+          resource_type: 'raw',
+          type: 'authenticated',
+          public_id: `proposta_${cand.id}_${Date.now()}`
+        });
+        pdfFinalId = up.public_id;
+        pdfFinalUrl = cloudinaryAuthenticatedUrl(pdfFinalId, pdf_nome || 'proposta.pdf', 'application/pdf');
+      } catch (e) {
+        console.error('[empresa proposta upload]', e.message);
+        return erroInterno(req, res, e, 'upload-pdf-proposta-empresa');
+      }
+    }
+
     const historico = Array.isArray(cand.historico) ? [...cand.historico] : [];
     historico.push({
       etapa: cand.etapa_atual, status: 'proposta_enviada', acao: 'enviar_proposta',
@@ -6262,7 +6298,7 @@ app.post('/api/empresa/candidatura/:id/proposta', requireRecrutadorOuAdmin, asyn
       SET proposta_texto = $1, proposta_pdf_url = $2, proposta_pdf_public_id = $3,
           proposta_enviada_em = NOW(), historico = $4, atualizada_em = NOW()
       WHERE id = $5
-    `, [texto || null, pdf_url || null, pdf_public_id || null, JSON.stringify(historico), candId]);
+    `, [texto || null, pdfFinalUrl, pdfFinalId, JSON.stringify(historico), candId]);
     // Notificações
     inserirNotificacao(pool, 'empresa', empresa_id, 'proposta_enviada',
       `📨 Proposta enviada: ${cand.nome}`,
@@ -6276,7 +6312,7 @@ app.post('/api/empresa/candidatura/:id/proposta', requireRecrutadorOuAdmin, asyn
     );
     // E-mail ao candidato (background)
     try {
-      enviarEmailBg(enviarEmailProposta, cand.email, cand.nome, cand.titulo, pdf_url || null);
+      enviarEmailBg(enviarEmailProposta, cand.email, cand.nome, cand.titulo, pdfFinalUrl || null);
       emailSvc.bgPropostaEnviada({
         candidato_id: cand.candidato_id, email: cand.email, nome: cand.nome,
         vaga_titulo: cand.titulo,
@@ -6291,7 +6327,7 @@ app.post('/api/empresa/candidatura/:id/proposta', requireRecrutadorOuAdmin, asyn
     });
     analytics.bg({ evento: 'proposta_enviada', user_type: 'empresa',
       empresa_id, candidatura_id: candId, ...analytics.fromReq(req) });
-    res.json({ ok: true, proposta: { texto, pdf_url: pdf_url || null } });
+    res.json({ ok: true, proposta: { texto, pdf_url: pdfFinalUrl || null } });
   } catch (e) {
     return erroInterno(req, res, e, 'api-empresa-candidatura-proposta');
   }
