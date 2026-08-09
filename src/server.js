@@ -95,7 +95,15 @@ function cloudinaryAuthenticatedUrl(publicId, fileName, mimeType) {
   const isImage = String(mimeType || '').toLowerCase().startsWith('image/');
   const resourceType = isImage ? 'image' : 'raw';
   const ext = String(fileName || '').split('.').pop().toLowerCase();
-  const options = { resource_type: resourceType, type: 'authenticated', sign_url: true, secure: true };
+  // Assinatura curta: mesmo que uma URL seja copiada do navegador, ela expira
+  // rapidamente. A autorização principal continua sendo feita pela API/proxy.
+  const options = {
+    resource_type: resourceType,
+    type: 'authenticated',
+    sign_url: true,
+    secure: true,
+    auth_token: { duration: 300 }
+  };
   if (!isImage && /^[a-z0-9]{1,8}$/.test(ext)) options.format = ext;
   return cloudinary.url(publicId, options);
 }
