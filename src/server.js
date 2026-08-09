@@ -3166,6 +3166,45 @@ app.get('/api/candidatura/:id/documentos', authCandidato, async (req, res) => {
   }
 });
 
+// Download autenticado do próprio documento do candidato.
+// O arquivo nunca é entregue por URL pública do storage.
+app.get('/api/candidatura/:id/documentos/:docId/arquivo', authCandidato, async (req, res) => {
+  try {
+    const candidaturaId = Number(req.params.id);
+    const documentoId = Number(req.params.docId);
+    if (!Number.isInteger(candidaturaId) || !Number.isInteger(documentoId) || candidaturaId <= 0 || documentoId <= 0) {
+      return res.status(400).json({ erro: 'Identificador inválido' });
+    }
+    const { rows } = await pool.query(`
+      SELECT d.arquivo_url, d.arquivo_public_id, d.arquivo_nome, d.arquivo_tipo, d.arquivo_tamanho
+      FROM documentos_candidatura d
+      JOIN candidaturas c ON c.id = d.candidatura_id
+      JOIN candidatos cd ON cd.id = c.candidato_id
+      WHERE d.id = $1 AND d.candidatura_id = $2 AND LOWER(cd.email) = LOWER($3)
+      LIMIT 1
+    `, [documentoId, candidaturaId, req.user.email || '']);
+    if (!rows.length) return res.status(404).json({ erro: 'Arquivo não encontrado' });
+    const row = rows[0];
+    const sourceUrl = cloudinaryAuthenticatedUrl(row.arquivo_public_id, row.arquivo_nome, row.arquivo_tipo) || row.arquivo_url;
+    let remote;
+    try { remote = new URL(sourceUrl); } catch (_) { return res.status(404).json({ erro: 'Arquivo não encontrado' }); }
+    if (!['http:', 'https:'].includes(remote.protocol)) return res.status(404).json({ erro: 'Arquivo não encontrado' });
+    const upstream = await axios.get(remote.toString(), {
+      responseType: 'stream', timeout: 30000, maxContentLength: 25 * 1024 * 1024,
+      validateStatus: status => status >= 200 && status < 300
+    });
+    res.set('Content-Type', upstream.headers['content-type'] || row.arquivo_tipo || 'application/octet-stream');
+    if (upstream.headers['content-length'] || row.arquivo_tamanho) res.set('Content-Length', String(upstream.headers['content-length'] || row.arquivo_tamanho));
+    res.set('Content-Disposition', `attachment; filename="${escapeContentDispositionFilename(row.arquivo_nome || 'documento')}"`);
+    upstream.data.on('error', () => res.destroy());
+    upstream.data.pipe(res);
+  } catch (e) {
+    console.error('[candidato documento arquivo]', e.message);
+    if (!res.headersSent) res.status(502).json({ erro: 'Não foi possível baixar o arquivo' });
+    else res.destroy();
+  }
+});
+
 // ====== Admin DELETAR candidato (limpeza operacional) ======
 // POST /api/admin/candidato/:id/deletar { confirm: 'SIM_DELETAR' }
 // Apaga o candidato, suas candidaturas, documentos e mensagens de chat (cascade manual).
