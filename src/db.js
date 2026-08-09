@@ -520,7 +520,12 @@ async function init() {
       await migration017();
       console.log('[MIGRATION 017] OK');
     } catch (migrationErr) { console.error('[MIGRATION 017] Erro não tratado (mas segui):', migrationErr.message); }
-    console.log('Tabelas criadas/verificadas + migrations Fase 1-017 aplicadas');
+    try {
+      const { up: migration018 } = require('./migrations/018_planos_precos_20260809');
+      await migration018();
+      console.log('[MIGRATION 018] OK');
+    } catch (migrationErr) { console.error('[MIGRATION 018] Erro não tratado (mas segui):', migrationErr.message); }
+    console.log('Tabelas criadas/verificadas + migrations Fase 1-018 aplicadas');
   } finally {
     client.release();
   }
