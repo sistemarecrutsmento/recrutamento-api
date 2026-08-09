@@ -5114,11 +5114,11 @@ app.post('/api/empresa/cadastro', rateLimitByIp('cadastro-empresa'), async (req,
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(admin_email)) {
     return res.status(400).json({ erro: 'E-mail do administrador inválido' });
   }
-  if (!cnpj || cnpj.replace(/\D/g, '').length !== 14) {
-    return res.status(400).json({ erro: 'CNPJ é obrigatório e deve ter 14 dígitos' });
+  if (cnpj && cnpj.replace(/\D/g, '').length !== 14) {
+    return res.status(400).json({ erro: 'CNPJ deve ter 14 dígitos (com ou sem pontuação)' });
   }
-  if (!telefone || telefone.replace(/\D/g, '').length < 10) {
-    return res.status(400).json({ erro: 'Telefone é obrigatório e deve ser válido' });
+  if (telefone && telefone.replace(/\D/g, '').length < 10) {
+    return res.status(400).json({ erro: 'Telefone inválido' });
   }
   if (!email_principal || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email_principal)) {
     return res.status(400).json({ erro: 'E-mail principal é obrigatório e deve ser válido' });
