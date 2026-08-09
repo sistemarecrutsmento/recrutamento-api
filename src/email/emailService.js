@@ -524,7 +524,25 @@ async function digestDiarioEmpresa({ empresa_id, empresa_email, empresa_nome, kp
   });
 }
 
-// ─── 10. Recuperação de senha ─────────────────────────────────────────────────
+// ─── 10. Aviso de fim do período de teste ────────────────────────────────────
+async function avisoFimTrial({ empresa_id, empresa_nome, empresa_email, trial_fim, plano }) {
+  const dataFim = new Date(trial_fim).toLocaleDateString('pt-BR', { timeZone: 'America/Sao_Paulo' });
+  const html = wrap({
+    titulo: 'Seu período gratuito está terminando',
+    conteudo: `${p(`Olá, ${esc(empresa_nome)}!`)}${p('Seu período gratuito de 30 dias termina em 5 dias. Até lá, você continua usando os recursos do plano ' + esc(plano) + ' sem cobrança.')}${aviso('Para continuar usando o sistema após o período gratuito, cadastre uma forma de pagamento e confirme sua assinatura. Você poderá manter o plano atual ou escolher outro plano disponível.')}${p('<b>Data de encerramento do teste:</b> ' + dataFim)}`,
+    cta_link: `${BASE_URL}/empresa/index.html?page=planos`,
+    cta_texto: 'Configurar assinatura',
+    rodape: 'Aviso automático do Vagas.io sobre o seu período de teste.'
+  });
+  return enviar({
+    to: empresa_email,
+    subject: 'Seu período gratuito do Vagas.io termina em 5 dias',
+    html, tipo: 'trial_5_dias', user_type: 'empresa', user_id: empresa_id,
+    payload: { trial_fim, plano }
+  });
+}
+
+// ─── 11. Recuperação de senha ─────────────────────────────────────────────────
 // (Já implementada em passwordReset.js — re-exportamos para uso via emailService)
 // O emailService não reimplementa; apenas expõe a bridge se precisar de logística extra.
 
@@ -600,6 +618,7 @@ module.exports = {
   chatNovaMensagemCandidato,
   chatNovaMensagemEmpresa,
   digestDiarioEmpresa,
+  avisoFimTrial,
   // Background (setImmediate, sem await)
   bgBoasVindasCandidato,
   bgBoasVindasEmpresa,
