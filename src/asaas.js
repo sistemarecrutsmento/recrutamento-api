@@ -27,6 +27,14 @@ async function criarCliente({ name, email, cpfCnpj, phone }) {
   });
 }
 
+async function criarCheckoutRecorrente({ billingTypes = ['CREDIT_CARD'], customerData, item, nextDueDate, callback }) {
+  return asaasRequest('POST', '/checkouts', {
+    billingTypes, chargeTypes: ['RECURRENT'], minutesToExpire: 60,
+    callback, items: [item], customerData,
+    subscription: { cycle: 'MONTHLY', nextDueDate }
+  });
+}
+
 async function criarAssinatura({ customer, billingType = 'UNDEFINED', value, nextDueDate, cycle = 'MONTHLY', description }) {
   return asaasRequest('POST', '/subscriptions', {
     customer, billingType, value, nextDueDate, cycle, description,
@@ -34,4 +42,4 @@ async function criarAssinatura({ customer, billingType = 'UNDEFINED', value, nex
   });
 }
 
-module.exports = { configurado, criarCliente, criarAssinatura, BASE_URL };
+module.exports = { configurado, criarCliente, criarCheckoutRecorrente, criarAssinatura, BASE_URL };
