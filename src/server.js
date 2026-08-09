@@ -9666,7 +9666,7 @@ app.get('/api/admin/me', authAdmin, async (req, res) => {
       const base = process.env.FRONTEND_URL || 'https://vagasio.com.br';
       const checkout = await asaas.criarCheckoutRecorrente({
         // O checkout coleta os dados obrigatórios do pagador com segurança no Asaas.
-        item: { name: `Vagas.io — Plano ${e.plano_nome || 'empresarial'}`, description: 'Assinatura mensal Vagas.io', quantity: 1, value: valor },
+        item: { name: `Vagas.io — Plano ${e.plano_nome || 'empresarial'}`, description: 'Assinatura mensal Vagas.io', externalReference: String(empresaId), quantity: 1, value: valor },
         nextDueDate: new Date(e.trial_fim).toISOString().slice(0, 10),
         callback: { successUrl: `${base}/empresa/index.html?page=configuracoes&pagamento=sucesso`, cancelUrl: `${base}/empresa/index.html?page=configuracoes&pagamento=cancelado`, expiredUrl: `${base}/empresa/index.html?page=configuracoes&pagamento=expirado` }
       });
@@ -9693,8 +9693,9 @@ app.get('/api/admin/me', authAdmin, async (req, res) => {
       const recurso = payload.subscription || payload.payment || {};
       const customerId = recurso.customer || null;
       const subscriptionId = recurso.id && String(recurso.object || '').toLowerCase() === 'subscription' ? recurso.id : (recurso.subscription || null);
-      if (customerId || subscriptionId) {
-        const params = [customerId, subscriptionId];
+      const empresaRef = Number(recurso.externalReference || payload.externalReference) || null;
+      if (customerId || subscriptionId || empresaRef) {
+        const params = [customerId, subscriptionId, empresaRef];
         let extra = '';
         const ativos = ['PAYMENT_CONFIRMED', 'PAYMENT_RECEIVED'];
         const vencidos = ['PAYMENT_OVERDUE', 'PAYMENT_DUNNING_RECEIVED'];
@@ -9703,7 +9704,7 @@ app.get('/api/admin/me', authAdmin, async (req, res) => {
         else if (vencidos.includes(evento)) extra = ", assinatura_status = 'past_due', ativo = false";
         else if (cancelados.includes(evento)) extra = ", assinatura_status = 'canceled', ativo = false";
         else if (evento === 'SUBSCRIPTION_CREATED' || evento === 'SUBSCRIPTION_UPDATED') extra = ", pagamento_configurado = true";
-        await pool.query(`UPDATE empresas SET asaas_customer_id = COALESCE(asaas_customer_id, $1), asaas_subscription_id = COALESCE($2, asaas_subscription_id), assinatura_vence_em = COALESCE($3::date, assinatura_vence_em)${extra} WHERE asaas_customer_id = $1 OR asaas_subscription_id = $2`, [customerId, subscriptionId, recurso.nextDueDate || null]);
+        await pool.query(`UPDATE empresas SET asaas_customer_id = COALESCE(asaas_customer_id, $1), asaas_subscription_id = COALESCE($2, asaas_subscription_id), assinatura_vence_em = COALESCE($4::date, assinatura_vence_em)${extra} WHERE id = COALESCE($3, id) OR asaas_customer_id = $1 OR asaas_subscription_id = $2`, [customerId, subscriptionId, empresaRef, recurso.nextDueDate || null]);
       }
       res.json({ ok: true });
     } catch (e) {
