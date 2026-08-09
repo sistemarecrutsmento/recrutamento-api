@@ -9680,6 +9680,38 @@ app.get('/api/admin/me', authAdmin, async (req, res) => {
     }
   });
 
+  // Webhook público do Asaas: autenticado por token próprio e idempotente por evento.
+  app.post('/api/webhooks/asaas', async (req, res) => {
+    try {
+      const esperado = process.env.ASAAS_WEBHOOK_TOKEN;
+      const recebido = req.get('asaas-access-token') || req.get('x-asaas-access-token');
+      if (!esperado || !recebido || recebido !== esperado) return res.status(401).json({ ok: false });
+      const payload = req.body || {}, eventId = String(payload.id || ''), evento = String(payload.event || '');
+      if (!eventId || !evento) return res.status(400).json({ ok: false, erro: 'Evento inválido' });
+      const saved = await pool.query(`INSERT INTO asaas_webhook_events (event_id,event,payload) VALUES ($1,$2,$3) ON CONFLICT (event_id) DO NOTHING RETURNING id`, [eventId, evento, payload]);
+      if (!saved.rowCount) return res.json({ ok: true, duplicado: true });
+      const recurso = payload.subscription || payload.payment || {};
+      const customerId = recurso.customer || null;
+      const subscriptionId = recurso.id && String(recurso.object || '').toLowerCase() === 'subscription' ? recurso.id : (recurso.subscription || null);
+      if (customerId || subscriptionId) {
+        const params = [customerId, subscriptionId];
+        let extra = '';
+        const ativos = ['PAYMENT_CONFIRMED', 'PAYMENT_RECEIVED'];
+        const vencidos = ['PAYMENT_OVERDUE', 'PAYMENT_DUNNING_RECEIVED'];
+        const cancelados = ['SUBSCRIPTION_INACTIVATED', 'SUBSCRIPTION_DELETED', 'PAYMENT_REFUNDED'];
+        if (ativos.includes(evento)) extra = ", assinatura_status = 'active', ativo = true, pagamento_configurado = true, assinatura_confirmada_em = COALESCE(assinatura_confirmada_em, NOW())";
+        else if (vencidos.includes(evento)) extra = ", assinatura_status = 'past_due', ativo = false";
+        else if (cancelados.includes(evento)) extra = ", assinatura_status = 'canceled', ativo = false";
+        else if (evento === 'SUBSCRIPTION_CREATED' || evento === 'SUBSCRIPTION_UPDATED') extra = ", pagamento_configurado = true";
+        await pool.query(`UPDATE empresas SET asaas_customer_id = COALESCE(asaas_customer_id, $1), asaas_subscription_id = COALESCE($2, asaas_subscription_id), assinatura_vence_em = COALESCE($3::date, assinatura_vence_em)${extra} WHERE asaas_customer_id = $1 OR asaas_subscription_id = $2`, [customerId, subscriptionId, recurso.nextDueDate || null]);
+      }
+      res.json({ ok: true });
+    } catch (e) {
+      console.error('[asaas webhook]', e.message);
+      return res.status(500).json({ ok: false });
+    }
+  });
+
   // FIX Etapa 2 (2026-07-27): HANDLER GLOBAL 404 — JSON seguro.
   // =========================================================================
   // Impede que Express retorne HTML "<pre>Cannot GET ...</pre>" em rotas inexistentes.
