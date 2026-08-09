@@ -86,6 +86,38 @@ else if (process.env.CLOUDINARY_CLOUD_NAME) {
   });
 }
 
+// Documentos de candidatos e PDFs de propostas usam delivery authenticated.
+// O frontend recebe apenas uma URL assinada derivada do public_id; o secret
+// do Cloudinary nunca sai da API e os links públicos antigos deixam de ser
+// usados nas respostas da aplicação.
+function cloudinaryAuthenticatedUrl(publicId, fileName, mimeType) {
+  if (!publicId) return null;
+  const isImage = String(mimeType || '').toLowerCase().startsWith('image/');
+  const resourceType = isImage ? 'image' : 'raw';
+  const ext = String(fileName || '').split('.').pop().toLowerCase();
+  const options = { resource_type: resourceType, type: 'authenticated', sign_url: true, secure: true };
+  if (!isImage && /^[a-z0-9]{1,8}$/.test(ext)) options.format = ext;
+  return cloudinary.url(publicId, options);
+}
+
+function protegerUrlDocumento(row) {
+  if (!row) return row;
+  const { arquivo_public_id, ...safe } = row;
+  return {
+    ...safe,
+    arquivo_url: cloudinaryAuthenticatedUrl(arquivo_public_id, row.arquivo_nome, row.arquivo_tipo) || null
+  };
+}
+
+function protegerUrlProposta(row) {
+  if (!row) return row;
+  const { proposta_pdf_public_id, ...safe } = row;
+  return {
+    ...safe,
+    proposta_pdf_url: cloudinaryAuthenticatedUrl(proposta_pdf_public_id, 'proposta.pdf', 'application/pdf') || null
+  };
+}
+
 const app = express();
 
 // FIX Etapa 2 (2026-07-27): hardening de headers + Express.
@@ -3034,7 +3066,8 @@ app.post('/api/candidatura/:id/documentos', authCandidato, async (req, res) => {
           const r = await cloudinary.uploader.upload(dataUri, {
             folder: `vagas-io/candidatura-${candidaturaId}`,
             public_id: `${candidaturaId}_${d.tipo}_${Date.now()}`,
-            resource_type: 'auto'
+            resource_type: 'auto',
+            type: 'authenticated'
           });
           arquivoUrl = r.secure_url;
           arquivoPublicId = r.public_id;
@@ -3112,12 +3145,12 @@ app.get('/api/candidatura/:id/documentos', authCandidato, async (req, res) => {
       return res.status(403).json({ erro: 'Sem permissão para esta candidatura' });
     }
     const { rows } = await pool.query(
-      `SELECT id, tipo, categoria, valor_texto, arquivo_url, arquivo_nome, arquivo_tipo, arquivo_tamanho, status, justificativa_admin, enviado_em, revisado_em
+      `SELECT id, tipo, categoria, valor_texto, arquivo_url, arquivo_public_id, arquivo_nome, arquivo_tipo, arquivo_tamanho, status, justificativa_admin, enviado_em, revisado_em
        FROM documentos_candidatura WHERE candidatura_id = $1
        ORDER BY categoria, id`,
       [candidaturaId]
     );
-    res.json({ documentos: rows, obrigatorios: DOCUMENTOS_OBRIGATORIOS });
+    res.json({ documentos: rows.map(protegerUrlDocumento), obrigatorios: DOCUMENTOS_OBRIGATORIOS });
   } catch (e) {
     return erroInterno(req, res, e, 'api-candidatura-:id-documentos');
   }
@@ -3182,12 +3215,12 @@ app.get('/api/admin/candidatura/:id/documentos', authAdmin, async (req, res) => 
   try {
     const candidaturaId = Number(req.params.id);
     const { rows } = await pool.query(
-      `SELECT id, tipo, categoria, valor_texto, arquivo_url, arquivo_nome, arquivo_tipo, arquivo_tamanho, status, justificativa_admin, enviado_em, revisado_em
+      `SELECT id, tipo, categoria, valor_texto, arquivo_url, arquivo_public_id, arquivo_nome, arquivo_tipo, arquivo_tamanho, status, justificativa_admin, enviado_em, revisado_em
        FROM documentos_candidatura WHERE candidatura_id = $1
        ORDER BY categoria, id`,
       [candidaturaId]
     );
-    res.json({ documentos: rows, obrigatorios: DOCUMENTOS_OBRIGATORIOS });
+    res.json({ documentos: rows.map(protegerUrlDocumento), obrigatorios: DOCUMENTOS_OBRIGATORIOS });
   } catch (e) {
     return erroInterno(req, res, e, 'api-admin-candidatura-:id-documentos');
   }
@@ -4300,10 +4333,11 @@ app.post('/api/admin/candidatura/:id/enviar-proposta', authAdmin, async (req, re
       const up = await cloudinary.uploader.upload(pdfCanonico, {
         folder: 'propostas',
         resource_type: 'raw',
+        type: 'authenticated',
         public_id: `proposta_${cand.id}_${Date.now()}`
       });
-      pdfFinalUrl = up.secure_url;
       pdfFinalId = up.public_id;
+      pdfFinalUrl = cloudinaryAuthenticatedUrl(pdfFinalId, pdf_nome || 'proposta.pdf', 'application/pdf');
     } catch (e) {
       console.error('Erro upload PDF proposta:', e);
       return erroInterno(req, res, e, 'upload-pdf-proposta');
@@ -4361,11 +4395,11 @@ app.post('/api/admin/candidatura/:id/enviar-proposta', authAdmin, async (req, re
 // ===== Admin: visualizar proposta enviada (pra imprimir/baixar de novo) =====
 app.get('/api/admin/candidatura/:id/proposta', authAdmin, async (req, res) => {
   const { rows } = await pool.query(
-    'SELECT proposta_texto, proposta_pdf_url, proposta_enviada_em, proposta_aceita_em, proposta_recusada_em, proposta_motivo_recusa FROM candidaturas WHERE id = $1',
+    'SELECT proposta_texto, proposta_pdf_url, proposta_pdf_public_id, proposta_enviada_em, proposta_aceita_em, proposta_recusada_em, proposta_motivo_recusa FROM candidaturas WHERE id = $1',
     [req.params.id]
   );
   if (rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
-  res.json({ ok: true, proposta: rows[0] });
+  res.json({ ok: true, proposta: protegerUrlProposta(rows[0]) });
 });
 
 // ===== Candidato: aceitar proposta =====
@@ -4586,7 +4620,7 @@ app.post('/api/candidato/recusar-proposta/:candidaturaId', authCandidato, async 
 // ===== Candidato: ver proposta pendente (pra aceitar/recusar) =====
 app.get('/api/candidato/candidatura/:id/proposta', authCandidato, async (req, res) => {
   const { rows: c } = await pool.query(`
-    SELECT c.id, c.etapa_atual, c.status, c.proposta_texto, c.proposta_pdf_url,
+    SELECT c.id, c.etapa_atual, c.status, c.proposta_texto, c.proposta_pdf_url, c.proposta_pdf_public_id,
            c.proposta_enviada_em, c.proposta_aceita_em, c.proposta_recusada_em,
            v.titulo, cd.email as cand_email
     FROM candidaturas c
@@ -4601,7 +4635,7 @@ app.get('/api/candidato/candidatura/:id/proposta', authCandidato, async (req, re
     ok: true,
     proposta: {
       texto: cand.proposta_texto,
-      pdf_url: cand.proposta_pdf_url,
+      pdf_url: cloudinaryAuthenticatedUrl(cand.proposta_pdf_public_id, 'proposta.pdf', 'application/pdf') || null,
       enviada_em: cand.proposta_enviada_em,
       aceita_em: cand.proposta_aceita_em,
       recusada_em: cand.proposta_recusada_em,
@@ -6050,13 +6084,13 @@ app.get('/api/empresa/candidatura/:id/documentos', requireEmpresaViewer, async (
     if (!cand[0].tem_acesso) return res.status(403).json({ erro: 'Sem acesso a esta candidatura' });
 
     const { rows } = await pool.query(
-      `SELECT id, tipo, categoria, valor_texto, arquivo_url, arquivo_nome, arquivo_tipo,
+      `SELECT id, tipo, categoria, valor_texto, arquivo_url, arquivo_public_id, arquivo_nome, arquivo_tipo,
               arquivo_tamanho, status, justificativa_admin, enviado_em, revisado_em
        FROM documentos_candidatura WHERE candidatura_id = $1
        ORDER BY categoria, id`,
       [candidaturaId]
     );
-    res.json({ documentos: rows, obrigatorios: DOCUMENTOS_OBRIGATORIOS });
+    res.json({ documentos: rows.map(protegerUrlDocumento), obrigatorios: DOCUMENTOS_OBRIGATORIOS });
     await audit(req, 'empresa.documento.viewed', { resource_type: 'candidatura', resource_id: candidaturaId, metadata: { qtd_documentos: rows.length } });
   } catch (e) {
     console.error('[empresa docs]', e);
@@ -6075,7 +6109,7 @@ app.get('/api/empresa/candidatura/:id/documentos/:docId/arquivo', requireEmpresa
   }
   try {
     const { rows } = await pool.query(`
-      SELECT d.arquivo_url, d.arquivo_nome, d.arquivo_tipo, d.arquivo_tamanho
+      SELECT d.arquivo_url, d.arquivo_public_id, d.arquivo_nome, d.arquivo_tipo, d.arquivo_tamanho
       FROM documentos_candidatura d
       JOIN candidaturas c ON c.id = d.candidatura_id
       JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id
@@ -6085,8 +6119,9 @@ app.get('/api/empresa/candidatura/:id/documentos/:docId/arquivo', requireEmpresa
       LIMIT 1
     `, [documentoId, candidaturaId, empresaId]);
     if (!rows.length || !rows[0].arquivo_url) return res.status(404).json({ erro: 'Arquivo não encontrado' });
+    const sourceUrl = cloudinaryAuthenticatedUrl(rows[0].arquivo_public_id, rows[0].arquivo_nome, rows[0].arquivo_tipo) || rows[0].arquivo_url;
     let remote;
-    try { remote = new URL(rows[0].arquivo_url); } catch (_) { return res.status(400).json({ erro: 'URL de arquivo inválida' }); }
+    try { remote = new URL(sourceUrl); } catch (_) { return res.status(400).json({ erro: 'URL de arquivo inválida' }); }
     if (!['http:', 'https:'].includes(remote.protocol)) return res.status(400).json({ erro: 'Origem de arquivo inválida' });
     const upstream = await axios.get(remote.toString(), {
       responseType: 'stream', timeout: 30000, maxContentLength: 25 * 1024 * 1024,
@@ -7402,7 +7437,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
   // IMPORTANTE: registrado ANTES do handler 404 global (linha abaixo), senão as rotas
   // novas nunca são alcançadas — Express processa middlewares em ordem.
   const { registrar: registrarEmpresaExtra } = require('./routes/empresa_extra');
-  registrarEmpresaExtra(app, { pool, documentosObrigatorios: DOCUMENTOS_OBRIGATORIOS });
+  registrarEmpresaExtra(app, { pool, documentosObrigatorios: DOCUMENTOS_OBRIGATORIOS, cloudinaryAuthenticatedUrl });
 
   // =========================================================================
   // FASE 9 — Rotas de planos (público), perfil empresa (tenant) e onboarding

@@ -205,8 +205,15 @@ async function restoreFromCloudinary(options = {}) {
   const r = result.resources[0];
   console.log(`[RESTORE] Último backup: ${r.public_id} (${r.created_at})`);
 
-  // Baixa o arquivo
-  const response = await fetch(r.secure_url);
+  // Backups são authenticated; o download usa URL assinada gerada no servidor.
+  const downloadUrl = cloudinary.url(r.public_id, {
+    resource_type: r.resource_type || 'raw',
+    type: 'authenticated',
+    sign_url: true,
+    secure: true,
+    format: 'gz'
+  });
+  const response = await fetch(downloadUrl);
   if (!response.ok) {
     return { ok: false, erro: `Erro ao baixar backup: ${response.status}` };
   }

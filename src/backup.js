@@ -127,6 +127,7 @@ async function performBackup() {
           folder: FOLDER,
           public_id: publicId,
           resource_type: 'raw',
+          type: 'authenticated',
           overwrite: true
         },
         (err, result) => {

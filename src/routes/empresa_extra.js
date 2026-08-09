@@ -15,7 +15,7 @@
 const { requireEmpresaViewer, requireRecrutadorOuAdmin } = require('../auth');
 
 function registrar(app, ctx) {
-  const { pool, documentosObrigatorios = [] } = ctx;
+  const { pool, documentosObrigatorios = [], cloudinaryAuthenticatedUrl } = ctx;
   console.log('[FASE 8] Registrando 21 rotas /api/empresa/* complementares...');
 
   // ===========================================================
@@ -288,7 +288,8 @@ function registrar(app, ctx) {
       const { rows } = await pool.query(`
         INSERT INTO entrevistas (candidatura_id, etapa, data_hora, duracao_minutos, local, link_reuniao, observacoes, status, criado_em)
         VALUES ($1, $2, $3, $4, $5, $6, $7, 'agendada', NOW())
-        RETURNING *
+        RETURNING id, candidatura_id, etapa, data_hora, duracao_minutos, local,
+                  link_reuniao, observacoes, status, criado_em
       `, [candidatura_id, etapa, dataFinal.toISOString(), duracao_minutos || 60,
           isOnline ? 'Online (Google Meet)' : local, linkFinal, observacoes]);
       const hist = Array.isArray(candCheck.rows[0].historico) ? candCheck.rows[0].historico : [];
@@ -539,7 +540,7 @@ function registrar(app, ctx) {
       `, [id, req.user.id, empresa_id]);
       if (check.rows.length === 0) return res.status(403).json({ erro: 'Candidatura não pertence a esta empresa' });
       const { rows } = await pool.query(`
-        SELECT id, proposta_texto as texto, proposta_pdf_url as arquivo_url,
+        SELECT id, proposta_texto as texto, proposta_pdf_url as arquivo_url, proposta_pdf_public_id,
                proposta_enviada_em as enviada_em, proposta_aceita_em as aceita_em,
                proposta_recusada_em as recusada_em, proposta_motivo_recusa as motivo_recusa
         FROM candidaturas WHERE id = $1
@@ -548,7 +549,7 @@ function registrar(app, ctx) {
       const proposta = row && row.enviada_em ? {
         candidatura_id: Number(id),
         texto: row.texto,
-        arquivo_url: row.arquivo_url,
+        arquivo_url: cloudinaryAuthenticatedUrl(row.proposta_pdf_public_id, 'proposta.pdf', 'application/pdf') || null,
         enviada_em: row.enviada_em,
         aceita_em: row.aceita_em,
         recusada_em: row.recusada_em,
