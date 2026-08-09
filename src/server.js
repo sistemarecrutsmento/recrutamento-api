@@ -6,6 +6,7 @@ const cors = require('cors');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const axios = require('axios');
+const asaas = require('./asaas');
 const cloudinary = require('cloudinary').v2;
 const { analisarCurriculo } = require('./curriculoParser');
 const { validateBase64File } = require('./fileValidation');
@@ -9608,7 +9609,46 @@ app.get('/api/admin/me', authAdmin, async (req, res) => {
   }
 });
 
-  // FIX Etapa 2 (2026-07-27): HANDLER GLOBAL 404 — JSON seguro, sem stack.
+  // ===== Assinatura da empresa — preparação segura para o Asaas =====
+  // Não recebe dados de cartão no Vagas.io. O pagamento será coletado pelo checkout do gateway.
+  app.get('/api/empresa/assinatura', requireRecrutadorOuAdmin, async (req, res) => {
+    try {
+      const empresaId = Number(req.user.empresa_id);
+      const { rows } = await pool.query(`
+        SELECT e.id, e.plano, e.plano_id, e.trial_inicio, e.trial_fim,
+               e.assinatura_status, e.pagamento_configurado,
+               e.assinatura_confirmada_em, e.assinatura_vence_em,
+               (e.asaas_customer_id IS NOT NULL) AS cliente_pagamento_criado
+        FROM empresas e WHERE e.id = $1`, [empresaId]);
+      if (!rows.length) return res.status(404).json({ erro: 'Empresa não encontrada' });
+      res.json({ assinatura: rows[0], gateway: 'asaas', gateway_configurado: asaas.configurado() });
+    } catch (e) { return erroInterno(req, res, e, 'api-empresa-assinatura-get'); }
+  });
+
+  app.post('/api/empresa/assinatura/cliente', requireRecrutadorOuAdmin, async (req, res) => {
+    try {
+      if (!asaas.configurado()) return res.status(503).json({ erro: 'Gateway de pagamento ainda não configurado' });
+      const empresaId = Number(req.user.empresa_id);
+      const { rows } = await pool.query(`
+        SELECT id, nome, email_principal, cnpj, telefone, asaas_customer_id
+        FROM empresas WHERE id = $1`, [empresaId]);
+      if (!rows.length) return res.status(404).json({ erro: 'Empresa não encontrada' });
+      const empresa = rows[0];
+      if (empresa.asaas_customer_id) return res.json({ ok: true, customer_id: empresa.asaas_customer_id, existente: true });
+      if (!empresa.email_principal) return res.status(400).json({ erro: 'Cadastre um e-mail principal antes de configurar o pagamento' });
+      const cliente = await asaas.criarCliente({
+        name: empresa.nome, email: empresa.email_principal,
+        cpfCnpj: empresa.cnpj, phone: empresa.telefone
+      });
+      await pool.query('UPDATE empresas SET asaas_customer_id = $1 WHERE id = $2', [cliente.id, empresaId]);
+      res.status(201).json({ ok: true, customer_id: cliente.id, existente: false });
+    } catch (e) {
+      console.error('[asaas cliente]', e.message);
+      return res.status(502).json({ erro: 'Não foi possível preparar o cadastro de pagamento' });
+    }
+  });
+
+  // FIX Etapa 2 (2026-07-27): HANDLER GLOBAL 404 — JSON seguro.
   // =========================================================================
   // Impede que Express retorne HTML "<pre>Cannot GET ...</pre>" em rotas inexistentes.
   // Aplica para qualquer método (GET/POST/PUT/DELETE/OPTIONS) em qualquer rota não casada.
