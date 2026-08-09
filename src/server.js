@@ -9665,7 +9665,7 @@ app.get('/api/admin/me', authAdmin, async (req, res) => {
       if (!e.trial_fim) return res.status(400).json({ erro: 'Período de teste ainda não foi iniciado' });
       const base = process.env.FRONTEND_URL || 'https://vagasio.com.br';
       const checkout = await asaas.criarCheckoutRecorrente({
-        customerData: { name: e.nome, email: e.email_principal, cpfCnpj: e.cnpj || undefined, phone: e.telefone || undefined },
+        // O checkout coleta os dados obrigatórios do pagador com segurança no Asaas.
         item: { name: `Vagas.io — Plano ${e.plano_nome || 'empresarial'}`, description: 'Assinatura mensal Vagas.io', quantity: 1, value: valor },
         nextDueDate: new Date(e.trial_fim).toISOString().slice(0, 10),
         callback: { successUrl: `${base}/empresa/index.html?page=configuracoes&pagamento=sucesso`, cancelUrl: `${base}/empresa/index.html?page=configuracoes&pagamento=cancelado`, expiredUrl: `${base}/empresa/index.html?page=configuracoes&pagamento=expirado` }
