@@ -5154,14 +5154,21 @@ app.post('/api/empresa/cadastro', rateLimitByIp('cadastro-empresa'), async (req,
       }
     }
 
-    // 3. Cria a empresa — resolve plano_id via tabela planos
-    const planoSlug = plano || 'essencial';
+    // 3. Cria a empresa — apenas os três planos comerciais podem iniciar um teste.
+    const planosComerciais = new Set(['essencial', 'profissional', 'enterprise']);
+    const planoSlug = String(plano || 'essencial').toLowerCase().trim();
+    if (!planosComerciais.has(planoSlug)) {
+      return res.status(400).json({ erro: 'Plano inválido. Escolha Essencial, Profissional ou Enterprise.' });
+    }
     const planoRow = await pool.query('SELECT id FROM planos WHERE slug = $1 LIMIT 1', [planoSlug]);
     const planoId = planoRow.rows[0]?.id || null;
     const empRes = await pool.query(`
-      INSERT INTO empresas (nome, cnpj, email_principal, telefone, ativo, plano, plano_id, slug)
-      VALUES ($1, $2, $3, $4, true, $5, $6, $7)
-      RETURNING id, nome, cnpj, email_principal, plano, plano_id, slug, criado_em
+      INSERT INTO empresas
+        (nome, cnpj, email_principal, telefone, ativo, plano, plano_id, slug,
+         trial_inicio, trial_fim, assinatura_status, pagamento_configurado)
+      VALUES ($1, $2, $3, $4, true, $5, $6, $7, NOW(), NOW() + INTERVAL '30 days', 'trial', false)
+      RETURNING id, nome, cnpj, email_principal, plano, plano_id, slug, criado_em,
+                trial_inicio, trial_fim, assinatura_status, pagamento_configurado
     `, [empresa_nome.trim(), cnpjClean, email_principal?.toLowerCase() || null, telefone || null, planoSlug, planoId, slugFinal]);
     const empresa = empRes.rows[0];
 
@@ -5215,7 +5222,11 @@ app.post('/api/empresa/cadastro', rateLimitByIp('cadastro-empresa'), async (req,
         email_principal: empresa.email_principal,
         plano: empresa.plano,
         slug: empresa.slug,
-        criado_em: empresa.criado_em
+        criado_em: empresa.criado_em,
+        trial_inicio: empresa.trial_inicio,
+        trial_fim: empresa.trial_fim,
+        assinatura_status: empresa.assinatura_status,
+        pagamento_configurado: empresa.pagamento_configurado
       }
     });
     // Fase 13 — Boas-vindas empresa (não bloqueia resposta)
