@@ -9636,6 +9636,43 @@ app.get('/api/admin/me', authAdmin, async (req, res) => {
   });
 
 
+  // Processamento diário do trial. Não cria cobranças: apenas avisa e suspende
+  // contas que terminaram o teste sem assinatura confirmada.
+  async function processarTrials() {
+    try {
+      const { rows: avisos } = await pool.query(`
+        SELECT id, nome, email_principal, trial_fim, plano
+        FROM empresas
+        WHERE assinatura_status = 'trial'
+          AND trial_aviso_enviado_em IS NULL
+          AND trial_fim > NOW() + INTERVAL '4 days 18 hours'
+          AND trial_fim <= NOW() + INTERVAL '5 days 6 hours'
+          AND email_principal IS NOT NULL
+        LIMIT 100
+      `);
+      for (const empresa of avisos) {
+        const resultado = await emailSvc.avisoFimTrial({
+          empresa_id: empresa.id, empresa_nome: empresa.nome,
+          empresa_email: empresa.email_principal, trial_fim: empresa.trial_fim,
+          plano: empresa.plano
+        });
+        if (resultado?.ok) {
+          await pool.query('UPDATE empresas SET trial_aviso_enviado_em = NOW() WHERE id = $1 AND trial_aviso_enviado_em IS NULL', [empresa.id]);
+        }
+      }
+      await pool.query(`
+        UPDATE empresas
+        SET assinatura_status = 'expired', ativo = false
+        WHERE assinatura_status = 'trial' AND trial_fim IS NOT NULL AND trial_fim <= NOW()
+          AND COALESCE(pagamento_configurado, false) = false
+      `);
+    } catch (e) {
+      console.error('[trial] processamento diário falhou:', e.message);
+    }
+  }
+  processarTrials();
+  setInterval(processarTrials, 24 * 60 * 60 * 1000).unref();
+
   // Helper: respostas 500 seguras (log interno + mensagem genérica pro cliente).
   // Substitui o padrão `res.status(500).json({ erro: e.message })` que vaza SQL/Express/etc.
   // NÃO usar em rotas /_debug/* (precisam do erro real pro Fabio).
