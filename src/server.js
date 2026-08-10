@@ -1712,7 +1712,7 @@ app.get('/api/candidato/entrevistas', authCandidato, async (req, res) => {
     const { rows } = await pool.query(`
       SELECT
         e.id, e.candidatura_id, e.etapa, e.data_hora, e.duracao_minutos,
-        e.local, e.link_reuniao, e.observacoes, e.status,
+        e.local, NULL AS link_reuniao, e.observacoes, e.status,
         vr.room_id AS video_room_id,
         v.titulo AS vaga_titulo, v.empresa AS vaga_empresa
       FROM entrevistas e
@@ -2271,7 +2271,7 @@ app.get('/api/admin/dashboard', authAdmin, async (req, res) => {
     const proximas = await pool.query(`
       SELECT
         e.id, e.candidatura_id, e.etapa, e.data_hora, e.duracao_minutos,
-        e.local, e.link_reuniao, e.observacoes, e.status,
+        e.local, NULL AS link_reuniao, e.observacoes, e.status,
         c.vaga_id, v.titulo as vaga_titulo, v.empresa,
         cd.id as candidato_id, cd.nome as candidato_nome, cd.foto_url, cd.email
       FROM entrevistas e
@@ -3780,7 +3780,7 @@ app.get('/api/admin/entrevistas', authAdmin, async (req, res) => {
     }
     const r = await pool.query(`
       SELECT e.id, e.candidatura_id, e.etapa, e.data_hora, e.duracao_minutos, e.local,
-             e.link_reuniao, e.observacoes, e.status, e.criado_em,
+             NULL AS link_reuniao, e.observacoes, e.status, e.criado_em,
              v.titulo as vaga_titulo, v.id as vaga_id,
              c.nome as candidato_nome, c.email as candidato_email, c.celular as candidato_telefone
       FROM entrevistas e
@@ -5739,6 +5739,7 @@ app.get('/api/empresa/dashboard', requireEmpresaViewer, async (req, res) => {
         cd.nome as candidato_nome, cd.email as candidato_email,
         v.titulo as vaga_titulo
       FROM entrevistas e
+      LEFT JOIN video_rooms vr ON vr.entrevista_id = e.id AND vr.status = 'active'
       JOIN candidaturas c ON c.id = e.candidatura_id
       JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.revogado_em IS NULL
       JOIN candidatos cd ON cd.id = c.candidato_id
@@ -6041,11 +6042,14 @@ app.get('/api/empresa/agenda', requireEmpresaViewer, async (req, res) => {
       whereExtra = `AND e.status = 'cancelada'`;
     }
     const { rows } = await pool.query(`
-      SELECT e.id, e.etapa, e.data_hora, e.duracao_minutos, e.local, e.link_reuniao, e.observacoes, e.status,
+      SELECT e.id, e.etapa, e.data_hora, e.duracao_minutos, e.local, NULL AS link_reuniao, e.observacoes, e.status,
         c.id as candidatura_id, c.etapa_atual, c.status as cand_status,
+        vr.room_id AS video_room_id,
+        CASE WHEN vr.room_id IS NOT NULL THEN 'vagasio' ELSE NULL END AS video_provider,
         cd.id as candidato_id, cd.nome as candidato_nome, cd.email as candidato_email, cd.foto_url,
         v.id as vaga_id, v.titulo as vaga_titulo, v.empresa as vaga_empresa, v.etapas as vaga_etapas
       FROM entrevistas e
+      LEFT JOIN video_rooms vr ON vr.entrevista_id = e.id AND vr.status = 'active'
       JOIN candidaturas c ON c.id = e.candidatura_id
       JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.revogado_em IS NULL AND eva.empresa_id = $1
       JOIN candidatos cd ON cd.id = c.candidato_id
@@ -6155,13 +6159,13 @@ app.get('/api/empresa/candidatura/:id', requireEmpresaViewer, async (req, res) =
     // atual, preservando a compatibilidade da análise de candidatura.
     const { rows: entrevistas } = await pool.query(
       `SELECT e.id, e.candidatura_id, e.etapa, e.data_hora, e.duracao_minutos, e.local,
-              e.link_reuniao, e.observacoes, e.status, e.criado_em,
+              NULL AS link_reuniao, e.observacoes, e.status, e.criado_em,
               vr.room_id AS video_room_id,
               CASE WHEN vr.room_id IS NOT NULL THEN 'vagasio' ELSE NULL END AS video_provider
        FROM entrevistas e
        LEFT JOIN video_rooms vr ON vr.entrevista_id = e.id AND vr.status = 'active'
        WHERE e.candidatura_id = $1
-       ORDER BY e.data_hora DESC, e.id DESC`
+       ORDER BY e.data_hora DESC, e.id DESC`,
       [id]
     );
     candidatura.entrevistas = entrevistas;
