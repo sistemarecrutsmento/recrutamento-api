@@ -388,7 +388,7 @@ app.get('/api/public/empresa/:slug', async (req, res) => {
     const { rows: c } = await pool.query(
       `SELECT COUNT(*)::int AS total
        FROM vagas
-       WHERE status = 'publicada'
+       WHERE LOWER(TRIM(status)) = 'publicada'
          AND (empresa_id = (SELECT id FROM empresas WHERE slug = $1 AND ativo = true)
               OR (empresa_id IS NULL AND NULLIF(TRIM(empresa), '') IS NOT NULL
                   AND LOWER(TRIM(empresa)) = LOWER(TRIM((SELECT nome FROM empresas WHERE slug = $1 AND ativo = true)))))`,
@@ -441,7 +441,7 @@ app.get('/api/public/empresa/:slug/vagas', async (req, res) => {
          v.area, v.salario_min, v.salario_max, v.descricao,
          v.criada_em
        FROM vagas v
-       WHERE v.status = 'publicada'
+       WHERE LOWER(TRIM(v.status)) = 'publicada'
          AND (v.empresa_id = $1
               OR (v.empresa_id IS NULL AND NULLIF(TRIM(v.empresa), '') IS NOT NULL
                   AND LOWER(TRIM(v.empresa)) = LOWER(TRIM((SELECT nome FROM empresas WHERE id = $1)))))
@@ -484,7 +484,7 @@ app.get('/api/public/empresa/:slug/vagas/:id', async (req, res) => {
        WHERE e.slug = $1
          AND e.ativo = true
          AND v.id = $2
-         AND v.status = 'publicada'
+         AND LOWER(TRIM(v.status)) = 'publicada'
          AND (v.empresa_id = e.id
               OR (v.empresa_id IS NULL AND NULLIF(TRIM(v.empresa), '') IS NOT NULL
                   AND LOWER(TRIM(v.empresa)) = LOWER(TRIM(e.nome))))
@@ -1867,7 +1867,7 @@ app.get('/api/vagas', async (req, res) => {
                 AND (e.id = v.empresa_id
                   OR (v.empresa_id IS NULL AND NULLIF(TRIM(v.empresa), '') IS NOT NULL
                       AND LOWER(TRIM(e.nome)) = LOWER(TRIM(v.empresa))))
-             WHERE v.status = 'publicada'`;
+             WHERE LOWER(TRIM(v.status)) = 'publicada'`;
   const params = [];
   if (cidade) { params.push(`%${cidade}%`); sql += ` AND v.cidade ILIKE $${params.length}`; }
   if (estado) { params.push(`%${estado}%`); sql += ` AND v.estado ILIKE $${params.length}`; }
@@ -1898,10 +1898,10 @@ app.get('/api/vagas/:id', async (req, res) => {
     const { rows } = await pool.query(
       `SELECT v.id, v.titulo, v.empresa, v.descricao, v.requisitos, v.beneficios, v.salario_min, v.salario_max,
               v.tipo_contrato, v.nivel, v.area, v.cidade, v.estado, v.etapas,
-              CASE WHEN v.status = 'publicada' THEN 'publicada' ELSE NULL END as status,
+              CASE WHEN LOWER(TRIM(v.status)) = 'publicada' THEN 'publicada' ELSE NULL END as status,
               ARRAY(SELECT tag FROM vaga_tags WHERE vaga_id = v.id ORDER BY criado_em) AS tags
        FROM vagas v
-       WHERE v.id = $1 AND v.status = 'publicada'
+       WHERE v.id = $1 AND LOWER(TRIM(v.status)) = 'publicada'
          AND EXISTS (
            SELECT 1 FROM empresas e
            WHERE e.ativo = true
