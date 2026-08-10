@@ -559,9 +559,8 @@ app.get('/api/_build', (req, res) => res.json({ ok: true }));
 // As rotas que operam Calendar (Google Meet) também exigem authAdmin.
 const DEBUG = DEBUG_API_ENABLED;  // reusa a var do topo
 
-if (DEBUG) {
-  // ====== Apenas metadados de versão (não vaza nada sensível) ======
-  // VagasIO video-call rollout (disabled by default; internal allowlist only).
+// VagasIO video-call rollout. This route is always mounted so the disabled
+// default is an intentional generic 404; DEBUG_API must not gate product flags.
 app.get('/api/video/config', authMiddleware, (req, res) => {
   const result = videoFeature.getConfig(req.user);
   if (!result.ok) return res.status(result.status || 404).json({ erro: result.erro });
@@ -569,6 +568,8 @@ app.get('/api/video/config', authMiddleware, (req, res) => {
   return res.json(result.config);
 });
 
+if (DEBUG) {
+  // ====== Apenas metadados de versão (não vaza nada sensível) ======
 app.get('/api/_debug/versao', authDebug, (req, res) => {
     res.json({
       ok: true,
