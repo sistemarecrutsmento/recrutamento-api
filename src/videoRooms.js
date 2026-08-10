@@ -3,16 +3,29 @@ const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const { pool } = require('./db');
 
+// Development rollout uses the existing VagasIO authentication and records.
+// Keep an explicit flag so the capability can be rolled back without code changes.
 const enabled = () => process.env.VAGASIO_VIDEO_CALLS === '1';
-const allow = (u) => {
-  const ids = new Set(String(process.env.VAGASIO_VIDEO_INTERNAL_USER_IDS || '').split(',').map(x=>x.trim()).filter(Boolean));
-  const emails = new Set(String(process.env.VAGASIO_VIDEO_INTERNAL_EMAILS || '').split(',').map(x=>x.trim().toLowerCase()).filter(Boolean));
-  return !!u && (ids.has(String(u.id)) || emails.has(String(u.email || '').toLowerCase()));
+const signalUrl = () => {
+  const raw = String(process.env.VAGASIO_VIDEO_SIGNAL_URL || '').trim();
+  if (/^https:\/\//i.test(raw)) return raw.replace(/^https:/i, 'wss:');
+  return raw;
 };
-function role(u) { return u?.tipo === 'candidato' ? 'candidate' : (['empresa','recrutador','admin'].includes(u?.tipo) ? 'recruiter' : null); }
+const normalizeTipo = (tipo) => {
+  const t = String(tipo || '').toLowerCase().trim();
+  if (['candidato','candidate'].includes(t)) return 'candidato';
+  if (['empresa','empresa_admin','admin_empresa','recrutador','recruiter'].includes(t)) return t === 'recrutador' || t === 'recruiter' ? 'recrutador' : 'empresa';
+  if (['admin','administrador'].includes(t)) return 'admin';
+  return '';
+};
+const allow = (u) => ['candidato','empresa','recrutador','admin'].includes(normalizeTipo(u?.tipo));
+function role(u) { return normalizeTipo(u?.tipo) === 'candidato' ? 'candidate' : (allow(u) ? 'recruiter' : null); }
 function gate(req, res) {
-  if (!enabled() || !allow(req.user) || !process.env.VAGASIO_VIDEO_SIGNAL_URL || !/^wss:\/\//i.test(process.env.VAGASIO_VIDEO_SIGNAL_URL)) { res.status(404).json({ erro:'Recurso não encontrado' }); return false; }
-  if (!role(req.user)) { res.status(404).json({ erro:'Recurso não encontrado' }); return false; }
+  const enabledNow = enabled(), url = signalUrl(), tipo = normalizeTipo(req.user?.tipo);
+  if (!enabledNow || !tipo || !/^wss:\/\//i.test(url)) {
+    console.warn('[VIDEO GATE] bloqueado', JSON.stringify({ enabled: enabledNow, tipo: tipo || 'ausente', signalConfigured: /^wss:\/\//i.test(url) }));
+    res.status(404).json({ erro:'Recurso não encontrado' }); return false;
+  }
   return true;
 }
 function hash(v) { return crypto.createHash('sha256').update(v).digest('hex'); }
@@ -42,12 +55,15 @@ async function issue(req, room) {
   const q=await pool.query(`SELECT r.*, ca.candidato_id FROM video_rooms r JOIN candidaturas ca ON ca.id=r.candidatura_id WHERE r.room_id=$1`,[room]);
   if(!q.rowCount) return null;
   const r=q.rows[0], isCand=req.user.tipo==='candidato'&&Number(req.user.id)===Number(r.candidato_id), isRec=['empresa','recrutador'].includes(req.user.tipo)&&Number(req.user.empresa_id)===Number(r.empresa_id), isAdmin=req.user.tipo==='admin';
-  if(!isCand&&!isRec&&!isAdmin||r.status!=='active'||new Date(r.expires_at)<=new Date()) return null;
+  if((!isCand&&!isRec&&!isAdmin)||r.status!=='active'||new Date(r.expires_at)<=new Date()) return null;
   const participant_role=isCand?'candidate':'recruiter';
-  const secret=process.env.VAGASIO_VIDEO_TOKEN_SECRET; if(!secret) throw new Error('VIDEO_TOKEN_SECRET missing');
-  const exp=Math.min(Math.floor(new Date(r.expires_at).getTime()/1000),Math.floor(Date.now()/1000)+300);
-  const token=jwt.sign({iss:'vagasio-api',sub:String(req.user.id),user_id:String(req.user.id),user_type:req.user.tipo,room_id:r.room_id,candidatura_id:r.candidatura_id,entrevista_id:r.entrevista_id,role:participant_role,jti:crypto.randomUUID()},secret,{algorithm:'HS256',expiresIn:Math.max(30,exp-Math.floor(Date.now()/1000))});
+  // Never fall back to the general API secret: this key is shared only with preview signaling.
+  const secret=process.env.VAGASIO_VIDEO_JWT_SECRET || process.env.VAGASIO_VIDEO_PREVIEW_JWT_SECRET;
+  if(!secret) throw new Error('VAGASIO_VIDEO_JWT_SECRET missing');
+  const now=Math.floor(Date.now()/1000), exp=Math.min(Math.floor(new Date(r.expires_at).getTime()/1000),now+300);
+  const claims={iss:'vagasio-preview',aud:'vagasio-video',sub:String(req.user.id),user_id:String(req.user.id),room:String(r.room_id),candidature_id:String(r.candidatura_id),interview_id:String(r.entrevista_id),role:participant_role,jti:crypto.randomUUID(),iat:now};
+  const token=jwt.sign(claims,secret,{algorithm:'HS256',expiresIn:Math.max(30,exp-now)});
   await pool.query(`INSERT INTO video_participant_tokens(room_id,token_hash,user_id,user_type,participant_role,expires_at) VALUES($1,$2,$3,$4,$5,to_timestamp($6))`,[r.room_id,hash(token),String(req.user.id),req.user.tipo,participant_role,exp]);
-  return {token,expiresAt:new Date(exp*1000).toISOString(),roomId:r.room_id,role:participant_role,signalUrl:process.env.VAGASIO_VIDEO_SIGNAL_URL};
+  return {token,expiresAt:new Date(exp*1000).toISOString(),roomId:r.room_id,role:participant_role,userId:String(req.user.id),signalUrl:signalUrl(),candidatureId:String(r.candidatura_id),interviewId:String(r.entrevista_id)};
 }
-module.exports={gate,role,allow,access,getOrCreate,issue,pool};
+module.exports={gate,role,allow,access,getOrCreate,issue,pool,signalUrl};
