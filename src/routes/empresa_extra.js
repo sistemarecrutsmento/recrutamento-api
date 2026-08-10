@@ -507,11 +507,16 @@ function registrar(app, ctx) {
       `, [id, req.user.id, empresa_id]);
       if (check.rows.length === 0) return res.status(403).json({ erro: 'Candidatura não pertence a esta empresa' });
       const cand = check.rows[0];
-      let novaEtapa = etapa !== undefined ? etapa : cand.etapa_atual;
+      let etapaAtual = Number(cand.etapa_atual);
+      if (!Number.isFinite(etapaAtual)) etapaAtual = 1;
+      let novaEtapa = etapa !== undefined ? Number(etapa) : etapaAtual;
+      if (!Number.isFinite(novaEtapa)) novaEtapa = etapaAtual;
       let novoStatus = cand.status;
       if (acao === 'avancar') {
-        novaEtapa = cand.etapa_atual + 1;
-        const totalEtapas = Array.isArray(cand.vaga_etapas) ? cand.vaga_etapas.length : 7;
+        novaEtapa = etapaAtual + 1;
+        let etapas = cand.vaga_etapas;
+        if (typeof etapas === 'string') { try { etapas = JSON.parse(etapas); } catch (_) { etapas = []; } }
+        const totalEtapas = Array.isArray(etapas) ? etapas.length : 7;
         if (novaEtapa >= totalEtapas) novoStatus = 'contratado';
         else novoStatus = 'em_andamento';
       } else if (acao === 'reprovar') {
@@ -521,7 +526,9 @@ function registrar(app, ctx) {
       }
       // O histórico pode vir nulo ou como objeto em candidaturas antigas.
       // Normaliza antes de adicionar o novo evento para não quebrar a transição de etapa.
-      const hist = Array.isArray(cand.historico) ? cand.historico : [];
+      let hist = cand.historico;
+      if (typeof hist === 'string') { try { hist = JSON.parse(hist); } catch (_) { hist = []; } }
+      if (!Array.isArray(hist)) hist = [];
       hist.push({ tipo: 'status', por: `empresa:${req.user.email}`, quando: new Date().toISOString(), acao, etapa: novaEtapa, status: novoStatus, parecer: parecer || null });
       await pool.query(`UPDATE candidaturas SET etapa_atual = $1, status = $2, historico = $3::jsonb, atualizada_em = NOW() WHERE id = $4`, [novaEtapa, novoStatus, JSON.stringify(hist), id]);
       res.json({ ok: true, etapa_atual: novaEtapa, status: novoStatus });
