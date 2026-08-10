@@ -1,5 +1,5 @@
 /**
- * Módulo 2FA para Admin/Recrutador - Vagas.io
+ * Módulo 2FA para Admin/Recrutador - VagasIO
  * 
  * Gerencia códigos de verificação de 6 dígitos com:
  * - Geração cripto-aleatória (crypto.randomInt)
