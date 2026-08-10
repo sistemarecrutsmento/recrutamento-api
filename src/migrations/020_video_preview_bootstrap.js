@@ -12,6 +12,7 @@ async function up() {
     CREATE TABLE IF NOT EXISTS entrevistas (id SERIAL PRIMARY KEY, candidatura_id INTEGER NOT NULL REFERENCES candidaturas(id), empresa_id INTEGER REFERENCES empresas(id));
     CREATE TABLE IF NOT EXISTS empresa_usuarios (id TEXT PRIMARY KEY, empresa_id INTEGER REFERENCES empresas(id));
   `);
+  await pool.query(`ALTER TABLE vagas ADD COLUMN IF NOT EXISTS empresa_id INTEGER REFERENCES empresas(id); ALTER TABLE entrevistas ADD COLUMN IF NOT EXISTS empresa_id INTEGER REFERENCES empresas(id);`);
   const e = await pool.query(`INSERT INTO empresas(nome) VALUES ('Preview Synthetic Company') ON CONFLICT DO NOTHING RETURNING id`);
   const empresa = e.rows[0]?.id || (await pool.query(`SELECT id FROM empresas WHERE nome='Preview Synthetic Company' LIMIT 1`)).rows[0].id;
   const c = await pool.query(`INSERT INTO candidatos(nome,email) VALUES ('Preview Synthetic Candidate','preview.candidate@vagasio.invalid') ON CONFLICT(email) DO UPDATE SET nome=EXCLUDED.nome RETURNING id`);
