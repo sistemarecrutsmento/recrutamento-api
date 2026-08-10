@@ -254,7 +254,7 @@ function registrar(app, ctx) {
       const { rows } = await pool.query(
         `SELECT e.id, e.candidatura_id, e.etapa, e.data_hora, e.duracao_minutos, e.local, NULL AS link_reuniao, e.observacoes, e.status, e.criado_em,
                 vr.room_id AS video_room_id
-         FROM entrevistas e LEFT JOIN video_rooms vr ON vr.entrevista_id=e.id AND vr.status='active' WHERE candidatura_id = $1 ORDER BY data_hora DESC, id DESC`, [id]
+         FROM entrevistas e LEFT JOIN video_rooms vr ON vr.entrevista_id=e.id AND vr.status='active' WHERE e.candidatura_id = $1 ORDER BY e.data_hora DESC, e.id DESC`, [id]
       );
       res.json({ entrevistas: rows });
     } catch (e) {
