@@ -1,5 +1,5 @@
 // =============================================================================
-// emailService.js — Serviço central de e-mail Vagas.io (Fase 13)
+// emailService.js — Serviço central de e-mail VagasIO (Fase 13)
 // =============================================================================
 // Reutiliza enviarEmail() do ../email.js (Resend > Web3Forms > SMTP)
 // Acrescenta: templates visuais unificados, preferências, dedup de chat,
@@ -131,7 +131,7 @@ async function boasVindasCandidato({ nome, email, candidato_id }) {
   const pode = await podeEnviar('candidato', candidato_id, 'marketing');
   // boas-vindas é transacional — envia mesmo se marketing desligado
   const html = wrap({
-    titulo: '🎉 Bem-vindo à Vagas.io!',
+    titulo: '🎉 Bem-vindo à VagasIO!',
     conteudo: `
       ${p(`Olá, <strong>${esc(nome)}</strong>!`)}
       ${p('Sua conta foi criada com sucesso. Agora você tem acesso à plataforma de recrutamento mais moderna do Brasil.')}
@@ -147,10 +147,10 @@ async function boasVindasCandidato({ nome, email, candidato_id }) {
     `,
     cta_link: `${BASE_URL}/candidato/painel.html`,
     cta_texto: 'Acessar meu painel',
-    rodape: 'Você recebeu este e-mail por ter criado uma conta na Vagas.io.'
+    rodape: 'Você recebeu este e-mail por ter criado uma conta na VagasIO.'
   });
   return enviar({
-    to: email, subject: '🎉 Bem-vindo à Vagas.io!', html,
+    to: email, subject: '🎉 Bem-vindo à VagasIO!', html,
     tipo: 'boas_vindas_candidato', user_type: 'candidato', user_id: candidato_id,
     payload: { nome }
   });
@@ -159,7 +159,7 @@ async function boasVindasCandidato({ nome, email, candidato_id }) {
 // ─── 2. Boas-vindas Empresa ──────────────────────────────────────────────────
 async function boasVindasEmpresa({ empresa_nome, admin_nome, admin_email, empresa_id }) {
   const html = wrap({
-    titulo: '🚀 Sua empresa está na Vagas.io!',
+    titulo: '🚀 Sua empresa está na VagasIO!',
     conteudo: `
       ${p(`Olá, <strong>${esc(admin_nome)}</strong>!`)}
       ${p(`A empresa <strong>${esc(empresa_nome)}</strong> foi cadastrada com sucesso na plataforma.`)}
@@ -175,10 +175,10 @@ async function boasVindasEmpresa({ empresa_nome, admin_nome, admin_email, empres
     `,
     cta_link: `${BASE_URL}/empresa/vagas-todas.html`,
     cta_texto: 'Criar primeira vaga',
-    rodape: `Você recebeu este e-mail por cadastrar a empresa ${esc(empresa_nome)} na Vagas.io.`
+    rodape: `Você recebeu este e-mail por cadastrar a empresa ${esc(empresa_nome)} na VagasIO.`
   });
   return enviar({
-    to: admin_email, subject: `🚀 ${esc(empresa_nome)} está na Vagas.io!`, html,
+    to: admin_email, subject: `🚀 ${esc(empresa_nome)} está na VagasIO!`, html,
     tipo: 'boas_vindas_empresa', user_type: 'empresa', user_id: empresa_id,
     payload: { empresa_nome, admin_nome }
   });
@@ -238,7 +238,7 @@ async function novaCandidaturaEmpresa({ empresa_email, empresa_id, candidato_nom
     `,
     cta_link: `${BASE_URL}/empresa/candidatos.html?vaga=${candidatura_id}`,
     cta_texto: 'Ver candidatura',
-    rodape: 'Você recebe este e-mail por ser responsável pela vaga na plataforma Vagas.io.'
+    rodape: 'Você recebe este e-mail por ser responsável pela vaga na plataforma VagasIO.'
   });
   return enviar({
     to: empresa_email, subject: `📥 Nova candidatura — ${esc(vaga_titulo)}`, html,
@@ -422,7 +422,7 @@ async function propostaRespondidaEmpresa({ empresa_email, empresa_id, candidato_
     `,
     cta_link: `${BASE_URL}/empresa/analisar.html?id=${candidatura_id}`,
     cta_texto: 'Ver candidatura',
-    rodape: 'Você recebeu este e-mail como responsável pela vaga na plataforma Vagas.io.'
+    rodape: 'Você recebeu este e-mail como responsável pela vaga na plataforma VagasIO.'
   });
   return enviar({
     to: empresa_email, subject: `${aceitou ? '✅' : '❌'} Proposta ${aceitou ? 'aceita' : 'recusada'} — ${esc(vaga_titulo)}`, html,
@@ -485,7 +485,7 @@ async function chatNovaMensagemEmpresa({ empresa_id, empresa_email, vaga_titulo,
     `,
     cta_link: `${BASE_URL}/empresa/chat.html?cid=${candidatura_id}`,
     cta_texto: 'Abrir conversa',
-    rodape: 'Você recebeu este e-mail como responsável pela vaga na plataforma Vagas.io.'
+    rodape: 'Você recebeu este e-mail como responsável pela vaga na plataforma VagasIO.'
   });
   return enviar({
     to: empresa_email, subject: `💬 ${esc(candidato_nome)} enviou uma mensagem — ${esc(vaga_titulo)}`, html,
@@ -515,7 +515,7 @@ async function digestDiarioEmpresa({ empresa_id, empresa_email, empresa_nome, kp
     `,
     cta_link: `${BASE_URL}/empresa/index.html`,
     cta_texto: 'Ver painel',
-    rodape: `Resumo diário da empresa ${esc(empresa_nome)} na plataforma Vagas.io.`
+    rodape: `Resumo diário da empresa ${esc(empresa_nome)} na plataforma VagasIO.`
   });
   return enviar({
     to: empresa_email, subject: `📊 Resumo do dia — ${esc(empresa_nome)}`, html,
@@ -532,11 +532,11 @@ async function avisoFimTrial({ empresa_id, empresa_nome, empresa_email, trial_fi
     conteudo: `${p(`Olá, ${esc(empresa_nome)}!`)}${p('Seu período gratuito de 30 dias termina em 5 dias. Até lá, você continua usando os recursos do plano ' + esc(plano) + ' sem cobrança.')}${aviso('Para continuar usando o sistema após o período gratuito, cadastre uma forma de pagamento e confirme sua assinatura. Você poderá manter o plano atual ou escolher outro plano disponível.')}${p('<b>Data de encerramento do teste:</b> ' + dataFim)}`,
     cta_link: `${BASE_URL}/empresa/index.html?page=planos`,
     cta_texto: 'Configurar assinatura',
-    rodape: 'Aviso automático do Vagas.io sobre o seu período de teste.'
+    rodape: 'Aviso automático do VagasIO sobre o seu período de teste.'
   });
   return enviar({
     to: empresa_email,
-    subject: 'Seu período gratuito do Vagas.io termina em 5 dias',
+    subject: 'Seu período gratuito do VagasIO termina em 5 dias',
     html, tipo: 'trial_5_dias', user_type: 'empresa', user_id: empresa_id,
     payload: { trial_fim, plano }
   });
