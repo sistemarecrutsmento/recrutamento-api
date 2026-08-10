@@ -525,7 +525,12 @@ async function init() {
       await migration018();
       console.log('[MIGRATION 018] OK');
     } catch (migrationErr) { console.error('[MIGRATION 018] Erro não tratado (mas segui):', migrationErr.message); }
-    console.log('Tabelas criadas/verificadas + migrations Fase 1-018 aplicadas');
+    try {
+      const { up: migration019 } = require('./migrations/019_video_rooms');
+      await migration019();
+      console.log('[MIGRATION 019] video_rooms OK');
+    } catch (migrationErr) { console.error('[MIGRATION 019] Erro não tratado (mas segui):', migrationErr.message); }
+    console.log('Tabelas criadas/verificadas + migrations Fase 1-019 aplicadas');
     await client.query(`CREATE TABLE IF NOT EXISTS push_subscriptions (id BIGSERIAL PRIMARY KEY, candidato_id BIGINT NOT NULL REFERENCES candidatos(id) ON DELETE CASCADE, endpoint TEXT NOT NULL, p256dh TEXT NOT NULL, auth TEXT NOT NULL, dispositivo TEXT, categorias JSONB NOT NULL DEFAULT '{\"candidatura\":true,\"entrevista\":true,\"mensagem\":true,\"documento\":true,\"proposta\":true}'::jsonb, ativo BOOLEAN NOT NULL DEFAULT TRUE, criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(), atualizado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(), ultimo_uso_em TIMESTAMPTZ)`);
     await client.query('CREATE UNIQUE INDEX IF NOT EXISTS uq_push_subscriptions_endpoint ON push_subscriptions(endpoint)');
     await client.query('CREATE INDEX IF NOT EXISTS idx_push_subscriptions_candidato_ativo ON push_subscriptions(candidato_id, ativo)');
