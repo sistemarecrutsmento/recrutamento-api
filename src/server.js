@@ -549,6 +549,33 @@ app.post('/api/ci/admin-token', async (req, res) => {
 // da resposta pública; diagnóstico detalhado deve ocorrer por CI/observabilidade.
 app.get('/api/_build', (req, res) => res.json({ ok: true }));
 
+// VagasIO Video Calls — authenticated development rollout, tenant-scoped.
+const videoRooms = require('./videoRooms');
+app.use('/api/video', authMiddleware);
+app.get('/api/video/config', (req, res) => {
+  if (!videoRooms.gate(req, res)) return;
+  res.set('Cache-Control','no-store').json({ enabled:true, signalUrl:videoRooms.signalUrl(), role:videoRooms.role(req.user), tokenTtlSeconds:300, maxParticipants:2 });
+});
+app.post('/api/video/rooms', async (req,res) => {
+  if (!videoRooms.gate(req,res)) return;
+  const interviewId=Number(req.body?.interview_id); if(!Number.isInteger(interviewId)||interviewId<1) return res.status(400).json({erro:'interview_id inválido'});
+  try { const room=await videoRooms.getOrCreate(req,interviewId); if(!room) return res.status(404).json({erro:'Recurso não encontrado'}); res.set('Cache-Control','no-store').json({ok:true,room}); }
+  catch(e){ console.error('[VIDEO ROOM]',e.message); res.status(503).json({erro:'Serviço de vídeo indisponível'}); }
+});
+app.post('/api/video/rooms/:roomId/token', async (req,res) => {
+  if (!videoRooms.gate(req,res)) return;
+  try { const token=await videoRooms.issue(req,req.params.roomId); if(!token) return res.status(404).json({erro:'Recurso não encontrado'}); res.set('Cache-Control','no-store').json({ok:true,...token}); }
+  catch(e){ console.error('[VIDEO TOKEN]',e.message); res.status(503).json({erro:'Serviço de vídeo indisponível'}); }
+});
+app.post('/api/video/rooms/:roomId/end', async (req,res) => {
+  if (!videoRooms.gate(req,res)) return;
+  if (!['empresa','recrutador','admin'].includes(req.user.tipo)) return res.status(403).json({erro:'Apenas o recrutador pode encerrar a sala'});
+  try { const r=await videoRooms.pool.query(`UPDATE video_rooms SET status='ended',ended_at=NOW() WHERE room_id=$1 AND status='active' AND (empresa_id=$2 OR $3='admin') RETURNING room_id`,[req.params.roomId,req.user.empresa_id||null,req.user.tipo]); if(!r.rowCount)return res.status(404).json({erro:'Recurso não encontrado'}); res.json({ok:true,ended:true}); }
+  catch(e){ console.error('[VIDEO END]',e.message); res.status(503).json({erro:'Serviço de vídeo indisponível'}); }
+});
+
+
+
 // =========================================================================
 // ROTAS DE DEBUG (APENAS DESENVOLVIMENTO / DEBUG EXPLÍCITO)
 // =========================================================================
