@@ -9756,7 +9756,7 @@ app.get('/api/admin/me', authAdmin, async (req, res) => {
   });
 
   // Web Push: rollout controlado por e-mail durante a validação.
-  const pushPermitido = req => { const alvo = String(process.env.PUSH_TEST_EMAIL || '').trim().toLowerCase(); return !!alvo && String(req.user?.email || '').toLowerCase() === alvo; };
+  const pushPermitido = req => { const alvo = String(process.env.PUSH_TEST_EMAIL || '').trim().toLowerCase(); if (process.env.PUSH_ALL_ENABLED === 'true') return true; return !!alvo && String(req.user?.email || '').toLowerCase() === alvo; }
   app.get('/api/candidato/push/public-key', authCandidato, (req, res) => {
     if (!pushPermitido(req)) return res.status(404).json({ ok: false, erro: 'Recurso indisponível' });
     if (!process.env.VAPID_PUBLIC_KEY) return res.status(503).json({ ok: false, erro: 'Push não configurado' });
