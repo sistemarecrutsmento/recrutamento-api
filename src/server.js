@@ -598,7 +598,7 @@ if (DEBUG) {
     try {
       const result = await enviarEmail({
         to,
-        subject: 'Teste de e-mail - Vagas.io',
+        subject: 'Teste de e-mail - VagasIO',
         html: '<p>Se você está lendo isso, o sistema de e-mail tá funcionando! ✅</p>'
       });
       res.json({ ok: true, hasResendApiKey: !!process.env.RESEND_API_KEY, result });
@@ -1951,11 +1951,11 @@ app.post('/api/admin/login', rateLimitLogin, async (req, res) => {
         const nome = rows[0].nome;
         await enviarEmail({
           to: rows[0].email,
-          subject: 'Seu código de acesso - Vagas.io',
+          subject: 'Seu código de acesso - VagasIO',
           html: `
             <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px; background: #fafafa; border-radius: 12px;">
               <div style="background: #7a1f3d; color: #fff; padding: 22px 20px; border-radius: 8px; text-align: center;">
-                <h2 style="margin:0;font-size:20px">Vagas.io</h2>
+                <h2 style="margin:0;font-size:20px">VagasIO</h2>
               </div>
               <div style="background: #fff; padding: 28px 24px; border-radius: 8px; margin-top: 16px;">
                 <p style="color: #2b2b2b; font-size: 15px; line-height: 1.5;">Olá, <strong>${escapeEmailHtml(nome)}</strong>!</p>
@@ -2040,11 +2040,11 @@ app.post('/api/admin/2fa/reenviar', rateLimitByIp('twofa'), async (req, res) => 
           const { enviarEmail } = require('./email');
           await enviarEmail({
             to: r.rows[0].email,
-            subject: 'Seu novo código de acesso - Vagas.io',
+            subject: 'Seu novo código de acesso - VagasIO',
             html: `
               <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px; background: #fafafa; border-radius: 12px;">
                 <div style="background: #7a1f3d; color: #fff; padding: 22px 20px; border-radius: 8px; text-align: center;">
-                  <h2 style="margin:0;font-size:20px">Vagas.io</h2>
+                  <h2 style="margin:0;font-size:20px">VagasIO</h2>
                 </div>
                 <div style="background: #fff; padding: 28px 24px; border-radius: 8px; margin-top: 16px;">
                   <p style="color: #2b2b2b; font-size: 15px; line-height: 1.5;">Olá, <strong>${escapeEmailHtml(r.rows[0].nome)}</strong>!</p>
@@ -9420,9 +9420,9 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
         const { wrap, p } = require('./email/templates');
         result = await enviarEmail({
           to: destinatario,
-          subject: '[Teste] Vagas.io · E-mail de teste',
+          subject: '[Teste] VagasIO · E-mail de teste',
           html: wrap({ titulo: 'E-mail de Teste',
-            conteudo: p('Este é um e-mail de teste enviado pelo painel admin Vagas.io.') +
+            conteudo: p('Este é um e-mail de teste enviado pelo painel admin VagasIO.') +
                    p('Se você recebeu isso, o serviço de e-mail está funcionando corretamente! ✅')
           })
         });
@@ -9652,7 +9652,7 @@ app.get('/api/admin/me', authAdmin, async (req, res) => {
 });
 
   // ===== Assinatura da empresa — preparação segura para o Asaas =====
-  // Não recebe dados de cartão no Vagas.io. O pagamento será coletado pelo checkout do gateway.
+  // Não recebe dados de cartão no VagasIO. O pagamento será coletado pelo checkout do gateway.
   app.get('/api/empresa/assinatura', requireRecrutadorOuAdmin, async (req, res) => {
     try {
       const empresaId = Number(req.user.empresa_id);
@@ -9708,7 +9708,7 @@ app.get('/api/admin/me', authAdmin, async (req, res) => {
       const base = process.env.FRONTEND_URL || 'https://vagasio.com.br';
       const checkout = await asaas.criarCheckoutRecorrente({
         // O checkout coleta os dados obrigatórios do pagador com segurança no Asaas.
-        item: { name: `Vagas.io — Plano ${e.plano_nome || 'empresarial'}`, description: 'Assinatura mensal Vagas.io', externalReference: String(empresaId), quantity: 1, value: valor },
+        item: { name: `VagasIO — Plano ${e.plano_nome || 'empresarial'}`, description: 'Assinatura mensal VagasIO', externalReference: String(empresaId), quantity: 1, value: valor },
         nextDueDate: new Date(e.trial_fim).toISOString().slice(0, 10),
         callback: { successUrl: `${base}/empresa/index.html?page=configuracoes&pagamento=sucesso`, cancelUrl: `${base}/empresa/index.html?page=configuracoes&pagamento=cancelado`, expiredUrl: `${base}/empresa/index.html?page=configuracoes&pagamento=expirado` }
       });
