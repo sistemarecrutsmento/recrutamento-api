@@ -1,5 +1,5 @@
 // =============================================================================
-// templates.js — Template HTML base responsivo para todos os e-mails Vagas.io
+// templates.js — Template HTML base responsivo para todos os e-mails VagasIO
 // =============================================================================
 // Sem JS no e-mail. Layout table-based para máxima compatibilidade.
 // =============================================================================
@@ -64,7 +64,7 @@ function wrap({ titulo, conteudo, cta_link, cta_texto, rodape }) {
                      padding:24px 32px;text-align:center;">
             <div style="font-size:13px;color:rgba(255,255,255,0.7);
                         letter-spacing:2px;text-transform:uppercase;margin-bottom:4px;">
-              Vagas.io
+              VagasIO
             </div>
             <div style="font-size:22px;font-weight:800;color:#ffffff;line-height:1.3;">
               ${esc(titulo)}
@@ -101,7 +101,7 @@ function wrap({ titulo, conteudo, cta_link, cta_texto, rodape }) {
               </a>
             </div>
             <div style="margin-top:12px;font-size:11px;color:#bbb;">
-              © ${ano} Vagas.io — Todos os direitos reservados.
+              © ${ano} VagasIO — Todos os direitos reservados.
             </div>
           </td>
         </tr>
