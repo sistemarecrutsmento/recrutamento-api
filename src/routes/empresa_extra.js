@@ -519,7 +519,9 @@ function registrar(app, ctx) {
       } else if (acao === 'reabrir') {
         novoStatus = 'em_andamento';
       }
-      const hist = cand.historico || [];
+      // O histórico pode vir nulo ou como objeto em candidaturas antigas.
+      // Normaliza antes de adicionar o novo evento para não quebrar a transição de etapa.
+      const hist = Array.isArray(cand.historico) ? cand.historico : [];
       hist.push({ tipo: 'status', por: `empresa:${req.user.email}`, quando: new Date().toISOString(), acao, etapa: novaEtapa, status: novoStatus, parecer: parecer || null });
       await pool.query(`UPDATE candidaturas SET etapa_atual = $1, status = $2, historico = $3::jsonb, atualizada_em = NOW() WHERE id = $4`, [novaEtapa, novoStatus, JSON.stringify(hist), id]);
       res.json({ ok: true, etapa_atual: novaEtapa, status: novoStatus });
