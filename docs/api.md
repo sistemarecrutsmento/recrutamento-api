@@ -1,4 +1,4 @@
-# API Reference — Vagas.io
+# API Reference — VagasIO
 
 Gerado Fase 15. Total: 202 endpoints.
 
