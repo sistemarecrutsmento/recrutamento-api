@@ -5510,6 +5510,14 @@ app.put('/api/empresa/vagas/:id', requireRecrutadorOuAdmin, async (req, res) => 
     if (v.requisitos !== undefined) push('requisitos', v.requisitos);
     if (v.beneficios !== undefined) push('beneficios', v.beneficios);
     if (v.etapas !== undefined && Array.isArray(v.etapas)) push('etapas', JSON.stringify(v.etapas));
+    // O formulário da empresa envia status ao salvar; aceitar somente os estados
+    // permitidos e somente para a vaga própria já verificada acima.
+    if (v.status !== undefined) {
+      if (!['publicada', 'pausada', 'rascunho', 'encerrada'].includes(v.status)) {
+        return res.status(400).json({ erro: 'Status inválido. Use: publicada, pausada, rascunho ou encerrada' });
+      }
+      push('status', v.status);
+    }
     if (updates.length === 0) return res.status(400).json({ erro: 'Nenhum campo para atualizar' });
     values.push(id);
     const { rows } = await pool.query(
