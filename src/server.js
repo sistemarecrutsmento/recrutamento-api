@@ -3606,55 +3606,42 @@ app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
       dataHoraFinal = d.toISOString();
     }
 
-    // Online uses an authenticated VagasIO room first. Google Meet is an explicit fallback only.
-    // The room is created after the interview row exists (it is keyed by entrevista_id).
+    // Online interviews require an authenticated VagasIO room. Historical Meet columns remain compatibility-only.
     const isOnline = !local || /online/i.test(local);
-    let linkGerado = (!isOnline && local) ? null : (link_reuniao || null);
+    let linkGerado = null;
     let googleEventId = null;
     let meetHtmlLink = null;
     let video = null;
-    if (!isOnline) console.log(`[ENTREVISTA] Presencial — sala de vídeo não gerada. Local: ${local}`);
-
-    // Cria a entrevista
-    const r = await pool.query(`
-      INSERT INTO entrevistas (candidatura_id, etapa, data_hora, duracao_minutos, local, link_reuniao, google_event_id, observacoes, criado_por)
-      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
-      RETURNING id, candidatura_id, etapa, data_hora, duracao_minutos, local, link_reuniao, google_event_id, observacoes, status, criado_em, criado_por
-    `, [candidatura_id, etapa, dataHoraFinal, duracao_minutos || 60, local || null, linkGerado, googleEventId, observacoes || null, req.admin?.id || null]);
-    const entrevista = r.rows[0];
-
-    if (isOnline && !link_reuniao) {
+    let entrevista;
+    if (isOnline) {
       try {
-        // authAdmin stores the authenticated identity in req.admin; videoRooms also
-        // accepts admin identity so room creation remains resource-authorized.
+        const r = await pool.query(`INSERT INTO entrevistas (candidatura_id, etapa, data_hora, duracao_minutos, local, link_reuniao, google_event_id, observacoes, criado_por)
+          VALUES ($1,$2,$3,$4,'Videochamada VagasIO',NULL,NULL,$5,$6)
+          RETURNING id,candidatura_id,etapa,data_hora,duracao_minutos,local,link_reuniao,google_event_id,observacoes,status,criado_em,criado_por`,
+          [candidatura_id, etapa, dataHoraFinal, duracao_minutos || 60, observacoes || null, req.admin?.id || null]);
+        entrevista = r.rows[0];
         const previousUser = req.user;
         req.user = { id: req.admin?.id, tipo: 'admin' };
         const room = await videoRooms.getOrCreate(req, entrevista.id);
         req.user = previousUser;
         if (!room) throw new Error('Sala VagasIO não autorizada');
-        video = { provider: 'vagasio', room_id: room.room_id, roomId: room.room_id };
-        await pool.query('UPDATE entrevistas SET local=$1 WHERE id=$2', ['Videochamada VagasIO', entrevista.id]);
-        entrevista.local = 'Videochamada VagasIO';
+        video = { provider:'vagasio', room_id:room.room_id, roomId:room.room_id };
         console.log(`[VAGASIO VIDEO] Sala criada: ${room.room_id}`);
       } catch (videoErr) {
         req.user = undefined;
-        console.error('[VAGASIO VIDEO ERRO] fallback para Meet:', videoErr.message);
-        if (process.env.GCP_SERVICE_ACCOUNT_JSON) {
-          try {
-            const etapaNome = etapa === 3 ? 'RH' : 'Gestor';
-            const meetResult = await meet.criarEventoMeet({
-              summary: `Entrevista ${etapaNome} - ${candData.candidato_nome} - ${candData.vaga_titulo}`,
-              description: `Fallback Google Meet — entrevista etapa ${etapaNome} do VagasIO.`,
-              startTime: dataHoraFinal, durationMinutes: duracao_minutos || 60,
-              attendees: [candData.candidato_email, req.admin?.email || process.env.MEET_ADMIN_EMAIL].filter(Boolean),
-            });
-            linkGerado = meetResult.meetLink; googleEventId = meetResult.eventId; meetHtmlLink = meetResult.htmlLink;
-            await pool.query('UPDATE entrevistas SET link_reuniao=$1, google_event_id=$2, local=$3 WHERE id=$4', [linkGerado, googleEventId, 'Google Meet (fallback)', entrevista.id]);
-            entrevista.link_reuniao = linkGerado; entrevista.google_event_id = googleEventId; entrevista.local = 'Google Meet (fallback)';
-            video = { provider: 'meet', fallback: true, link: linkGerado };
-          } catch (meetErr) { console.error('[MEET FALLBACK ERRO]', meetErr.message); }
-        }
+        if (videoErr?.entrevistaId || true) { try { await pool.query('DELETE FROM entrevistas WHERE candidatura_id=$1 AND data_hora=$2', [candidatura_id, dataHoraFinal]); } catch (_) {} }
+        console.error('[VAGASIO VIDEO ERRO] entrevista não agendada:', videoErr.message);
+        return res.status(503).json({ erro:'Videochamada VagasIO indisponível. Tente novamente.', codigo:'VAGASIO_ROOM_UNAVAILABLE' });
       }
+      // Re-read the row for the common response path.
+      const rr = await pool.query('SELECT id,candidatura_id,etapa,data_hora,duracao_minutos,local,link_reuniao,google_event_id,observacoes,status,criado_em,criado_por FROM entrevistas WHERE id=$1',[video.interview_id || (await pool.query('SELECT id FROM entrevistas WHERE candidatura_id=$1 AND data_hora=$2 ORDER BY id DESC LIMIT 1',[candidatura_id,dataHoraFinal])).rows[0].id]);
+      entrevista = rr.rows[0];
+    } else {
+      const r = await pool.query(`INSERT INTO entrevistas (candidatura_id, etapa, data_hora, duracao_minutos, local, link_reuniao, google_event_id, observacoes, criado_por)
+        VALUES ($1,$2,$3,$4,$5,NULL,NULL,$6,$7)
+        RETURNING id,candidatura_id,etapa,data_hora,duracao_minutos,local,link_reuniao,google_event_id,observacoes,status,criado_em,criado_por`,
+        [candidatura_id, etapa, dataHoraFinal, duracao_minutos || 60, local || null, observacoes || null, req.admin?.id || null]);
+      entrevista = r.rows[0];
     }
     // Adiciona no histórico da candidatura
     const etapaNome = etapa === 3 ? 'Entrevista RH' : 'Entrevista Gestor';
@@ -3719,16 +3706,7 @@ app.post('/api/admin/entrevista/:id/cancelar', authAdmin, async (req, res) => {
       [id]
     );
 
-    // Tenta deletar o evento no Google Calendar (se houver)
-    if (entrevista.google_event_id) {
-      try {
-        await meet.deletarEventoMeet(entrevista.google_event_id);
-        console.log(`[MEET] Evento ${entrevista.google_event_id} deletado (entrevista cancelada)`);
-      } catch (e) {
-        console.warn('[MEET] Não consegui deletar evento:', e.message);
-      }
-    }
-
+    // google_event_id is historical compatibility data; VagasIO never mutates Calendar.
     // Histórico na candidatura
     await pool.query(`
       UPDATE candidaturas
