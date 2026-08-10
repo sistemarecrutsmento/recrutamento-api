@@ -272,25 +272,35 @@ function registrar(app, ctx) {
       if (!candidatura_id || !data_hora) return res.status(400).json({ erro: 'candidatura_id e data_hora são obrigatórios' });
       const candCheck = await pool.query(`SELECT c.id,c.vaga_id,c.historico,cd.nome AS candidato_nome,v.titulo AS vaga_titulo FROM candidaturas c JOIN candidatos cd ON cd.id=c.candidato_id JOIN vagas v ON v.id=c.vaga_id WHERE c.id=$1 AND v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id=$2 AND revogado_em IS NULL)`, [candidatura_id,empresa_id]);
       if (!candCheck.rowCount) return res.status(403).json({ erro:'Candidatura não pertence a esta empresa' });
-      // Online interviews require a VagasIO room; Meet/link_reuniao is never an active fallback.
-      const isOnline = !local || /online|video/i.test(String(local)) || tipo === 'video';
-      let videoRoom = null;
-      const dataFinal = new Date(data_hora);
-      if (isNaN(dataFinal.getTime())) return res.status(400).json({ erro: 'data_hora inválida' });
-      const { rows } = await pool.query(`INSERT INTO entrevistas (candidatura_id,etapa,data_hora,duracao_minutos,local,link_reuniao,observacoes,status,criado_em)
-        VALUES ($1,$2,$3,$4,$5,NULL,$6,'agendada',NOW()) RETURNING id,candidatura_id,etapa,data_hora,duracao_minutos,local,link_reuniao,observacoes,status,criado_em`,
-        [candidatura_id, etapa, dataFinal.toISOString(), duracao_minutos || 60, isOnline ? 'Videochamada VagasIO' : local, observacoes]);
-      if (isOnline) {
-        try { videoRoom = await videoRooms.getOrCreate(req, rows[0].id); if (!videoRoom) throw new Error('Sala não autorizada'); }
-        catch (e) { try { await pool.query('DELETE FROM entrevistas WHERE id=$1',[rows[0].id]); } catch (_) {} return res.status(503).json({ erro:'Videochamada VagasIO indisponível. Tente novamente.', codigo:'VAGASIO_ROOM_UNAVAILABLE' }); }
+      // Serialize scheduling per candidature. This prevents double-clicks and concurrent tabs
+      // from creating two active interviews, even before a partial unique index is installed.
+      const client = await pool.connect();
+      let lockHeld = false;
+      try {
+        await client.query('SELECT pg_advisory_lock(hashtext($1))', [`vagasio:entrevista:${candidatura_id}`]); lockHeld = true;
+        const active = await client.query(`SELECT id FROM entrevistas WHERE candidatura_id=$1 AND COALESCE(status,'agendada') NOT IN ('cancelada','realizada','concluida','concluído','no_show') ORDER BY id DESC LIMIT 1`, [candidatura_id]);
+        if (active.rowCount) return res.status(409).json({ erro:'Esta candidatura já possui uma entrevista ativa. Edite o agendamento existente.', codigo:'ENTREVISTA_ATIVA_EXISTENTE', entrevista_id:active.rows[0].id });
+        // Online interviews require a VagasIO room; link_reuniao/Meet is never a fallback.
+        const isOnline = !local || /online|video/i.test(String(local)) || tipo === 'video';
+        let videoRoom = null;
+        const dataFinal = new Date(data_hora);
+        if (isNaN(dataFinal.getTime())) return res.status(400).json({ erro: 'data_hora inválida' });
+        const { rows } = await client.query(`INSERT INTO entrevistas (candidatura_id,etapa,data_hora,duracao_minutos,local,link_reuniao,observacoes,status,criado_em)
+          VALUES ($1,$2,$3,$4,$5,NULL,$6,'agendada',NOW()) RETURNING id,candidatura_id,etapa,data_hora,duracao_minutos,local,link_reuniao,observacoes,status,criado_em`,
+          [candidatura_id, etapa, dataFinal.toISOString(), duracao_minutos || 60, isOnline ? 'Videochamada VagasIO' : local, observacoes]);
+        await client.query('COMMIT').catch(()=>{});
+        if (isOnline) {
+          try { videoRoom = await videoRooms.getOrCreate(req, rows[0].id); if (!videoRoom) throw new Error('Sala não autorizada'); }
+          catch (e) { await client.query('DELETE FROM entrevistas WHERE id=$1',[rows[0].id]).catch(()=>{}); return res.status(503).json({ erro:'Videochamada VagasIO indisponível. Tente novamente.', codigo:'VAGASIO_ROOM_UNAVAILABLE' }); }
+        }
+        const hist = Array.isArray(candCheck.rows[0].historico) ? candCheck.rows[0].historico : [];
+        hist.push({ tipo: 'entrevista', acao: 'entrevista_agendada', etapa, data_hora: dataFinal.toISOString(), por: `empresa:${req.user.nome || empresa_id}`, quando: new Date().toISOString(), detalhes: `Entrevista agendada para ${candCheck.rows[0].candidato_nome || 'candidato'}` });
+        await pool.query(`UPDATE candidaturas SET historico = $1::jsonb, atualizada_em = NOW() WHERE id = $2`, [JSON.stringify(hist), candidatura_id]);
+        return res.json({ ok: true, entrevista: rows[0], id: rows[0].id, video: videoRoom ? { provider:'vagasio', room_id:videoRoom.room_id, candidature_id:videoRoom.candidatura_id, interview_id:videoRoom.entrevista_id } : null });
+      } finally {
+        if (lockHeld) await client.query('SELECT pg_advisory_unlock(hashtext($1))',[`vagasio:entrevista:${candidatura_id}`]).catch(()=>{});
+        client.release();
       }
-      const hist = Array.isArray(candCheck.rows[0].historico) ? candCheck.rows[0].historico : [];
-      hist.push({ tipo: 'entrevista', acao: 'entrevista_agendada', etapa, data_hora: dataFinal.toISOString(),
-        por: `empresa:${req.user.nome || empresa_id}`, quando: new Date().toISOString(),
-        detalhes: `Entrevista agendada para ${candCheck.rows[0].candidato_nome || 'candidato'}` });
-      await pool.query(`UPDATE candidaturas SET historico = $1::jsonb, atualizada_em = NOW() WHERE id = $2`, [JSON.stringify(hist), candidatura_id]);
-      res.json({ ok: true, entrevista: rows[0], id: rows[0].id,
-        video: videoRoom ? { provider: 'vagasio', room_id: videoRoom.room_id, candidature_id: videoRoom.candidatura_id, interview_id: videoRoom.entrevista_id } : null });
     } catch (e) {
       console.error('[EMPRESA ENTREVISTA POST]', e);
       res.status(500).json({ erro: 'Erro ao agendar entrevista' });
