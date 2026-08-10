@@ -11,15 +11,21 @@ const signalUrl = () => {
   if (/^https:\/\//i.test(raw)) return raw.replace(/^https:/i, 'wss:');
   return raw;
 };
-const allow = (u) => {
-  // Authorization is the existing JWT plus resource ownership; no synthetic
-  // identity allowlist is used in the development service.
-  return !!u && ['candidato','empresa','recrutador','admin'].includes(u.tipo);
+const normalizeTipo = (tipo) => {
+  const t = String(tipo || '').toLowerCase().trim();
+  if (['candidato','candidate'].includes(t)) return 'candidato';
+  if (['empresa','empresa_admin','admin_empresa','recrutador','recruiter'].includes(t)) return t === 'recrutador' || t === 'recruiter' ? 'recrutador' : 'empresa';
+  if (['admin','administrador'].includes(t)) return 'admin';
+  return '';
 };
-function role(u) { return u?.tipo === 'candidato' ? 'candidate' : (['empresa','recrutador','admin'].includes(u?.tipo) ? 'recruiter' : null); }
+const allow = (u) => ['candidato','empresa','recrutador','admin'].includes(normalizeTipo(u?.tipo));
+function role(u) { return normalizeTipo(u?.tipo) === 'candidato' ? 'candidate' : (allow(u) ? 'recruiter' : null); }
 function gate(req, res) {
-  if (!enabled() || !allow(req.user) || !/^wss:\/\//i.test(signalUrl())) { res.status(404).json({ erro:'Recurso não encontrado' }); return false; }
-  if (!role(req.user)) { res.status(404).json({ erro:'Recurso não encontrado' }); return false; }
+  const enabledNow = enabled(), url = signalUrl(), tipo = normalizeTipo(req.user?.tipo);
+  if (!enabledNow || !tipo || !/^wss:\/\//i.test(url)) {
+    console.warn('[VIDEO GATE] bloqueado', JSON.stringify({ enabled: enabledNow, tipo: tipo || 'ausente', signalConfigured: /^wss:\/\//i.test(url) }));
+    res.status(404).json({ erro:'Recurso não encontrado' }); return false;
+  }
   return true;
 }
 function hash(v) { return crypto.createHash('sha256').update(v).digest('hex'); }
