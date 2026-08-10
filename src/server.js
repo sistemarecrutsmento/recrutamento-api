@@ -47,6 +47,7 @@ const { criarAccessToken, criarRefreshToken, persistirRefresh, consumirRefresh, 
 const ADMIN_NOTIF_EMAIL = process.env.ADMIN_NOTIF_EMAIL || process.env.ADMIN_EMAIL || 'fabio08dejesusjunior@gmail.com';
 const { authMiddleware, authCandidato, authAdmin, authEmpresa, authAdminOnly, authCandidatoOrEmpresaOrAdmin, authCandidatoOrAdminStrict, requireAdminEmpresa, requireAdminOuRecrutadorEquipe, requireRecrutadorOuAdmin, requireEmpresaViewer, JWT_VERIFY_OPTIONS } = require('./auth');
 const { sanitizeText, sanitizeFilename, escapeContentDispositionFilename } = require('./sanitize');
+const videoFeature = require('./videoFeature');
 
 // =========================================================================
 // WHITELISTS DE COLUNAS (defesa contra vazamento de dados sensíveis)
@@ -560,7 +561,15 @@ const DEBUG = DEBUG_API_ENABLED;  // reusa a var do topo
 
 if (DEBUG) {
   // ====== Apenas metadados de versão (não vaza nada sensível) ======
-  app.get('/api/_debug/versao', authDebug, (req, res) => {
+  // VagasIO video-call rollout (disabled by default; internal allowlist only).
+app.get('/api/video/config', authMiddleware, (req, res) => {
+  const result = videoFeature.getConfig(req.user);
+  if (!result.ok) return res.status(result.status || 404).json({ erro: result.erro });
+  res.set('Cache-Control', 'no-store');
+  return res.json(result.config);
+});
+
+app.get('/api/_debug/versao', authDebug, (req, res) => {
     res.json({
       ok: true,
       versao: '2026-07-26-VAGAS-ATIVAS-RANKING',
