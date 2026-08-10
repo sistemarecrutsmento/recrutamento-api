@@ -526,14 +526,11 @@ async function init() {
       console.log('[MIGRATION 018] OK');
     } catch (migrationErr) { console.error('[MIGRATION 018] Erro não tratado (mas segui):', migrationErr.message); }
     try {
-      const { up: migration019 } = require('./migrations/019_video_rooms');
+      const { up: migration019 } = require('./migrations/020_video_rooms');
       await migration019();
       console.log('[MIGRATION 019] video_rooms OK');
     } catch (migrationErr) { console.error('[MIGRATION 019] Erro não tratado (mas segui):', migrationErr.message); }
     console.log('Tabelas criadas/verificadas + migrations Fase 1-019 aplicadas');
-    await client.query(`CREATE TABLE IF NOT EXISTS push_subscriptions (id BIGSERIAL PRIMARY KEY, candidato_id BIGINT NOT NULL REFERENCES candidatos(id) ON DELETE CASCADE, endpoint TEXT NOT NULL, p256dh TEXT NOT NULL, auth TEXT NOT NULL, dispositivo TEXT, categorias JSONB NOT NULL DEFAULT '{\"candidatura\":true,\"entrevista\":true,\"mensagem\":true,\"documento\":true,\"proposta\":true}'::jsonb, ativo BOOLEAN NOT NULL DEFAULT TRUE, criado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(), atualizado_em TIMESTAMPTZ NOT NULL DEFAULT NOW(), ultimo_uso_em TIMESTAMPTZ)`);
-    await client.query('CREATE UNIQUE INDEX IF NOT EXISTS uq_push_subscriptions_endpoint ON push_subscriptions(endpoint)');
-    await client.query('CREATE INDEX IF NOT EXISTS idx_push_subscriptions_candidato_ativo ON push_subscriptions(candidato_id, ativo)');
   } finally {
     client.release();
   }
@@ -571,18 +568,6 @@ async function inserirNotificacao(client, user_type, user_id, tipo, titulo, mens
         JSON.stringify(opts.metadata || {}),
       ]
     );
-    // Web Push acompanha exatamente o mesmo feed de notificações do candidato.
-    if (user_type === 'candidato') {
-      try {
-        const { send } = require('./pushService');
-        send(user_id, {
-          title: titulo,
-          body: mensagem || titulo,
-          icon: '/candidato/icons/icon-192.png',
-          data: { url: '/candidato/notificacoes.html', notificacao_id: r.rows[0]?.id }
-        }).catch(e => console.error('[push] Falha ao enviar:', e.message));
-      } catch (e) { console.error('[push] Falha ao carregar serviço:', e.message); }
-    }
     return { ok: true, id: r.rows[0]?.id };
   } catch (e) {
     console.error('[notificacao] Falha ao inserir:', e.message);
