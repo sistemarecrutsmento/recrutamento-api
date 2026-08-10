@@ -128,8 +128,6 @@ function protegerUrlProposta(row) {
 }
 
 const app = express();
-// Render health check endpoint (preview and production-safe, no secrets/data).
-app.get('/health', (_req, res) => res.status(200).json({ ok: true }));
 
 // FIX Etapa 2 (2026-07-27): hardening de headers + Express.
 // disable() remove o header de TODAS as respostas, incluindo OPTIONS e 404/500.
@@ -550,12 +548,12 @@ app.post('/api/ci/admin-token', async (req, res) => {
 // da resposta pública; diagnóstico detalhado deve ocorrer por CI/observabilidade.
 app.get('/api/_build', (req, res) => res.json({ ok: true }));
 
-// VagasIO Video Calls — preview-only, tenant-scoped, JWT identity only.
+// VagasIO Video Calls — authenticated development rollout, tenant-scoped.
 const videoRooms = require('./videoRooms');
 app.use('/api/video', authMiddleware);
 app.get('/api/video/config', (req, res) => {
   if (!videoRooms.gate(req, res)) return;
-  res.set('Cache-Control','no-store').json({ enabled:true, signalUrl:process.env.VAGASIO_VIDEO_SIGNAL_URL, role:videoRooms.role(req.user), tokenTtlSeconds:300, maxParticipants:2 });
+  res.set('Cache-Control','no-store').json({ enabled:true, signalUrl:videoRooms.signalUrl(), role:videoRooms.role(req.user), tokenTtlSeconds:300, maxParticipants:2 });
 });
 app.post('/api/video/rooms', async (req,res) => {
   if (!videoRooms.gate(req,res)) return;
@@ -1708,10 +1706,12 @@ app.get('/api/candidato/entrevistas', authCandidato, async (req, res) => {
       SELECT
         e.id, e.candidatura_id, e.etapa, e.data_hora, e.duracao_minutos,
         e.local, e.link_reuniao, e.observacoes, e.status,
+        vr.room_id AS video_room_id,
         v.titulo AS vaga_titulo, v.empresa AS vaga_empresa
       FROM entrevistas e
       JOIN candidaturas cand ON cand.id = e.candidatura_id
       JOIN vagas v ON v.id = cand.vaga_id
+      LEFT JOIN video_rooms vr ON vr.entrevista_id = e.id AND vr.status = 'active'
       WHERE cand.candidato_id = $1
         AND e.status IN ('agendada', 'confirmada', 'realizada')
       ORDER BY e.data_hora ASC
@@ -3606,44 +3606,14 @@ app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
       dataHoraFinal = d.toISOString();
     }
 
-    // === Decide se gera link do Google Meet ===
-    // Online: gera Meet + envia e-mail
-    // Presencial: NÃO gera Meet, só salva o endereço no `local`
+    // Online uses an authenticated VagasIO room first. Google Meet is an explicit fallback only.
+    // The room is created after the interview row exists (it is keyed by entrevista_id).
     const isOnline = !local || /online/i.test(local);
-    let linkGerado = isOnline ? null : null; // começa null
+    let linkGerado = (!isOnline && local) ? null : (link_reuniao || null);
     let googleEventId = null;
     let meetHtmlLink = null;
-
-    if (isOnline && !link_reuniao && process.env.GCP_SERVICE_ACCOUNT_JSON) {
-      try {
-        const etapaNome = etapa === 3 ? 'RH' : 'Gestor';
-        const meetResult = await meet.criarEventoMeet({
-          summary: `Entrevista ${etapaNome} - ${candData.candidato_nome} - ${candData.vaga_titulo}`,
-          description: `Entrevista etapa ${etapaNome} da vaga "${candData.vaga_titulo}"${candData.empresa_nome ? ` (${candData.empresa_nome})` : ''}.\n\n${observacoes || ''}\n\nGerado via VagasIO.`,
-          startTime: dataHoraFinal,
-          durationMinutes: duracao_minutos || 60,
-          attendees: [
-            candData.candidato_email,
-            req.admin?.email || process.env.MEET_ADMIN_EMAIL,
-          ].filter(Boolean),
-        });
-        linkGerado = meetResult.meetLink;
-        googleEventId = meetResult.eventId;
-        meetHtmlLink = meetResult.htmlLink;
-        console.log(`[MEET] Evento criado: ${googleEventId} - ${linkGerado}`);
-      } catch (meetErr) {
-        console.error('[MEET ERRO]', meetErr.message);
-        return res.status(500).json({ erro: 'Falha ao criar reunião no Google Meet: ' + meetErr.message });
-      }
-    } else if (!isOnline) {
-      console.log(`[ENTREVISTA] Presencial — Meet não gerado. Local: ${local}`);
-    }
-
-    // Se for online e NÃO veio link_reuniao do frontend E NÃO conseguiu gerar Meet, usa placeholder
-    if (isOnline && !linkGerado && !link_reuniao && !process.env.GCP_SERVICE_ACCOUNT_JSON) {
-      linkGerado = `https://meet.google.com/pending-${candidatura_id}-${Date.now()}`;
-      console.warn('[MEET] GCP_SERVICE_ACCOUNT_JSON não configurada — usando link placeholder');
-    }
+    let video = null;
+    if (!isOnline) console.log(`[ENTREVISTA] Presencial — sala de vídeo não gerada. Local: ${local}`);
 
     // Cria a entrevista
     const r = await pool.query(`
@@ -3652,6 +3622,40 @@ app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
       RETURNING id, candidatura_id, etapa, data_hora, duracao_minutos, local, link_reuniao, google_event_id, observacoes, status, criado_em, criado_por
     `, [candidatura_id, etapa, dataHoraFinal, duracao_minutos || 60, local || null, linkGerado, googleEventId, observacoes || null, req.admin?.id || null]);
     const entrevista = r.rows[0];
+
+    if (isOnline && !link_reuniao) {
+      try {
+        // authAdmin stores the authenticated identity in req.admin; videoRooms also
+        // accepts admin identity so room creation remains resource-authorized.
+        const previousUser = req.user;
+        req.user = { id: req.admin?.id, tipo: 'admin' };
+        const room = await videoRooms.getOrCreate(req, entrevista.id);
+        req.user = previousUser;
+        if (!room) throw new Error('Sala VagasIO não autorizada');
+        video = { provider: 'vagasio', room_id: room.room_id, roomId: room.room_id };
+        await pool.query('UPDATE entrevistas SET local=$1 WHERE id=$2', ['Videochamada VagasIO', entrevista.id]);
+        entrevista.local = 'Videochamada VagasIO';
+        console.log(`[VAGASIO VIDEO] Sala criada: ${room.room_id}`);
+      } catch (videoErr) {
+        req.user = undefined;
+        console.error('[VAGASIO VIDEO ERRO] fallback para Meet:', videoErr.message);
+        if (process.env.GCP_SERVICE_ACCOUNT_JSON) {
+          try {
+            const etapaNome = etapa === 3 ? 'RH' : 'Gestor';
+            const meetResult = await meet.criarEventoMeet({
+              summary: `Entrevista ${etapaNome} - ${candData.candidato_nome} - ${candData.vaga_titulo}`,
+              description: `Fallback Google Meet — entrevista etapa ${etapaNome} do VagasIO.`,
+              startTime: dataHoraFinal, durationMinutes: duracao_minutos || 60,
+              attendees: [candData.candidato_email, req.admin?.email || process.env.MEET_ADMIN_EMAIL].filter(Boolean),
+            });
+            linkGerado = meetResult.meetLink; googleEventId = meetResult.eventId; meetHtmlLink = meetResult.htmlLink;
+            await pool.query('UPDATE entrevistas SET link_reuniao=$1, google_event_id=$2, local=$3 WHERE id=$4', [linkGerado, googleEventId, 'Google Meet (fallback)', entrevista.id]);
+            entrevista.link_reuniao = linkGerado; entrevista.google_event_id = googleEventId; entrevista.local = 'Google Meet (fallback)';
+            video = { provider: 'meet', fallback: true, link: linkGerado };
+          } catch (meetErr) { console.error('[MEET FALLBACK ERRO]', meetErr.message); }
+        }
+      }
+    }
     // Adiciona no histórico da candidatura
     const etapaNome = etapa === 3 ? 'Entrevista RH' : 'Entrevista Gestor';
     const dataFormatada = new Date(dataHoraFinal).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
@@ -3692,7 +3696,7 @@ app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
       candidatura_id: candidatura_id, vaga_id: entrevista.vaga_id || null,
       empresa_id: entrevista.empresa_id || null, ...analytics.fromReq(req) });
 
-    res.json({ ok: true, entrevista, googleEventId, meetHtmlLink });
+    res.json({ ok: true, entrevista, googleEventId, meetHtmlLink, video });
   } catch (e) {
     console.error('[ENTREVISTA CRIAR ERRO]', e);
     return erroInterno(req, res, e, 'api-admin-entrevista-post');
@@ -6142,11 +6146,14 @@ app.get('/api/empresa/candidatura/:id', requireEmpresaViewer, async (req, res) =
     // A página do Portal Empresa precisa exibir e permitir administrar a entrevista
     // atual, preservando a compatibilidade da análise de candidatura.
     const { rows: entrevistas } = await pool.query(
-      `SELECT id, candidatura_id, etapa, data_hora, duracao_minutos, local,
-              link_reuniao, observacoes, status, criado_em
-       FROM entrevistas
-       WHERE candidatura_id = $1
-       ORDER BY data_hora DESC, id DESC`,
+      `SELECT e.id, e.candidatura_id, e.etapa, e.data_hora, e.duracao_minutos, e.local,
+              e.link_reuniao, e.observacoes, e.status, e.criado_em,
+              vr.room_id AS video_room_id,
+              CASE WHEN vr.room_id IS NOT NULL THEN 'vagasio' ELSE NULL END AS video_provider
+       FROM entrevistas e
+       LEFT JOIN video_rooms vr ON vr.entrevista_id = e.id AND vr.status = 'active'
+       WHERE e.candidatura_id = $1
+       ORDER BY e.data_hora DESC, e.id DESC`
       [id]
     );
     candidatura.entrevistas = entrevistas;
