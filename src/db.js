@@ -1,22 +1,15 @@
 // force-deploy: 2026-07-28T17:53:11Z
 const { Pool } = require('pg');
 
-// Preview-only isolation: when VAGASIO_VIDEO_SCHEMA is set, every preview
-// connection uses that schema. Production has no such variable and keeps its
-// existing connection behavior unchanged. The schema is created through a
-// separate bootstrap connection before any migrations run.
-const isolatedSchema = process.env.VAGASIO_VIDEO_SCHEMA || null;
-if (isolatedSchema && !/^[a-z_][a-z0-9_]{0,62}$/.test(isolatedSchema)) {
-  throw new Error('VAGASIO_VIDEO_SCHEMA inválido');
+// Preview isolation: when configured, every pooled connection is pinned to the
+// dedicated schema and never falls back to public. Production leaves this unset.
+const PREVIEW_SCHEMA = String(process.env.VAGASIO_VIDEO_SCHEMA || '').trim();
+if (PREVIEW_SCHEMA && !/^[a-z_][a-z0-9_]*$/i.test(PREVIEW_SCHEMA)) {
+  throw new Error('VAGASIO_VIDEO_SCHEMA must be a simple PostgreSQL identifier');
 }
-function schemaConnectionString() {
-  if (!isolatedSchema) return process.env.DATABASE_URL;
-  const u = new URL(process.env.DATABASE_URL);
-  u.searchParams.set('options', `-c search_path=${isolatedSchema}`);
-  return u.toString();
-}
+const qualifiedSchema = PREVIEW_SCHEMA ? `"${PREVIEW_SCHEMA}"` : null;
 const pool = new Pool({
-  connectionString: schemaConnectionString(),
+  connectionString: process.env.DATABASE_URL,
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
   // Limites importantes pra não travar
   max: 5,                            // max 5 conexões no pool
@@ -28,7 +21,14 @@ const pool = new Pool({
 
 // Helper que sempre aplica statement_timeout por query (defesa em profundidade)
 pool.on('connect', (client) => {
-  client.query('SET statement_timeout = 15s').catch(() => {});
+  // Keep this on every connection (not only the migration client): pg.Pool
+  // may create new connections later and must remain preview-isolated.
+  const pin = qualifiedSchema
+    ? `SET search_path TO ${qualifiedSchema}, pg_catalog`
+    : 'SET search_path TO public, pg_catalog';
+  client.query(`${pin}; SET statement_timeout = 15s`).catch((e) => {
+    console.error('[DB] failed to pin search_path:', e.message);
+  });
 });
 
 pool.on('error', (err) => {
@@ -36,36 +36,16 @@ pool.on('error', (err) => {
 });
 
 async function init() {
-  if (isolatedSchema) {
-    // Bootstrap against the database's default schema only to create the
-    // dedicated namespace. No application table is read, changed, or dropped.
-    const bootstrap = new Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 10000 });
-    try {
-      await bootstrap.query(`CREATE SCHEMA IF NOT EXISTS ${isolatedSchema}`);
-    } finally {
-      await bootstrap.end();
-    }
-    console.log('[DB] isolated preview schema ready:', isolatedSchema);
-  }
   const client = await pool.connect();
-  // Preview services must never run the legacy production migrations. They
-  // use a dedicated search_path and a minimal synthetic dependency graph.
-  if (isolatedSchema) {
-    try {
-      const { up: previewBootstrap } = require('./migrations/020_video_preview_bootstrap');
-      await previewBootstrap();
-      const { up: migration019 } = require('./migrations/019_video_rooms');
-      await migration019();
-      console.log('[PREVIEW] migrations applied: 020 bootstrap + 019 video rooms; legacy skipped');
-    } catch (err) {
-      console.error('[PREVIEW] migration failed:', err.message);
-      throw err;
-    } finally {
-      client.release();
-    }
-    return;
-  }
   try {
+    // Schema creation is the only operation outside the pinned schema. Once
+    // selected, all existing idempotent DDL and application SQL targets it.
+    if (qualifiedSchema) {
+      await client.query(`CREATE SCHEMA IF NOT EXISTS ${qualifiedSchema}`);
+      await client.query(`SET search_path TO ${qualifiedSchema}, pg_catalog`);
+    } else {
+      await client.query('SET search_path TO public, pg_catalog');
+    }
     await client.query(`
       CREATE TABLE IF NOT EXISTS admins (
         id SERIAL PRIMARY KEY,
@@ -542,37 +522,7 @@ async function init() {
       console.error('[MIGRATION 014] Erro não tratado (mas segui):', migrationErr.message);
     }
 
-    // Migration 015 — trial de 30 dias e estado da assinatura.
-    try {
-      const { up: migration015 } = require('./migrations/015_assinaturas_trial');
-      await migration015();
-      console.log('[MIGRATION 015] OK');
-    } catch (migrationErr) {
-      console.error('[MIGRATION 015] Erro não tratado (mas segui):', migrationErr.message);
-    }
-
-    // Migrations 016-017 — checkout e webhooks Asaas.
-    try {
-      const { up: migration016 } = require('./migrations/016_checkout_asaas');
-      await migration016();
-      console.log('[MIGRATION 016] OK');
-    } catch (migrationErr) { console.error('[MIGRATION 016] Erro não tratado (mas segui):', migrationErr.message); }
-    try {
-      const { up: migration017 } = require('./migrations/017_asaas_webhooks');
-      await migration017();
-      console.log('[MIGRATION 017] OK');
-    } catch (migrationErr) { console.error('[MIGRATION 017] Erro não tratado (mas segui):', migrationErr.message); }
-    try {
-      const { up: migration018 } = require('./migrations/018_planos_precos_20260809');
-      await migration018();
-      console.log('[MIGRATION 018] OK');
-    } catch (migrationErr) { console.error('[MIGRATION 018] Erro não tratado (mas segui):', migrationErr.message); }
-    try {
-      const { up: migration019 } = require('./migrations/019_video_rooms');
-      await migration019();
-      console.log('[MIGRATION 019] video_rooms OK');
-    } catch (migrationErr) { console.error('[MIGRATION 019] Erro não tratado (mas segui):', migrationErr.message); }
-    console.log('Tabelas criadas/verificadas + migrations Fase 1-019 aplicadas');
+    console.log('Tabelas criadas/verificadas + migrations Fase 1-014 aplicadas');
   } finally {
     client.release();
   }
