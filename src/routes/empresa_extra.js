@@ -115,7 +115,7 @@ function registrar(app, ctx) {
       else if (periodo === 'passadas') whereExtra = ` AND e.data_hora < NOW()`;
       const { rows } = await pool.query(`
         SELECT e.id, e.candidatura_id, e.etapa, e.data_hora, e.duracao_minutos,
-               e.local, e.link_reuniao, e.observacoes, e.status,
+               e.local, NULL AS link_reuniao, e.observacoes, e.status,
                c.vaga_id, v.titulo as vaga_titulo,
                cd.id as candidato_id, cd.nome as candidato_nome, cd.foto_url, cd.email
         FROM entrevistas e
@@ -249,8 +249,9 @@ function registrar(app, ctx) {
       `, [id, req.user.id, empresa_id]);
       if (check.rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
       const { rows } = await pool.query(
-        `SELECT id, candidatura_id, etapa, data_hora, duracao_minutos, local, link_reuniao, observacoes, status, criado_em
-         FROM entrevistas WHERE candidatura_id = $1 ORDER BY data_hora DESC, id DESC`, [id]
+        `SELECT e.id, e.candidatura_id, e.etapa, e.data_hora, e.duracao_minutos, e.local, NULL AS link_reuniao, e.observacoes, e.status, e.criado_em,
+                vr.room_id AS video_room_id
+         FROM entrevistas e LEFT JOIN video_rooms vr ON vr.entrevista_id=e.id AND vr.status='active' WHERE candidatura_id = $1 ORDER BY data_hora DESC, id DESC`, [id]
       );
       res.json({ entrevistas: rows });
     } catch (e) {
@@ -264,40 +265,32 @@ function registrar(app, ctx) {
   // ===========================================================
   app.post('/api/empresa/entrevista', requireRecrutadorOuAdmin, async (req, res) => {
     try {
+      const videoRooms = require('../videoRooms');
       const { empresa_id } = req.user;
       const { candidatura_id, etapa: etapaBody, data_hora, duracao_minutos, local, link_reuniao, observacoes, tipo } = req.body;
-      const etapa = etapaBody != null ? Number(etapaBody) : 4; // default etapa 4 (Gestor/Empresa)
-      if (!candidatura_id || !data_hora) {
-        return res.status(400).json({ erro: 'candidatura_id e data_hora são obrigatórios' });
-      }
-      const candCheck = await pool.query(`
-        SELECT c.id, c.vaga_id, c.historico, cd.nome AS candidato_nome, v.titulo AS vaga_titulo
-        FROM candidaturas c
-        JOIN candidatos cd ON cd.id = c.candidato_id
-        JOIN vagas v ON v.id = c.vaga_id
-        WHERE c.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2 AND revogado_em IS NULL))
-      `, [candidatura_id, empresa_id]);
-      if (candCheck.rows.length === 0) return res.status(403).json({ erro: 'Candidatura não pertence a esta empresa' });
-
-      // Mantém o mesmo comportamento do admin: entrevistas online recebem um
-      // link utilizável mesmo quando a integração Google Meet não está ligada.
+      const etapa = etapaBody != null ? Number(etapaBody) : 4;
+      if (!candidatura_id || !data_hora) return res.status(400).json({ erro: 'candidatura_id e data_hora são obrigatórios' });
+      const candCheck = await pool.query(`SELECT c.id,c.vaga_id,c.historico,cd.nome AS candidato_nome,v.titulo AS vaga_titulo FROM candidaturas c JOIN candidatos cd ON cd.id=c.candidato_id JOIN vagas v ON v.id=c.vaga_id WHERE c.id=$1 AND v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id=$2 AND revogado_em IS NULL)`, [candidatura_id,empresa_id]);
+      if (!candCheck.rowCount) return res.status(403).json({ erro:'Candidatura não pertence a esta empresa' });
+      // Online interviews require a VagasIO room; Meet/link_reuniao is never an active fallback.
       const isOnline = !local || /online|video/i.test(String(local)) || tipo === 'video';
-      const linkFinal = link_reuniao || (isOnline ? `https://meet.google.com/pending-${candidatura_id}-${Date.now()}` : null);
+      let videoRoom = null;
       const dataFinal = new Date(data_hora);
       if (isNaN(dataFinal.getTime())) return res.status(400).json({ erro: 'data_hora inválida' });
-      const { rows } = await pool.query(`
-        INSERT INTO entrevistas (candidatura_id, etapa, data_hora, duracao_minutos, local, link_reuniao, observacoes, status, criado_em)
-        VALUES ($1, $2, $3, $4, $5, $6, $7, 'agendada', NOW())
-        RETURNING id, candidatura_id, etapa, data_hora, duracao_minutos, local,
-                  link_reuniao, observacoes, status, criado_em
-      `, [candidatura_id, etapa, dataFinal.toISOString(), duracao_minutos || 60,
-          isOnline ? 'Online (Google Meet)' : local, linkFinal, observacoes]);
+      const { rows } = await pool.query(`INSERT INTO entrevistas (candidatura_id,etapa,data_hora,duracao_minutos,local,link_reuniao,observacoes,status,criado_em)
+        VALUES ($1,$2,$3,$4,$5,NULL,$6,'agendada',NOW()) RETURNING id,candidatura_id,etapa,data_hora,duracao_minutos,local,link_reuniao,observacoes,status,criado_em`,
+        [candidatura_id, etapa, dataFinal.toISOString(), duracao_minutos || 60, isOnline ? 'Videochamada VagasIO' : local, observacoes]);
+      if (isOnline) {
+        try { videoRoom = await videoRooms.getOrCreate(req, rows[0].id); if (!videoRoom) throw new Error('Sala não autorizada'); }
+        catch (e) { try { await pool.query('DELETE FROM entrevistas WHERE id=$1',[rows[0].id]); } catch (_) {} return res.status(503).json({ erro:'Videochamada VagasIO indisponível. Tente novamente.', codigo:'VAGASIO_ROOM_UNAVAILABLE' }); }
+      }
       const hist = Array.isArray(candCheck.rows[0].historico) ? candCheck.rows[0].historico : [];
       hist.push({ tipo: 'entrevista', acao: 'entrevista_agendada', etapa, data_hora: dataFinal.toISOString(),
         por: `empresa:${req.user.nome || empresa_id}`, quando: new Date().toISOString(),
         detalhes: `Entrevista agendada para ${candCheck.rows[0].candidato_nome || 'candidato'}` });
       await pool.query(`UPDATE candidaturas SET historico = $1::jsonb, atualizada_em = NOW() WHERE id = $2`, [JSON.stringify(hist), candidatura_id]);
-      res.json({ ok: true, entrevista: rows[0], id: rows[0].id });
+      res.json({ ok: true, entrevista: rows[0], id: rows[0].id,
+        video: videoRoom ? { provider: 'vagasio', room_id: videoRoom.room_id, candidature_id: videoRoom.candidatura_id, interview_id: videoRoom.entrevista_id } : null });
     } catch (e) {
       console.error('[EMPRESA ENTREVISTA POST]', e);
       res.status(500).json({ erro: 'Erro ao agendar entrevista' });
