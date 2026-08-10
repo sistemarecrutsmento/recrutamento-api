@@ -6145,6 +6145,13 @@ app.get('/api/empresa/candidatura/:id', requireEmpresaViewer, async (req, res) =
     if (rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
     if (!rows[0].tem_acesso) return res.status(403).json({ erro: 'Sem acesso a esta candidatura' });
     const candidatura = rows[0];
+    // A inscrição já foi executada pelo candidato. Para registros antigos que
+    // ficaram em 0, normaliza a etapa exibida para Triagem sem alterar etapas
+    // encerradas/contratadas.
+    if (Number(candidatura.etapa_atual) === 0 && !['reprovado','rejeitado','contratado'].includes(String(candidatura.status || '').toLowerCase())) {
+      candidatura.etapa_atual = 1;
+      await pool.query(`UPDATE candidaturas SET etapa_atual = 1, atualizada_em = COALESCE(atualizada_em, NOW()) WHERE id = $1 AND etapa_atual = 0`, [id]);
+    }
 
     await audit(req, 'empresa.candidatura.viewed', { resource_type: 'candidatura', resource_id: Number(id), metadata: { vaga_titulo: candidatura.vaga_titulo } });
 
