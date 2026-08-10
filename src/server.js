@@ -35,6 +35,7 @@ if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'sua_chave_secreta_aqu
 }
 
 const { pool, init, inserirNotificacao } = require('./db');
+const pushService = require('./pushService');
 const { enviarCodigo, enviarNotificacaoStatus, enviarEmailProposta, enviarEmailBg, enviarEmailAtualizacao, enviarEmail, enviarEmailInscricao, getResendKey } = require('./email');
 // Fase 13 — Serviço central de e-mail (usa os mesmos provedores, acrescenta templates, preferências, dedup)
 const emailSvc     = require('./email/emailService');
@@ -9752,6 +9753,24 @@ app.get('/api/admin/me', authAdmin, async (req, res) => {
       console.error('[asaas webhook]', e.message);
       return res.status(500).json({ ok: false });
     }
+  });
+
+  // Web Push: rollout controlado por e-mail durante a validação.
+  const pushPermitido = req => { const alvo = String(process.env.PUSH_TEST_EMAIL || '').trim().toLowerCase(); return !!alvo && String(req.user?.email || '').toLowerCase() === alvo; };
+  app.get('/api/candidato/push/public-key', authCandidato, (req, res) => {
+    if (!pushPermitido(req)) return res.status(404).json({ ok: false, erro: 'Recurso indisponível' });
+    if (!process.env.VAPID_PUBLIC_KEY) return res.status(503).json({ ok: false, erro: 'Push não configurado' });
+    res.json({ ok: true, publicKey: process.env.VAPID_PUBLIC_KEY });
+  });
+  app.post('/api/candidato/push/subscribe', authCandidato, async (req, res) => {
+    if (!pushPermitido(req)) return res.status(404).json({ ok: false, erro: 'Recurso indisponível' });
+    try { const row = await pushService.save(req.user.id, req.body.subscription, req.body.dispositivo); res.json({ ok: true, id: row.id }); }
+    catch (e) { console.error('[push subscribe]', e.message); res.status(400).json({ ok: false, erro: 'Não foi possível ativar as notificações' }); }
+  });
+  app.delete('/api/candidato/push/subscribe', authCandidato, async (req, res) => {
+    if (!pushPermitido(req)) return res.status(404).json({ ok: false, erro: 'Recurso indisponível' });
+    try { await pushService.remove(req.user.id, req.body.endpoint); res.json({ ok: true }); }
+    catch (e) { console.error('[push unsubscribe]', e.message); res.status(400).json({ ok: false, erro: 'Não foi possível desativar as notificações' }); }
   });
 
   // FIX Etapa 2 (2026-07-27): HANDLER GLOBAL 404 — JSON seguro.
