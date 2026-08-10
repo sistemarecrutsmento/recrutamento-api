@@ -5367,8 +5367,8 @@ app.post('/api/auth/trocar-senha-empresa', requireEmpresaViewer, async (req, res
 // ========== EMPRESA CRIAR VAGA (Etapa 3 — SaaS B2B) ==========
 // 2026-07-27: Empresas agora podem criar suas próprias vagas.
 // Fluxo: cria a vaga + vincula automaticamente no empresa_vaga_acesso.
-// A vaga começa com status='rascunho' e a empresa precisa publicar depois
-// (futuro: publicar imediato pra planos pagos; moderação pra free beta).
+// A vaga começa em rascunho por padrão; o status enviado pela empresa é
+// validado e respeitado para que a UI possa publicar imediatamente quando escolhido.
 app.post('/api/empresa/vagas', requireRecrutadorOuAdmin, async (req, res) => {
   try {
     const v = req.body || {};
@@ -5390,7 +5390,13 @@ app.post('/api/empresa/vagas', requireRecrutadorOuAdmin, async (req, res) => {
           { nome: 'Contratação' }
         ];
 
-    // INSERT vaga (empresa = nome da empresa do usuário logado; empresa_id vem do JWT)
+    // INSERT vaga (empresa = nome da empresa do usuário logado; empresa_id vem do JWT).
+    // O formulário da empresa envia o status escolhido; antes, este valor era
+    // ignorado e toda criação virava rascunho, embora a UI exibisse Publicada.
+    // Mantém rascunho como padrão e aceita apenas estados de vaga válidos.
+    const statusInicial = ['publicada', 'pausada', 'rascunho', 'encerrada'].includes(String(v.status || '').trim().toLowerCase())
+      ? String(v.status).trim().toLowerCase()
+      : 'rascunho';
     const { rows: vagaRows } = await pool.query(
       `INSERT INTO vagas (
         titulo, empresa, empresa_id, cidade, estado, tipo_contrato, nivel, area,
@@ -5415,7 +5421,7 @@ app.post('/api/empresa/vagas', requireRecrutadorOuAdmin, async (req, res) => {
         v.requisitos || null,
         v.beneficios || null,
         JSON.stringify(etapas),
-        'rascunho',           // empresa cria em rascunho; admin pode aprovar depois
+        statusInicial,        // padrão rascunho; respeita o status escolhido pela empresa
         null                  // criada_por FK → admins(id). NULL pq é empresa (não admin).
       ]
     );
