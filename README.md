@@ -1,4 +1,4 @@
-# Vagas.io — Backend API
+# VagasIO — Backend API
 
 Sistema de recrutamento B2B SaaS multi-tenant. Conecta empresas a candidatos com fluxo completo de seleção.
 
