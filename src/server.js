@@ -388,8 +388,10 @@ app.get('/api/public/empresa/:slug', async (req, res) => {
     const { rows: c } = await pool.query(
       `SELECT COUNT(*)::int AS total
        FROM vagas
-       WHERE empresa_id = (SELECT id FROM empresas WHERE slug = $1 AND ativo = true)
-         AND status = 'publicada'`,
+       WHERE status = 'publicada'
+         AND (empresa_id = (SELECT id FROM empresas WHERE slug = $1 AND ativo = true)
+              OR (empresa_id IS NULL AND NULLIF(TRIM(empresa), '') IS NOT NULL
+                  AND LOWER(TRIM(empresa)) = LOWER(TRIM((SELECT nome FROM empresas WHERE slug = $1 AND ativo = true)))))`,
       [slug]
     );
     res.json({
@@ -439,8 +441,10 @@ app.get('/api/public/empresa/:slug/vagas', async (req, res) => {
          v.area, v.salario_min, v.salario_max, v.descricao,
          v.criada_em
        FROM vagas v
-       WHERE v.empresa_id = $1
-         AND v.status = 'publicada'
+       WHERE v.status = 'publicada'
+         AND (v.empresa_id = $1
+              OR (v.empresa_id IS NULL AND NULLIF(TRIM(v.empresa), '') IS NOT NULL
+                  AND LOWER(TRIM(v.empresa)) = LOWER(TRIM((SELECT nome FROM empresas WHERE id = $1)))))
        ORDER BY v.criada_em DESC, v.id DESC`,
       [empresa_id]
     );
@@ -481,6 +485,9 @@ app.get('/api/public/empresa/:slug/vagas/:id', async (req, res) => {
          AND e.ativo = true
          AND v.id = $2
          AND v.status = 'publicada'
+         AND (v.empresa_id = e.id
+              OR (v.empresa_id IS NULL AND NULLIF(TRIM(v.empresa), '') IS NOT NULL
+                  AND LOWER(TRIM(v.empresa)) = LOWER(TRIM(e.nome))))
        LIMIT 1`,
       [slug, vagaId]
     );
