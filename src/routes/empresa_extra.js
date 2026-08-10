@@ -248,8 +248,8 @@ function registrar(app, ctx) {
       const check = await pool.query(`
         SELECT c.id FROM candidaturas c
         JOIN vagas v ON v.id = c.vaga_id
-        WHERE c.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3 AND revogado_em IS NULL))
-      `, [id, req.user.id, empresa_id]);
+        WHERE c.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2 AND revogado_em IS NULL))
+      `, [id, empresa_id]);
       if (check.rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
       const { rows } = await pool.query(
         `SELECT e.id, e.candidatura_id, e.etapa, e.data_hora, e.duracao_minutos, e.local, NULL AS link_reuniao, e.observacoes, e.status, e.criado_em,
@@ -478,8 +478,8 @@ function registrar(app, ctx) {
       const check = await pool.query(`
         SELECT c.id, c.historico, c.observacoes_etapas FROM candidaturas c
         JOIN vagas v ON v.id = c.vaga_id
-        WHERE c.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3 AND revogado_em IS NULL))
-      `, [id, req.user.id, empresa_id]);
+        WHERE c.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2 AND revogado_em IS NULL))
+      `, [id, empresa_id]);
       if (check.rows.length === 0) return res.status(403).json({ erro: 'Candidatura não pertence a esta empresa' });
       const hist = Array.isArray(check.rows[0].historico) ? check.rows[0].historico : [];
       const observacoes = check.rows[0].observacoes_etapas && typeof check.rows[0].observacoes_etapas === 'object'
@@ -509,8 +509,8 @@ function registrar(app, ctx) {
       const check = await pool.query(`
         SELECT c.*, v.etapas as vaga_etapas FROM candidaturas c
         JOIN vagas v ON v.id = c.vaga_id
-        WHERE c.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3 AND revogado_em IS NULL))
-      `, [id, req.user.id, empresa_id]);
+        WHERE c.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2 AND revogado_em IS NULL))
+      `, [id, empresa_id]);
       if (check.rows.length === 0) return res.status(403).json({ erro: 'Candidatura não pertence a esta empresa' });
       const cand = check.rows[0];
       let etapaAtual = Number(cand.etapa_atual);
@@ -554,8 +554,8 @@ function registrar(app, ctx) {
       const check = await pool.query(`
         SELECT c.id FROM candidaturas c
         JOIN vagas v ON v.id = c.vaga_id
-        WHERE c.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3 AND revogado_em IS NULL))
-      `, [id, req.user.id, empresa_id]);
+        WHERE c.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2 AND revogado_em IS NULL))
+      `, [id, empresa_id]);
       if (check.rows.length === 0) return res.status(403).json({ erro: 'Candidatura não pertence a esta empresa' });
       const { rows } = await pool.query(`
         SELECT id, proposta_texto as texto, proposta_pdf_url as arquivo_url, proposta_pdf_public_id,
