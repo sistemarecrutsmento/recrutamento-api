@@ -35,7 +35,6 @@ if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'sua_chave_secreta_aqu
 }
 
 const { pool, init, inserirNotificacao } = require('./db');
-const pushService = require('./pushService');
 const { enviarCodigo, enviarNotificacaoStatus, enviarEmailProposta, enviarEmailBg, enviarEmailAtualizacao, enviarEmail, enviarEmailInscricao, getResendKey } = require('./email');
 // Fase 13 — Serviço central de e-mail (usa os mesmos provedores, acrescenta templates, preferências, dedup)
 const emailSvc     = require('./email/emailService');
@@ -574,8 +573,6 @@ app.post('/api/video/rooms/:roomId/end', async (req,res) => {
   catch(e){ console.error('[VIDEO END]',e.message); res.status(503).json({erro:'Serviço de vídeo indisponível'}); }
 });
 
-
-
 // =========================================================================
 // ROTAS DE DEBUG (APENAS DESENVOLVIMENTO / DEBUG EXPLÍCITO)
 // =========================================================================
@@ -625,7 +622,7 @@ if (DEBUG) {
     try {
       const result = await enviarEmail({
         to,
-        subject: 'Teste de e-mail - VagasIO',
+        subject: 'Teste de e-mail - Vagas.io',
         html: '<p>Se você está lendo isso, o sistema de e-mail tá funcionando! ✅</p>'
       });
       res.json({ ok: true, hasResendApiKey: !!process.env.RESEND_API_KEY, result });
@@ -1709,10 +1706,12 @@ app.get('/api/candidato/entrevistas', authCandidato, async (req, res) => {
       SELECT
         e.id, e.candidatura_id, e.etapa, e.data_hora, e.duracao_minutos,
         e.local, e.link_reuniao, e.observacoes, e.status,
+        vr.room_id AS video_room_id,
         v.titulo AS vaga_titulo, v.empresa AS vaga_empresa
       FROM entrevistas e
       JOIN candidaturas cand ON cand.id = e.candidatura_id
       JOIN vagas v ON v.id = cand.vaga_id
+      LEFT JOIN video_rooms vr ON vr.entrevista_id = e.id AND vr.status = 'active'
       WHERE cand.candidato_id = $1
         AND e.status IN ('agendada', 'confirmada', 'realizada')
       ORDER BY e.data_hora ASC
@@ -1978,11 +1977,11 @@ app.post('/api/admin/login', rateLimitLogin, async (req, res) => {
         const nome = rows[0].nome;
         await enviarEmail({
           to: rows[0].email,
-          subject: 'Seu código de acesso - VagasIO',
+          subject: 'Seu código de acesso - Vagas.io',
           html: `
             <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px; background: #fafafa; border-radius: 12px;">
               <div style="background: #7a1f3d; color: #fff; padding: 22px 20px; border-radius: 8px; text-align: center;">
-                <h2 style="margin:0;font-size:20px">VagasIO</h2>
+                <h2 style="margin:0;font-size:20px">Vagas.io</h2>
               </div>
               <div style="background: #fff; padding: 28px 24px; border-radius: 8px; margin-top: 16px;">
                 <p style="color: #2b2b2b; font-size: 15px; line-height: 1.5;">Olá, <strong>${escapeEmailHtml(nome)}</strong>!</p>
@@ -2067,11 +2066,11 @@ app.post('/api/admin/2fa/reenviar', rateLimitByIp('twofa'), async (req, res) => 
           const { enviarEmail } = require('./email');
           await enviarEmail({
             to: r.rows[0].email,
-            subject: 'Seu novo código de acesso - VagasIO',
+            subject: 'Seu novo código de acesso - Vagas.io',
             html: `
               <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px; background: #fafafa; border-radius: 12px;">
                 <div style="background: #7a1f3d; color: #fff; padding: 22px 20px; border-radius: 8px; text-align: center;">
-                  <h2 style="margin:0;font-size:20px">VagasIO</h2>
+                  <h2 style="margin:0;font-size:20px">Vagas.io</h2>
                 </div>
                 <div style="background: #fff; padding: 28px 24px; border-radius: 8px; margin-top: 16px;">
                   <p style="color: #2b2b2b; font-size: 15px; line-height: 1.5;">Olá, <strong>${escapeEmailHtml(r.rows[0].nome)}</strong>!</p>
@@ -3607,44 +3606,14 @@ app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
       dataHoraFinal = d.toISOString();
     }
 
-    // === Decide se gera link do Google Meet ===
-    // Online: gera Meet + envia e-mail
-    // Presencial: NÃO gera Meet, só salva o endereço no `local`
+    // Online uses an authenticated VagasIO room first. Google Meet is an explicit fallback only.
+    // The room is created after the interview row exists (it is keyed by entrevista_id).
     const isOnline = !local || /online/i.test(local);
-    let linkGerado = isOnline ? null : null; // começa null
+    let linkGerado = (!isOnline && local) ? null : (link_reuniao || null);
     let googleEventId = null;
     let meetHtmlLink = null;
-
-    if (isOnline && !link_reuniao && process.env.GCP_SERVICE_ACCOUNT_JSON) {
-      try {
-        const etapaNome = etapa === 3 ? 'RH' : 'Gestor';
-        const meetResult = await meet.criarEventoMeet({
-          summary: `Entrevista ${etapaNome} - ${candData.candidato_nome} - ${candData.vaga_titulo}`,
-          description: `Entrevista etapa ${etapaNome} da vaga "${candData.vaga_titulo}"${candData.empresa_nome ? ` (${candData.empresa_nome})` : ''}.\n\n${observacoes || ''}\n\nGerado via VagasIO.`,
-          startTime: dataHoraFinal,
-          durationMinutes: duracao_minutos || 60,
-          attendees: [
-            candData.candidato_email,
-            req.admin?.email || process.env.MEET_ADMIN_EMAIL,
-          ].filter(Boolean),
-        });
-        linkGerado = meetResult.meetLink;
-        googleEventId = meetResult.eventId;
-        meetHtmlLink = meetResult.htmlLink;
-        console.log(`[MEET] Evento criado: ${googleEventId} - ${linkGerado}`);
-      } catch (meetErr) {
-        console.error('[MEET ERRO]', meetErr.message);
-        return res.status(500).json({ erro: 'Falha ao criar reunião no Google Meet: ' + meetErr.message });
-      }
-    } else if (!isOnline) {
-      console.log(`[ENTREVISTA] Presencial — Meet não gerado. Local: ${local}`);
-    }
-
-    // Se for online e NÃO veio link_reuniao do frontend E NÃO conseguiu gerar Meet, usa placeholder
-    if (isOnline && !linkGerado && !link_reuniao && !process.env.GCP_SERVICE_ACCOUNT_JSON) {
-      linkGerado = `https://meet.google.com/pending-${candidatura_id}-${Date.now()}`;
-      console.warn('[MEET] GCP_SERVICE_ACCOUNT_JSON não configurada — usando link placeholder');
-    }
+    let video = null;
+    if (!isOnline) console.log(`[ENTREVISTA] Presencial — sala de vídeo não gerada. Local: ${local}`);
 
     // Cria a entrevista
     const r = await pool.query(`
@@ -3653,6 +3622,40 @@ app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
       RETURNING id, candidatura_id, etapa, data_hora, duracao_minutos, local, link_reuniao, google_event_id, observacoes, status, criado_em, criado_por
     `, [candidatura_id, etapa, dataHoraFinal, duracao_minutos || 60, local || null, linkGerado, googleEventId, observacoes || null, req.admin?.id || null]);
     const entrevista = r.rows[0];
+
+    if (isOnline && !link_reuniao) {
+      try {
+        // authAdmin stores the authenticated identity in req.admin; videoRooms also
+        // accepts admin identity so room creation remains resource-authorized.
+        const previousUser = req.user;
+        req.user = { id: req.admin?.id, tipo: 'admin' };
+        const room = await videoRooms.getOrCreate(req, entrevista.id);
+        req.user = previousUser;
+        if (!room) throw new Error('Sala VagasIO não autorizada');
+        video = { provider: 'vagasio', room_id: room.room_id, roomId: room.room_id };
+        await pool.query('UPDATE entrevistas SET local=$1 WHERE id=$2', ['Videochamada VagasIO', entrevista.id]);
+        entrevista.local = 'Videochamada VagasIO';
+        console.log(`[VAGASIO VIDEO] Sala criada: ${room.room_id}`);
+      } catch (videoErr) {
+        req.user = undefined;
+        console.error('[VAGASIO VIDEO ERRO] fallback para Meet:', videoErr.message);
+        if (process.env.GCP_SERVICE_ACCOUNT_JSON) {
+          try {
+            const etapaNome = etapa === 3 ? 'RH' : 'Gestor';
+            const meetResult = await meet.criarEventoMeet({
+              summary: `Entrevista ${etapaNome} - ${candData.candidato_nome} - ${candData.vaga_titulo}`,
+              description: `Fallback Google Meet — entrevista etapa ${etapaNome} do VagasIO.`,
+              startTime: dataHoraFinal, durationMinutes: duracao_minutos || 60,
+              attendees: [candData.candidato_email, req.admin?.email || process.env.MEET_ADMIN_EMAIL].filter(Boolean),
+            });
+            linkGerado = meetResult.meetLink; googleEventId = meetResult.eventId; meetHtmlLink = meetResult.htmlLink;
+            await pool.query('UPDATE entrevistas SET link_reuniao=$1, google_event_id=$2, local=$3 WHERE id=$4', [linkGerado, googleEventId, 'Google Meet (fallback)', entrevista.id]);
+            entrevista.link_reuniao = linkGerado; entrevista.google_event_id = googleEventId; entrevista.local = 'Google Meet (fallback)';
+            video = { provider: 'meet', fallback: true, link: linkGerado };
+          } catch (meetErr) { console.error('[MEET FALLBACK ERRO]', meetErr.message); }
+        }
+      }
+    }
     // Adiciona no histórico da candidatura
     const etapaNome = etapa === 3 ? 'Entrevista RH' : 'Entrevista Gestor';
     const dataFormatada = new Date(dataHoraFinal).toLocaleString('pt-BR', { dateStyle: 'short', timeStyle: 'short' });
@@ -3693,7 +3696,7 @@ app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
       candidatura_id: candidatura_id, vaga_id: entrevista.vaga_id || null,
       empresa_id: entrevista.empresa_id || null, ...analytics.fromReq(req) });
 
-    res.json({ ok: true, entrevista, googleEventId, meetHtmlLink });
+    res.json({ ok: true, entrevista, googleEventId, meetHtmlLink, video });
   } catch (e) {
     console.error('[ENTREVISTA CRIAR ERRO]', e);
     return erroInterno(req, res, e, 'api-admin-entrevista-post');
@@ -9447,9 +9450,9 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
         const { wrap, p } = require('./email/templates');
         result = await enviarEmail({
           to: destinatario,
-          subject: '[Teste] VagasIO · E-mail de teste',
+          subject: '[Teste] Vagas.io · E-mail de teste',
           html: wrap({ titulo: 'E-mail de Teste',
-            conteudo: p('Este é um e-mail de teste enviado pelo painel admin VagasIO.') +
+            conteudo: p('Este é um e-mail de teste enviado pelo painel admin Vagas.io.') +
                    p('Se você recebeu isso, o serviço de e-mail está funcionando corretamente! ✅')
           })
         });
@@ -9679,7 +9682,7 @@ app.get('/api/admin/me', authAdmin, async (req, res) => {
 });
 
   // ===== Assinatura da empresa — preparação segura para o Asaas =====
-  // Não recebe dados de cartão no VagasIO. O pagamento será coletado pelo checkout do gateway.
+  // Não recebe dados de cartão no Vagas.io. O pagamento será coletado pelo checkout do gateway.
   app.get('/api/empresa/assinatura', requireRecrutadorOuAdmin, async (req, res) => {
     try {
       const empresaId = Number(req.user.empresa_id);
@@ -9735,7 +9738,7 @@ app.get('/api/admin/me', authAdmin, async (req, res) => {
       const base = process.env.FRONTEND_URL || 'https://vagasio.com.br';
       const checkout = await asaas.criarCheckoutRecorrente({
         // O checkout coleta os dados obrigatórios do pagador com segurança no Asaas.
-        item: { name: `VagasIO — Plano ${e.plano_nome || 'empresarial'}`, description: 'Assinatura mensal VagasIO', externalReference: String(empresaId), quantity: 1, value: valor },
+        item: { name: `Vagas.io — Plano ${e.plano_nome || 'empresarial'}`, description: 'Assinatura mensal Vagas.io', externalReference: String(empresaId), quantity: 1, value: valor },
         nextDueDate: new Date(e.trial_fim).toISOString().slice(0, 10),
         callback: { successUrl: `${base}/empresa/index.html?page=configuracoes&pagamento=sucesso`, cancelUrl: `${base}/empresa/index.html?page=configuracoes&pagamento=cancelado`, expiredUrl: `${base}/empresa/index.html?page=configuracoes&pagamento=expirado` }
       });
@@ -9780,24 +9783,6 @@ app.get('/api/admin/me', authAdmin, async (req, res) => {
       console.error('[asaas webhook]', e.message);
       return res.status(500).json({ ok: false });
     }
-  });
-
-  // Web Push: rollout controlado por e-mail durante a validação.
-  const pushPermitido = req => { const alvo = String(process.env.PUSH_TEST_EMAIL || '').trim().toLowerCase(); if (process.env.PUSH_ALL_ENABLED === 'true') return true; return !!alvo && String(req.user?.email || '').toLowerCase() === alvo; }
-  app.get('/api/candidato/push/public-key', authCandidato, (req, res) => {
-    if (!pushPermitido(req)) return res.status(404).json({ ok: false, erro: 'Recurso indisponível' });
-    if (!process.env.VAPID_PUBLIC_KEY) return res.status(503).json({ ok: false, erro: 'Push não configurado' });
-    res.json({ ok: true, publicKey: process.env.VAPID_PUBLIC_KEY });
-  });
-  app.post('/api/candidato/push/subscribe', authCandidato, async (req, res) => {
-    if (!pushPermitido(req)) return res.status(404).json({ ok: false, erro: 'Recurso indisponível' });
-    try { const row = await pushService.save(req.user.id, req.body.subscription, req.body.dispositivo); res.json({ ok: true, id: row.id }); }
-    catch (e) { console.error('[push subscribe]', e.message); res.status(400).json({ ok: false, erro: 'Não foi possível ativar as notificações' }); }
-  });
-  app.delete('/api/candidato/push/subscribe', authCandidato, async (req, res) => {
-    if (!pushPermitido(req)) return res.status(404).json({ ok: false, erro: 'Recurso indisponível' });
-    try { await pushService.remove(req.user.id, req.body.endpoint); res.json({ ok: true }); }
-    catch (e) { console.error('[push unsubscribe]', e.message); res.status(400).json({ ok: false, erro: 'Não foi possível desativar as notificações' }); }
   });
 
   // FIX Etapa 2 (2026-07-27): HANDLER GLOBAL 404 — JSON seguro.
