@@ -35,7 +35,6 @@ if (!process.env.JWT_SECRET || process.env.JWT_SECRET === 'sua_chave_secreta_aqu
 }
 
 const { pool, init, inserirNotificacao } = require('./db');
-const pushService = require('./pushService');
 const { enviarCodigo, enviarNotificacaoStatus, enviarEmailProposta, enviarEmailBg, enviarEmailAtualizacao, enviarEmail, enviarEmailInscricao, getResendKey } = require('./email');
 // Fase 13 — Serviço central de e-mail (usa os mesmos provedores, acrescenta templates, preferências, dedup)
 const emailSvc     = require('./email/emailService');
@@ -47,7 +46,6 @@ const { criarAccessToken, criarRefreshToken, persistirRefresh, consumirRefresh, 
 const ADMIN_NOTIF_EMAIL = process.env.ADMIN_NOTIF_EMAIL || process.env.ADMIN_EMAIL || 'fabio08dejesusjunior@gmail.com';
 const { authMiddleware, authCandidato, authAdmin, authEmpresa, authAdminOnly, authCandidatoOrEmpresaOrAdmin, authCandidatoOrAdminStrict, requireAdminEmpresa, requireAdminOuRecrutadorEquipe, requireRecrutadorOuAdmin, requireEmpresaViewer, JWT_VERIFY_OPTIONS } = require('./auth');
 const { sanitizeText, sanitizeFilename, escapeContentDispositionFilename } = require('./sanitize');
-const videoFeature = require('./videoFeature');
 
 // =========================================================================
 // WHITELISTS DE COLUNAS (defesa contra vazamento de dados sensíveis)
@@ -550,6 +548,31 @@ app.post('/api/ci/admin-token', async (req, res) => {
 // da resposta pública; diagnóstico detalhado deve ocorrer por CI/observabilidade.
 app.get('/api/_build', (req, res) => res.json({ ok: true }));
 
+// VagasIO Video Calls — preview-only, tenant-scoped, JWT identity only.
+const videoRooms = require('./videoRooms');
+app.use('/api/video', authMiddleware);
+app.get('/api/video/config', (req, res) => {
+  if (!videoRooms.gate(req, res)) return;
+  res.set('Cache-Control','no-store').json({ enabled:true, signalUrl:process.env.VAGASIO_VIDEO_SIGNAL_URL, role:videoRooms.role(req.user), tokenTtlSeconds:300, maxParticipants:2 });
+});
+app.post('/api/video/rooms', async (req,res) => {
+  if (!videoRooms.gate(req,res)) return;
+  const interviewId=Number(req.body?.interview_id); if(!Number.isInteger(interviewId)||interviewId<1) return res.status(400).json({erro:'interview_id inválido'});
+  try { const room=await videoRooms.getOrCreate(req,interviewId); if(!room) return res.status(404).json({erro:'Recurso não encontrado'}); res.set('Cache-Control','no-store').json({ok:true,room}); }
+  catch(e){ console.error('[VIDEO ROOM]',e.message); res.status(503).json({erro:'Serviço de vídeo indisponível'}); }
+});
+app.post('/api/video/rooms/:roomId/token', async (req,res) => {
+  if (!videoRooms.gate(req,res)) return;
+  try { const token=await videoRooms.issue(req,req.params.roomId); if(!token) return res.status(404).json({erro:'Recurso não encontrado'}); res.set('Cache-Control','no-store').json({ok:true,...token}); }
+  catch(e){ console.error('[VIDEO TOKEN]',e.message); res.status(503).json({erro:'Serviço de vídeo indisponível'}); }
+});
+app.post('/api/video/rooms/:roomId/end', async (req,res) => {
+  if (!videoRooms.gate(req,res)) return;
+  if (!['empresa','recrutador','admin'].includes(req.user.tipo)) return res.status(403).json({erro:'Apenas o recrutador pode encerrar a sala'});
+  try { const r=await videoRooms.pool.query(`UPDATE video_rooms SET status='ended',ended_at=NOW() WHERE room_id=$1 AND status='active' AND (empresa_id=$2 OR $3='admin') RETURNING room_id`,[req.params.roomId,req.user.empresa_id||null,req.user.tipo]); if(!r.rowCount)return res.status(404).json({erro:'Recurso não encontrado'}); res.json({ok:true,ended:true}); }
+  catch(e){ console.error('[VIDEO END]',e.message); res.status(503).json({erro:'Serviço de vídeo indisponível'}); }
+});
+
 // =========================================================================
 // ROTAS DE DEBUG (APENAS DESENVOLVIMENTO / DEBUG EXPLÍCITO)
 // =========================================================================
@@ -559,18 +582,9 @@ app.get('/api/_build', (req, res) => res.json({ ok: true }));
 // As rotas que operam Calendar (Google Meet) também exigem authAdmin.
 const DEBUG = DEBUG_API_ENABLED;  // reusa a var do topo
 
-// VagasIO video-call rollout. This route is always mounted so the disabled
-// default is an intentional generic 404; DEBUG_API must not gate product flags.
-app.get('/api/video/config', authMiddleware, (req, res) => {
-  const result = videoFeature.getConfig(req.user);
-  if (!result.ok) return res.status(result.status || 404).json({ erro: result.erro });
-  res.set('Cache-Control', 'no-store');
-  return res.json(result.config);
-});
-
 if (DEBUG) {
   // ====== Apenas metadados de versão (não vaza nada sensível) ======
-app.get('/api/_debug/versao', authDebug, (req, res) => {
+  app.get('/api/_debug/versao', authDebug, (req, res) => {
     res.json({
       ok: true,
       versao: '2026-07-26-VAGAS-ATIVAS-RANKING',
@@ -608,7 +622,7 @@ app.get('/api/_debug/versao', authDebug, (req, res) => {
     try {
       const result = await enviarEmail({
         to,
-        subject: 'Teste de e-mail - VagasIO',
+        subject: 'Teste de e-mail - Vagas.io',
         html: '<p>Se você está lendo isso, o sistema de e-mail tá funcionando! ✅</p>'
       });
       res.json({ ok: true, hasResendApiKey: !!process.env.RESEND_API_KEY, result });
@@ -1961,11 +1975,11 @@ app.post('/api/admin/login', rateLimitLogin, async (req, res) => {
         const nome = rows[0].nome;
         await enviarEmail({
           to: rows[0].email,
-          subject: 'Seu código de acesso - VagasIO',
+          subject: 'Seu código de acesso - Vagas.io',
           html: `
             <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px; background: #fafafa; border-radius: 12px;">
               <div style="background: #7a1f3d; color: #fff; padding: 22px 20px; border-radius: 8px; text-align: center;">
-                <h2 style="margin:0;font-size:20px">VagasIO</h2>
+                <h2 style="margin:0;font-size:20px">Vagas.io</h2>
               </div>
               <div style="background: #fff; padding: 28px 24px; border-radius: 8px; margin-top: 16px;">
                 <p style="color: #2b2b2b; font-size: 15px; line-height: 1.5;">Olá, <strong>${escapeEmailHtml(nome)}</strong>!</p>
@@ -2050,11 +2064,11 @@ app.post('/api/admin/2fa/reenviar', rateLimitByIp('twofa'), async (req, res) => 
           const { enviarEmail } = require('./email');
           await enviarEmail({
             to: r.rows[0].email,
-            subject: 'Seu novo código de acesso - VagasIO',
+            subject: 'Seu novo código de acesso - Vagas.io',
             html: `
               <div style="font-family: Arial, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px; background: #fafafa; border-radius: 12px;">
                 <div style="background: #7a1f3d; color: #fff; padding: 22px 20px; border-radius: 8px; text-align: center;">
-                  <h2 style="margin:0;font-size:20px">VagasIO</h2>
+                  <h2 style="margin:0;font-size:20px">Vagas.io</h2>
                 </div>
                 <div style="background: #fff; padding: 28px 24px; border-radius: 8px; margin-top: 16px;">
                   <p style="color: #2b2b2b; font-size: 15px; line-height: 1.5;">Olá, <strong>${escapeEmailHtml(r.rows[0].nome)}</strong>!</p>
@@ -9430,9 +9444,9 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
         const { wrap, p } = require('./email/templates');
         result = await enviarEmail({
           to: destinatario,
-          subject: '[Teste] VagasIO · E-mail de teste',
+          subject: '[Teste] Vagas.io · E-mail de teste',
           html: wrap({ titulo: 'E-mail de Teste',
-            conteudo: p('Este é um e-mail de teste enviado pelo painel admin VagasIO.') +
+            conteudo: p('Este é um e-mail de teste enviado pelo painel admin Vagas.io.') +
                    p('Se você recebeu isso, o serviço de e-mail está funcionando corretamente! ✅')
           })
         });
@@ -9662,7 +9676,7 @@ app.get('/api/admin/me', authAdmin, async (req, res) => {
 });
 
   // ===== Assinatura da empresa — preparação segura para o Asaas =====
-  // Não recebe dados de cartão no VagasIO. O pagamento será coletado pelo checkout do gateway.
+  // Não recebe dados de cartão no Vagas.io. O pagamento será coletado pelo checkout do gateway.
   app.get('/api/empresa/assinatura', requireRecrutadorOuAdmin, async (req, res) => {
     try {
       const empresaId = Number(req.user.empresa_id);
@@ -9718,7 +9732,7 @@ app.get('/api/admin/me', authAdmin, async (req, res) => {
       const base = process.env.FRONTEND_URL || 'https://vagasio.com.br';
       const checkout = await asaas.criarCheckoutRecorrente({
         // O checkout coleta os dados obrigatórios do pagador com segurança no Asaas.
-        item: { name: `VagasIO — Plano ${e.plano_nome || 'empresarial'}`, description: 'Assinatura mensal VagasIO', externalReference: String(empresaId), quantity: 1, value: valor },
+        item: { name: `Vagas.io — Plano ${e.plano_nome || 'empresarial'}`, description: 'Assinatura mensal Vagas.io', externalReference: String(empresaId), quantity: 1, value: valor },
         nextDueDate: new Date(e.trial_fim).toISOString().slice(0, 10),
         callback: { successUrl: `${base}/empresa/index.html?page=configuracoes&pagamento=sucesso`, cancelUrl: `${base}/empresa/index.html?page=configuracoes&pagamento=cancelado`, expiredUrl: `${base}/empresa/index.html?page=configuracoes&pagamento=expirado` }
       });
@@ -9763,24 +9777,6 @@ app.get('/api/admin/me', authAdmin, async (req, res) => {
       console.error('[asaas webhook]', e.message);
       return res.status(500).json({ ok: false });
     }
-  });
-
-  // Web Push: rollout controlado por e-mail durante a validação.
-  const pushPermitido = req => { const alvo = String(process.env.PUSH_TEST_EMAIL || '').trim().toLowerCase(); if (process.env.PUSH_ALL_ENABLED === 'true') return true; return !!alvo && String(req.user?.email || '').toLowerCase() === alvo; }
-  app.get('/api/candidato/push/public-key', authCandidato, (req, res) => {
-    if (!pushPermitido(req)) return res.status(404).json({ ok: false, erro: 'Recurso indisponível' });
-    if (!process.env.VAPID_PUBLIC_KEY) return res.status(503).json({ ok: false, erro: 'Push não configurado' });
-    res.json({ ok: true, publicKey: process.env.VAPID_PUBLIC_KEY });
-  });
-  app.post('/api/candidato/push/subscribe', authCandidato, async (req, res) => {
-    if (!pushPermitido(req)) return res.status(404).json({ ok: false, erro: 'Recurso indisponível' });
-    try { const row = await pushService.save(req.user.id, req.body.subscription, req.body.dispositivo); res.json({ ok: true, id: row.id }); }
-    catch (e) { console.error('[push subscribe]', e.message); res.status(400).json({ ok: false, erro: 'Não foi possível ativar as notificações' }); }
-  });
-  app.delete('/api/candidato/push/subscribe', authCandidato, async (req, res) => {
-    if (!pushPermitido(req)) return res.status(404).json({ ok: false, erro: 'Recurso indisponível' });
-    try { await pushService.remove(req.user.id, req.body.endpoint); res.json({ ok: true }); }
-    catch (e) { console.error('[push unsubscribe]', e.message); res.status(400).json({ ok: false, erro: 'Não foi possível desativar as notificações' }); }
   });
 
   // FIX Etapa 2 (2026-07-27): HANDLER GLOBAL 404 — JSON seguro.
