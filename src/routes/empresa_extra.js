@@ -245,8 +245,8 @@ function registrar(app, ctx) {
       const check = await pool.query(`
         SELECT c.id FROM candidaturas c
         JOIN vagas v ON v.id = c.vaga_id
-        WHERE c.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3 AND revogado_em IS NULL))
-      `, [id, req.user.id, empresa_id]);
+        WHERE c.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2 AND revogado_em IS NULL))
+      `, [id, empresa_id]);
       if (check.rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
       const { rows } = await pool.query(
         `SELECT id, candidatura_id, etapa, data_hora, duracao_minutos, local, link_reuniao, observacoes, status, criado_em
@@ -500,8 +500,8 @@ function registrar(app, ctx) {
       const check = await pool.query(`
         SELECT c.*, v.etapas as vaga_etapas FROM candidaturas c
         JOIN vagas v ON v.id = c.vaga_id
-        WHERE c.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3 AND revogado_em IS NULL))
-      `, [id, req.user.id, empresa_id]);
+        WHERE c.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2 AND revogado_em IS NULL))
+      `, [id, empresa_id]);
       if (check.rows.length === 0) return res.status(403).json({ erro: 'Candidatura não pertence a esta empresa' });
       const cand = check.rows[0];
       let novaEtapa = etapa !== undefined ? etapa : cand.etapa_atual;
