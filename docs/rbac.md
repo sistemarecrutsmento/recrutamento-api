@@ -8,7 +8,7 @@ Gerado automaticamente na Fase 15. Reflete o comportamento real do código (`aut
 
 | Papel | Código (`tipo`) | Descrição |
 |---|---|---|
-| **SaaS Admin** | `admin` + `is_saas=true` | Administrador global da plataforma Vagas.io |
+| **SaaS Admin** | `admin` + `is_saas=true` | Administrador global da plataforma VagasIO |
 | **Admin Empresa** | `empresa` + `role='admin'` | Dono ou admin da empresa cliente |
 | **Recrutador** | `empresa` + `role='recrutador'` | Recrutador da empresa cliente |
 | **Viewer** | `empresa` + `role='viewer'` | Acesso leitura às áreas da empresa |
