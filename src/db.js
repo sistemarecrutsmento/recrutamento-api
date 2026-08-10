@@ -26,7 +26,7 @@ pool.on('connect', (client) => {
   const pin = qualifiedSchema
     ? `SET search_path TO ${qualifiedSchema}, pg_catalog`
     : 'SET search_path TO public, pg_catalog';
-  client.query(`${pin}; SET statement_timeout = 15s`).catch((e) => {
+  client.query(`${pin}; SET statement_timeout = '15s'`).catch((e) => {
     console.error('[DB] failed to pin search_path:', e.message);
   });
 });
@@ -520,6 +520,17 @@ async function init() {
       await migration014();
     } catch (migrationErr) {
       console.error('[MIGRATION 014] Erro não tratado (mas segui):', migrationErr.message);
+    }
+
+    // Preview video rollout migrations. These are isolated by VAGASIO_VIDEO_SCHEMA
+    // and deliberately skipped in production.
+    if (PREVIEW_SCHEMA) {
+      try { const { up: m019 } = require('./migrations/019_video_rooms'); await m019(); console.log('[MIGRATION 019] video rooms OK'); }
+      catch (e) { console.error('[MIGRATION 019] preview video rooms:', e.message); }
+      try { const { up: m020 } = require('./migrations/020_video_preview_bootstrap'); await m020(); console.log('[MIGRATION 020] preview bootstrap OK'); }
+      catch (e) { console.error('[MIGRATION 020] preview bootstrap:', e.message); }
+      try { const { up: m021 } = require('./migrations/021_video_preview_repair'); await m021(); console.log('[MIGRATION 021] preview repair OK'); }
+      catch (e) { console.error('[MIGRATION 021] preview repair:', e.message); }
     }
 
     console.log('Tabelas criadas/verificadas + migrations Fase 1-014 aplicadas');
