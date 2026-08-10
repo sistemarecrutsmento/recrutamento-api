@@ -1,4 +1,4 @@
-# Banco de Dados — Vagas.io
+# Banco de Dados — VagasIO
 
 Gerado na Fase 15. Documenta as principais entidades, relacionamentos e constraints.
 
