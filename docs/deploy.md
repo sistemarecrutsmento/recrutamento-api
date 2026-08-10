@@ -1,4 +1,4 @@
-# Deploy — Vagas.io
+# Deploy — VagasIO
 
 Gerado na Fase 15. Documenta o fluxo atual de deploy backend (Render) e frontend (GitHub Pages).
 
