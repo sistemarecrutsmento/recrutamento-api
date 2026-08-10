@@ -116,9 +116,12 @@ function registrar(app, ctx) {
       const { rows } = await pool.query(`
         SELECT e.id, e.candidatura_id, e.etapa, e.data_hora, e.duracao_minutos,
                e.local, NULL AS link_reuniao, e.observacoes, e.status,
+               vr.room_id AS video_room_id,
+               CASE WHEN vr.room_id IS NOT NULL THEN 'vagasio' ELSE NULL END AS video_provider,
                c.vaga_id, v.titulo as vaga_titulo,
                cd.id as candidato_id, cd.nome as candidato_nome, cd.foto_url, cd.email
         FROM entrevistas e
+        LEFT JOIN video_rooms vr ON vr.entrevista_id=e.id AND vr.status='active'
         JOIN candidaturas c ON c.id = e.candidatura_id
         JOIN vagas v ON v.id = c.vaga_id
         JOIN candidatos cd ON cd.id = c.candidato_id
@@ -278,7 +281,7 @@ function registrar(app, ctx) {
       let lockHeld = false;
       try {
         await client.query('SELECT pg_advisory_lock(hashtext($1))', [`vagasio:entrevista:${candidatura_id}`]); lockHeld = true;
-        const active = await client.query(`SELECT id FROM entrevistas WHERE candidatura_id=$1 AND COALESCE(status,'agendada') NOT IN ('cancelada','realizada','concluida','concluído','no_show') ORDER BY id DESC LIMIT 1`, [candidatura_id]);
+        const active = await client.query(`SELECT id FROM entrevistas WHERE candidatura_id=$1 AND etapa=$2 AND COALESCE(status,'agendada') NOT IN ('cancelada','realizada','concluida','concluído','no_show') ORDER BY id DESC LIMIT 1`, [candidatura_id, etapa]);
         if (active.rowCount) return res.status(409).json({ erro:'Esta candidatura já possui uma entrevista ativa. Edite o agendamento existente.', codigo:'ENTREVISTA_ATIVA_EXISTENTE', entrevista_id:active.rows[0].id });
         // Online interviews require a VagasIO room; link_reuniao/Meet is never a fallback.
         const isOnline = !local || /online|video/i.test(String(local)) || tipo === 'video';
