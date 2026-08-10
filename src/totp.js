@@ -99,7 +99,7 @@ function generateTotpSecret(length = 20) {
  * @param {string} email  - email do usuário
  * @param {string} issuer - nome da plataforma
  */
-function totpOtpauthUrl(secret, email, issuer = 'Vagas.io') {
+function totpOtpauthUrl(secret, email, issuer = 'VagasIO') {
   const enc = encodeURIComponent;
   return `otpauth://totp/${enc(issuer)}:${enc(email)}?secret=${secret}&issuer=${enc(issuer)}&algorithm=SHA1&digits=${TOTP_DIGITS}&period=${TOTP_STEP}`;
 }
