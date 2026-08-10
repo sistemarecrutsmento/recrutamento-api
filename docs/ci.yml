@@ -1,4 +1,4 @@
-name: CI — Vagas.io
+name: CI — VagasIO
 
 on:
   push:
