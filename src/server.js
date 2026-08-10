@@ -1856,7 +1856,10 @@ app.get('/api/vagas', async (req, res) => {
                     v.salario_min, v.salario_max, v.tipo_contrato, v.nivel, v.area,
                     v.cidade, v.estado, v.etapas
              FROM vagas v
-             JOIN empresas e ON e.id = v.empresa_id AND e.ativo = true
+             JOIN empresas e ON e.ativo = true
+                AND (e.id = v.empresa_id
+                  OR (v.empresa_id IS NULL AND NULLIF(TRIM(v.empresa), '') IS NOT NULL
+                      AND LOWER(TRIM(e.nome)) = LOWER(TRIM(v.empresa))))
              WHERE v.status = 'publicada'`;
   const params = [];
   if (cidade) { params.push(`%${cidade}%`); sql += ` AND v.cidade ILIKE $${params.length}`; }
@@ -1892,7 +1895,13 @@ app.get('/api/vagas/:id', async (req, res) => {
               ARRAY(SELECT tag FROM vaga_tags WHERE vaga_id = v.id ORDER BY criado_em) AS tags
        FROM vagas v
        WHERE v.id = $1 AND v.status = 'publicada'
-         AND EXISTS (SELECT 1 FROM empresas e WHERE e.id = v.empresa_id AND e.ativo = true)`, 
+         AND EXISTS (
+           SELECT 1 FROM empresas e
+           WHERE e.ativo = true
+             AND (e.id = v.empresa_id
+               OR (v.empresa_id IS NULL AND NULLIF(TRIM(v.empresa), '') IS NOT NULL
+                   AND LOWER(TRIM(e.nome)) = LOWER(TRIM(v.empresa))))
+         )`, 
       [id]
     );
     if (rows.length === 0) return res.status(404).json({ erro: 'Vaga não encontrada' });
