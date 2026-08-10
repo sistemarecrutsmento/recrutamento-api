@@ -1,8 +1,22 @@
 // force-deploy: 2026-07-28T17:53:11Z
 const { Pool } = require('pg');
 
+// Preview-only isolation: when VAGASIO_VIDEO_SCHEMA is set, every preview
+// connection uses that schema. Production has no such variable and keeps its
+// existing connection behavior unchanged. The schema is created through a
+// separate bootstrap connection before any migrations run.
+const isolatedSchema = process.env.VAGASIO_VIDEO_SCHEMA || null;
+if (isolatedSchema && !/^[a-z_][a-z0-9_]{0,62}$/.test(isolatedSchema)) {
+  throw new Error('VAGASIO_VIDEO_SCHEMA inválido');
+}
+function schemaConnectionString() {
+  if (!isolatedSchema) return process.env.DATABASE_URL;
+  const u = new URL(process.env.DATABASE_URL);
+  u.searchParams.set('options', `-c search_path=${isolatedSchema}`);
+  return u.toString();
+}
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
+  connectionString: schemaConnectionString(),
   ssl: process.env.NODE_ENV === 'production' ? { rejectUnauthorized: false } : false,
   // Limites importantes pra não travar
   max: 5,                            // max 5 conexões no pool
@@ -22,6 +36,17 @@ pool.on('error', (err) => {
 });
 
 async function init() {
+  if (isolatedSchema) {
+    // Bootstrap against the database's default schema only to create the
+    // dedicated namespace. No application table is read, changed, or dropped.
+    const bootstrap = new Pool({ connectionString: process.env.DATABASE_URL, max: 1, connectionTimeoutMillis: 10000 });
+    try {
+      await bootstrap.query(`CREATE SCHEMA IF NOT EXISTS ${isolatedSchema}`);
+    } finally {
+      await bootstrap.end();
+    }
+    console.log('[DB] isolated preview schema ready:', isolatedSchema);
+  }
   const client = await pool.connect();
   try {
     await client.query(`
