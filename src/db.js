@@ -48,6 +48,23 @@ async function init() {
     console.log('[DB] isolated preview schema ready:', isolatedSchema);
   }
   const client = await pool.connect();
+  // Preview services must never run the legacy production migrations. They
+  // use a dedicated search_path and a minimal synthetic dependency graph.
+  if (isolatedSchema) {
+    try {
+      const { up: previewBootstrap } = require('./migrations/020_video_preview_bootstrap');
+      await previewBootstrap();
+      const { up: migration019 } = require('./migrations/019_video_rooms');
+      await migration019();
+      console.log('[PREVIEW] migrations applied: 020 bootstrap + 019 video rooms; legacy skipped');
+    } catch (err) {
+      console.error('[PREVIEW] migration failed:', err.message);
+      throw err;
+    } finally {
+      client.release();
+    }
+    return;
+  }
   try {
     await client.query(`
       CREATE TABLE IF NOT EXISTS admins (
