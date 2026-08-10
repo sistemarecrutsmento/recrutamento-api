@@ -7628,6 +7628,26 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
   // IMPORTANTE: registrado ANTES do handler 404 global (linha abaixo), senão as rotas
   // novas nunca são alcançadas — Express processa middlewares em ordem.
   const { registrar: registrarEmpresaExtra } = require('./routes/empresa_extra');
+  // Fluxo canônico da análise da candidatura (empresa): uma única regra de etapas.
+  app.post('/api/empresa/candidatura/:id/status', requireRecrutadorOuAdmin, async (req, res) => {
+    const { empresa_id } = req.user; const id = Number(req.params.id); const acao = String(req.body?.acao || '').trim();
+    if (!['avancar','reprovar','reabrir'].includes(acao)) return res.status(400).json({ erro:'Ação inválida' });
+    try {
+      const q = await pool.query(`SELECT c.id,c.etapa_atual,c.status,c.historico,v.etapas FROM candidaturas c JOIN vagas v ON v.id=c.vaga_id WHERE c.id=$1 AND v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id=$2 AND revogado_em IS NULL)`, [id,empresa_id]);
+      if (!q.rowCount) return res.status(404).json({ erro:'Candidatura não encontrada' });
+      const c=q.rows[0]; let atual=Number(c.etapa_atual); if (!Number.isFinite(atual)||atual<1) atual=1;
+      let etapas=c.etapas; if(typeof etapas==='string'){try{etapas=JSON.parse(etapas)}catch(_){etapas=[]}}
+      const total=Array.isArray(etapas)&&etapas.length?etapas.length:7; let nova=atual,status=c.status;
+      if(acao==='avancar'){nova=Math.min(atual+1,total);status=nova>=total?'contratado':'em_andamento'}
+      if(acao==='reprovar')status='reprovado'; if(acao==='reabrir')status='em_andamento';
+      let hist=c.historico; if(typeof hist==='string'){try{hist=JSON.parse(hist)}catch(_){hist=[]}} if(!Array.isArray(hist))hist=[];
+      hist.push({tipo:'status',acao,etapa_anterior:atual,etapa:nova,status,por:`empresa:${req.user.email||empresa_id}`,quando:new Date().toISOString()});
+      const u=await pool.query(`UPDATE candidaturas SET etapa_atual=$1,status=$2,historico=$3::jsonb,atualizada_em=NOW() WHERE id=$4`,[nova,status,JSON.stringify(hist),id]);
+      if(u.rowCount!==1)return res.status(409).json({erro:'Não foi possível atualizar a candidatura. Recarregue e tente novamente.'});
+      res.json({ok:true,etapa_atual:nova,status});
+    } catch(e){console.error('[EMPRESA STATUS CANONICO]',e);res.status(500).json({erro:'Erro ao atualizar status'})}
+  });
+
   registrarEmpresaExtra(app, { pool, documentosObrigatorios: DOCUMENTOS_OBRIGATORIOS, cloudinaryAuthenticatedUrl });
 
   // =========================================================================
