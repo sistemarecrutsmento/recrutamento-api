@@ -1,4 +1,4 @@
-# Procedimento de Restauração Manual — Vagas.io
+# Procedimento de Restauração Manual — VagasIO
 
 > **Atenção:** Executar APENAS em caso de desastre (corrupção de dados, deleção acidental, etc).
 > A restauração SOBRESCREVE os dados atuais. Faça um backup ANTES de restaurar.
