@@ -6140,7 +6140,7 @@ app.get('/api/empresa/candidatura/:id', requireEmpresaViewer, async (req, res) =
        FROM entrevistas e
        LEFT JOIN video_rooms vr ON vr.entrevista_id = e.id AND vr.status = 'active'
        WHERE e.candidatura_id = $1
-       ORDER BY e.data_hora DESC, e.id DESC`
+       ORDER BY e.data_hora DESC, e.id DESC`,
       [id]
     );
     candidatura.entrevistas = entrevistas;
