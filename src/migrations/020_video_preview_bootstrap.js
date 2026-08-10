@@ -21,7 +21,10 @@ async function up() {
   const vaga = v.rows[0].id;
   const ca = await pool.query(`INSERT INTO candidaturas(candidato_id,vaga_id) VALUES ($1,$2) RETURNING id`, [candidato,vaga]);
   const candidatura = ca.rows[0].id;
-  const i = await pool.query(`INSERT INTO entrevistas(candidatura_id,empresa_id) VALUES ($1,$2) RETURNING id`, [candidatura,empresa]);
+  // Existing full-app-shaped tables may retain NOT NULL constraints from the
+  // legacy schema. Supply the two required interview fields explicitly so the
+  // preview bootstrap remains compatible without changing production schema.
+  const i = await pool.query(`INSERT INTO entrevistas(candidatura_id,empresa_id,etapa,data_hora) VALUES ($1,$2,4,NOW()) RETURNING id`, [candidatura,empresa]);
   console.log('[PREVIEW] synthetic ids', {empresa,candidato,vaga,candidatura,entrevista:i.rows[0].id});
 }
 module.exports = { up };
