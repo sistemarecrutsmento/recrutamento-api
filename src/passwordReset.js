@@ -27,7 +27,7 @@ function emailRedefinicaoHtml({ nome, link, minutos }) {
   return `
   <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 560px; margin: 0 auto; padding: 24px;">
     <div style="text-align: center; padding: 20px 0;">
-      <h1 style="color: #722F37; font-size: 24px; margin: 0;">Vagas.io</h1>
+      <h1 style="color: #722F37; font-size: 24px; margin: 0;">VagasIO</h1>
     </div>
     <div style="background: #fff; padding: 28px 24px; border-radius: 8px; border: 1px solid #E5E5E5;">
       <p style="color: #1A1A1A; font-size: 16px; line-height: 1.5;">Olá, <strong>${escapeHtml(nome)}</strong>!</p>
@@ -130,7 +130,7 @@ async function esqueciSenha(req, res) {
 
     enviarEmailBg({
       to: usuario.email,
-      subject: 'Redefinição de senha — Vagas.io',
+      subject: 'Redefinição de senha — VagasIO',
       html
     });
 
