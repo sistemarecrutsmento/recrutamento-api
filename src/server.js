@@ -128,6 +128,8 @@ function protegerUrlProposta(row) {
 }
 
 const app = express();
+// Render health check endpoint (preview and production-safe, no secrets/data).
+app.get('/health', (_req, res) => res.status(200).json({ ok: true }));
 
 // FIX Etapa 2 (2026-07-27): hardening de headers + Express.
 // disable() remove o header de TODAS as respostas, incluindo OPTIONS e 404/500.
