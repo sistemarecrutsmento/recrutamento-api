@@ -6146,11 +6146,14 @@ app.get('/api/empresa/candidatura/:id', requireEmpresaViewer, async (req, res) =
     // A página do Portal Empresa precisa exibir e permitir administrar a entrevista
     // atual, preservando a compatibilidade da análise de candidatura.
     const { rows: entrevistas } = await pool.query(
-      `SELECT id, candidatura_id, etapa, data_hora, duracao_minutos, local,
-              link_reuniao, observacoes, status, criado_em
-       FROM entrevistas
-       WHERE candidatura_id = $1
-       ORDER BY data_hora DESC, id DESC`,
+      `SELECT e.id, e.candidatura_id, e.etapa, e.data_hora, e.duracao_minutos, e.local,
+              e.link_reuniao, e.observacoes, e.status, e.criado_em,
+              vr.room_id AS video_room_id,
+              CASE WHEN vr.room_id IS NOT NULL THEN 'vagasio' ELSE NULL END AS video_provider
+       FROM entrevistas e
+       LEFT JOIN video_rooms vr ON vr.entrevista_id = e.id AND vr.status = 'active'
+       WHERE e.candidatura_id = $1
+       ORDER BY e.data_hora DESC, e.id DESC`
       [id]
     );
     candidatura.entrevistas = entrevistas;
