@@ -566,6 +566,18 @@ async function inserirNotificacao(client, user_type, user_id, tipo, titulo, mens
         JSON.stringify(opts.metadata || {}),
       ]
     );
+    // Web Push acompanha exatamente o mesmo feed de notificações do candidato.
+    if (user_type === 'candidato') {
+      try {
+        const { send } = require('./pushService');
+        send(user_id, {
+          title: titulo,
+          body: mensagem || titulo,
+          icon: '/candidato/icons/icon-192.png',
+          data: { url: '/candidato/notificacoes.html', notificacao_id: r.rows[0]?.id }
+        }).catch(e => console.error('[push] Falha ao enviar:', e.message));
+      } catch (e) { console.error('[push] Falha ao carregar serviço:', e.message); }
+    }
     return { ok: true, id: r.rows[0]?.id };
   } catch (e) {
     console.error('[notificacao] Falha ao inserir:', e.message);
