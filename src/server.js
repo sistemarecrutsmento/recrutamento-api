@@ -3896,6 +3896,14 @@ app.post('/api/admin/candidatura/:id/status', authAdmin, async (req, res) => {
     if (novaEtapa >= totalEtapas) {
       novoStatus = 'contratado';
     }
+    // Ao avançar, a entrevista da etapa anterior deixa de ser a atual.
+    // Cada etapa de entrevista terá seu próprio registro e sua própria sala.
+    if (novaEtapa > 1) {
+      try {
+        await pool.query(`UPDATE entrevistas SET status='realizada', atualizado_em=NOW()
+          WHERE candidatura_id=$1 AND etapa < $2 AND status IN ('agendada','confirmada','pendente')`, [cand.id, novaEtapa]);
+      } catch (e) { console.error('[ENTREVISTA ETAPA ANTERIOR]', e); }
+    }
     // Auto-cria um slot de entrevista quando o candidato entra na etapa 3 (RH) ou 4 (Gestor)
     // Slot fica como placeholder, o admin preenche data/hora depois via modal
     if (novaEtapa === 3 || novaEtapa === 4) {
