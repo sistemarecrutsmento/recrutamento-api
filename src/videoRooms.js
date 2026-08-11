@@ -31,10 +31,11 @@ function gate(req, res) {
 function hash(v) { return crypto.createHash('sha256').update(v).digest('hex'); }
 async function access(req, id) {
   const p = await pool.query(`SELECT ca.id candidatura_id, ca.candidato_id, ca.vaga_id, e.id entrevista_id,
-      v.empresa_id empresa_id
+      COALESCE(v.empresa_id, eu.empresa_id) empresa_id
     FROM entrevistas e JOIN candidaturas ca ON ca.id=e.candidatura_id
     JOIN vagas v ON v.id=ca.vaga_id
-    WHERE e.id=$1`, [id, req.user.id]);
+    LEFT JOIN empresa_usuarios eu ON eu.empresa_id=v.empresa_id AND eu.id=$2
+    WHERE e.id=$1`, [id]);
   if (!p.rowCount) return null;
   const r=p.rows[0], isCand=req.user.tipo==='candidato' && Number(r.candidato_id)===Number(req.user.id);
   const isRecruiter=['empresa','recrutador'].includes(req.user.tipo) && Number(req.user.empresa_id)===Number(r.empresa_id);
