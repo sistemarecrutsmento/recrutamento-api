@@ -565,7 +565,7 @@ app.post('/api/video/preview-login', async (req, res) => {
   if (!process.env.VAGASIO_VIDEO_SCHEMA) return res.status(404).json({ erro: 'Not found' });
   const papel = String(req.body?.role || '').toLowerCase();
   try {
-    const company = await pool.query(`SELECT id FROM empresas WHERE nome='Preview Synthetic Company' ORDER BY id LIMIT 1`);
+    const company = await pool.query(`SELECT id FROM empresas WHERE nome='Preview Synthetic Company' ORDER BY id DESC LIMIT 1`);
     const cand = await pool.query(`SELECT id,email,nome FROM candidatos WHERE email='preview.candidate@vagasio.invalid' LIMIT 1`);
     const interview = await pool.query(`SELECT e.id FROM entrevistas e JOIN candidaturas ca ON ca.id=e.candidatura_id JOIN candidatos c ON c.id=ca.candidato_id WHERE c.email='preview.candidate@vagasio.invalid' ORDER BY e.id DESC LIMIT 1`);
     if (!company.rowCount || !cand.rowCount || !interview.rowCount) return res.status(503).json({ erro: 'Preview ainda não foi inicializado' });
