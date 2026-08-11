@@ -34,7 +34,7 @@ async function access(req, id) {
       v.empresa_id empresa_id
     FROM entrevistas e JOIN candidaturas ca ON ca.id=e.candidatura_id
     JOIN vagas v ON v.id=ca.vaga_id
-    WHERE e.id=$1`, [id, req.user.id]);
+    WHERE e.id=$1`, [id]);
   if (!p.rowCount) return null;
   const r=p.rows[0], isCand=req.user.tipo==='candidato' && Number(r.candidato_id)===Number(req.user.id);
   const isRecruiter=['empresa','recrutador'].includes(req.user.tipo) && Number(req.user.empresa_id)===Number(r.empresa_id);
