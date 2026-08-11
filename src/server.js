@@ -128,6 +128,8 @@ function protegerUrlProposta(row) {
 }
 
 const app = express();
+// Render health check: must respond before the preview deploy is promoted.
+app.get('/health', (_req, res) => res.status(200).json({ ok: true, service: 'vagasio-video-api-preview' }));
 
 // FIX Etapa 2 (2026-07-27): hardening de headers + Express.
 // disable() remove o header de TODAS as respostas, incluindo OPTIONS e 404/500.
