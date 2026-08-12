@@ -11,21 +11,17 @@ const signalUrl = () => {
   if (/^https:\/\//i.test(raw)) return raw.replace(/^https:/i, 'wss:');
   return raw;
 };
-const normalizeTipo = (tipo) => {
-  const t = String(tipo || '').toLowerCase().trim();
-  if (['candidato','candidate'].includes(t)) return 'candidato';
-  if (['empresa','empresa_admin','admin_empresa','recrutador','recruiter'].includes(t)) return t === 'recrutador' || t === 'recruiter' ? 'recrutador' : 'empresa';
-  if (['admin','administrador'].includes(t)) return 'admin';
-  return '';
+const allow = (u) => {
+  // Authorization is the existing JWT plus resource ownership; no synthetic
+  // identity allowlist is used in the development service.
+  // Administrador Global não é participante empresarial. O Modo de Suporte
+  // formal ainda não existe; portanto não recebe acesso a salas privadas.
+  return !!u && ['candidato','empresa','recrutador'].includes(u.tipo);
 };
-const allow = (u) => ['candidato','empresa','recrutador','admin'].includes(normalizeTipo(u?.tipo));
-function role(u) { return normalizeTipo(u?.tipo) === 'candidato' ? 'candidate' : (allow(u) ? 'recruiter' : null); }
+function role(u) { return u?.tipo === 'candidato' ? 'candidate' : (['empresa','recrutador'].includes(u?.tipo) ? 'recruiter' : null); }
 function gate(req, res) {
-  const enabledNow = enabled(), url = signalUrl(), tipo = normalizeTipo(req.user?.tipo);
-  if (!enabledNow || !tipo || !/^wss:\/\//i.test(url)) {
-    console.warn('[VIDEO GATE] bloqueado', JSON.stringify({ enabled: enabledNow, tipo: tipo || 'ausente', signalConfigured: /^wss:\/\//i.test(url) }));
-    res.status(404).json({ erro:'Recurso não encontrado' }); return false;
-  }
+  if (!enabled() || !allow(req.user) || !/^wss:\/\//i.test(signalUrl())) { res.status(404).json({ erro:'Recurso não encontrado' }); return false; }
+  if (!role(req.user)) { res.status(404).json({ erro:'Recurso não encontrado' }); return false; }
   return true;
 }
 function hash(v) { return crypto.createHash('sha256').update(v).digest('hex'); }
@@ -54,8 +50,8 @@ async function getOrCreate(req, interviewId) {
 async function issue(req, room) {
   const q=await pool.query(`SELECT r.*, ca.candidato_id FROM video_rooms r JOIN candidaturas ca ON ca.id=r.candidatura_id WHERE r.room_id=$1`,[room]);
   if(!q.rowCount) return null;
-  const r=q.rows[0], isCand=req.user.tipo==='candidato'&&Number(req.user.id)===Number(r.candidato_id), isRec=['empresa','recrutador'].includes(req.user.tipo)&&Number(req.user.empresa_id)===Number(r.empresa_id), isAdmin=req.user.tipo==='admin';
-  if((!isCand&&!isRec&&!isAdmin)||r.status!=='active'||new Date(r.expires_at)<=new Date()) return null;
+  const r=q.rows[0], isCand=req.user.tipo==='candidato'&&Number(req.user.id)===Number(r.candidato_id), isRec=['empresa','recrutador'].includes(req.user.tipo)&&Number(req.user.empresa_id)===Number(r.empresa_id);
+  if((!isCand&&!isRec)||r.status!=='active'||new Date(r.expires_at)<=new Date()) return null;
   const participant_role=isCand?'candidate':'recruiter';
   // Never fall back to the general API secret: this key is shared only with preview signaling.
   const secret=process.env.VAGASIO_VIDEO_JWT_SECRET || process.env.VAGASIO_VIDEO_PREVIEW_JWT_SECRET;
