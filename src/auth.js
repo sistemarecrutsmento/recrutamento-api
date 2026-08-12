@@ -57,6 +57,18 @@ function authAdmin(req, res, next) {
   });
 }
 
+// Portal Global/SaaS: leitura operacional. Recrutador Global pode consultar,
+// mas não pode executar mutações nem acessar rotas privadas protegidas por
+// authAdminOnly.
+function authGlobalRead(req, res, next) {
+  return authMiddleware(req, res, () => {
+    if (req.user.tipo !== 'admin' && req.user.tipo !== 'recrutador') {
+      return res.status(403).json({ erro: 'Acesso apenas ao Portal Global' });
+    }
+    next();
+  });
+}
+
 function authEmpresa(req, res, next) {
   return authMiddleware(req, res, () => {
     if (req.user.tipo !== 'empresa') {
@@ -64,6 +76,12 @@ function authEmpresa(req, res, next) {
     }
     next();
   });
+}
+
+// Conteúdo privado global: até existir sessão formal de suporte com escopo,
+// o Administrador Global não entra em dados de candidato/empresa.
+function denyGlobalPrivateUntilSupport(req, res, next) {
+  return res.status(403).json({ erro: 'Conteúdo privado exige Modo de Suporte autorizado' });
 }
 
 // Permissão total: só admin (recrutador NÃO pode criar usuários / mexer em config)
@@ -213,6 +231,8 @@ module.exports = {
   authMiddleware,
   authCandidato,
   authAdmin,
+  authGlobalRead,
+  denyGlobalPrivateUntilSupport,
   authEmpresa,
   authAdminOnly,
   authCandidatoOrEmpresaOrAdmin,
