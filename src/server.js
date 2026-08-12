@@ -10,6 +10,7 @@ const asaas = require('./asaas');
 const cloudinary = require('cloudinary').v2;
 const { analisarCurriculo } = require('./curriculoParser');
 const { validateBase64File } = require('./fileValidation');
+const { registrarRotasTriagem } = require('./triagemRoutes');
 require('dotenv').config();
 
 // =========================================================================
@@ -44,7 +45,7 @@ const { criarAccessToken, criarRefreshToken, persistirRefresh, consumirRefresh, 
 
 // Email do admin pra receber notificações de ação do candidato
 const ADMIN_NOTIF_EMAIL = process.env.ADMIN_NOTIF_EMAIL || process.env.ADMIN_EMAIL || 'fabio08dejesusjunior@gmail.com';
-const { authMiddleware, authCandidato, authAdmin, authEmpresa, authAdminOnly, authCandidatoOrEmpresaOrAdmin, authCandidatoOrAdminStrict, requireAdminEmpresa, requireAdminOuRecrutadorEquipe, requireRecrutadorOuAdmin, requireEmpresaViewer, JWT_VERIFY_OPTIONS } = require('./auth');
+const { authMiddleware, authCandidato, authAdmin, authGlobalRead, authEmpresa, authAdminOnly, denyGlobalPrivateUntilSupport, authCandidatoOrEmpresaOrAdmin, authCandidatoOrAdminStrict, requireAdminEmpresa, requireAdminOuRecrutadorEquipe, requireRecrutadorOuAdmin, requireEmpresaViewer, JWT_VERIFY_OPTIONS } = require('./auth');
 const { sanitizeText, sanitizeFilename, escapeContentDispositionFilename } = require('./sanitize');
 
 // =========================================================================
@@ -71,7 +72,14 @@ function naoAutorizadoOuInexistente(req, res, resource_type, resource_id) {
   // Audit log guarda o real motivo (que pode ser 403 IDOR) pra análise posterior.
   return res.status(404).json({ erro: 'Recurso não encontrado' });
 }
-const { audit } = require('./audit');
+const { audit, sanitizarMetadata } = require('./audit');
+
+function mascararEmail(email) {
+  if (!email || typeof email !== 'string') return null;
+  const [local, dominio] = email.split('@');
+  if (!dominio) return '***';
+  return `${(local || '').slice(0, 2)}***@${dominio}`;
+}
 const { create2faCode, verify2faCode, resend2faCode } = require('./twoFactor');
 const { getBackupMetadata } = require('./backup');
 const socialAuth = require('./socialAuth');
@@ -114,6 +122,7 @@ function protegerUrlDocumento(row) {
   const { arquivo_public_id, ...safe } = row;
   return {
     ...safe,
+    // Nunca repassar arquivo_url legado/publico; somente URL autenticada derivada do public_id.
     arquivo_url: cloudinaryAuthenticatedUrl(arquivo_public_id, row.arquivo_nome, row.arquivo_tipo) || null
   };
 }
@@ -337,7 +346,8 @@ function authDebug(req, res, next) {
       return res.status(403).json({ erro: 'debug key inválida' });
     }
   }
-  next();
+  // A chave de debug é defesa adicional, não substitui autenticação.
+  return authAdminOnly(req, res, next);
 }
 
 // log toda requisição
@@ -388,8 +398,10 @@ app.get('/api/public/empresa/:slug', async (req, res) => {
     const { rows: c } = await pool.query(
       `SELECT COUNT(*)::int AS total
        FROM vagas
-       WHERE empresa_id = (SELECT id FROM empresas WHERE slug = $1 AND ativo = true)
-         AND status = 'publicada'`,
+       WHERE LOWER(TRIM(status)) = 'publicada'
+         AND (empresa_id = (SELECT id FROM empresas WHERE slug = $1 AND ativo = true)
+              OR (empresa_id IS NULL AND NULLIF(TRIM(empresa), '') IS NOT NULL
+                  AND LOWER(TRIM(empresa)) = LOWER(TRIM((SELECT nome FROM empresas WHERE slug = $1 AND ativo = true)))))`,
       [slug]
     );
     res.json({
@@ -439,8 +451,10 @@ app.get('/api/public/empresa/:slug/vagas', async (req, res) => {
          v.area, v.salario_min, v.salario_max, v.descricao,
          v.criada_em
        FROM vagas v
-       WHERE v.empresa_id = $1
-         AND v.status = 'publicada'
+       WHERE LOWER(TRIM(v.status)) = 'publicada'
+         AND (v.empresa_id = $1
+              OR (v.empresa_id IS NULL AND NULLIF(TRIM(v.empresa), '') IS NOT NULL
+                  AND LOWER(TRIM(v.empresa)) = LOWER(TRIM((SELECT nome FROM empresas WHERE id = $1)))))
        ORDER BY v.criada_em DESC, v.id DESC`,
       [empresa_id]
     );
@@ -480,7 +494,10 @@ app.get('/api/public/empresa/:slug/vagas/:id', async (req, res) => {
        WHERE e.slug = $1
          AND e.ativo = true
          AND v.id = $2
-         AND v.status = 'publicada'
+         AND LOWER(TRIM(v.status)) = 'publicada'
+         AND (v.empresa_id = e.id
+              OR (v.empresa_id IS NULL AND NULLIF(TRIM(v.empresa), '') IS NOT NULL
+                  AND LOWER(TRIM(v.empresa)) = LOWER(TRIM(e.nome))))
        LIMIT 1`,
       [slug, vagaId]
     );
@@ -568,7 +585,7 @@ app.post('/api/video/rooms/:roomId/token', async (req,res) => {
 });
 app.post('/api/video/rooms/:roomId/end', async (req,res) => {
   if (!videoRooms.gate(req,res)) return;
-  if (!['empresa','recrutador','admin'].includes(req.user.tipo)) return res.status(403).json({erro:'Apenas o recrutador pode encerrar a sala'});
+  if (!['empresa','recrutador'].includes(req.user.tipo)) return res.status(403).json({erro:'Apenas o recrutador da empresa pode encerrar a sala'});
   try { const r=await videoRooms.pool.query(`UPDATE video_rooms SET status='ended',ended_at=NOW() WHERE room_id=$1 AND status='active' AND (empresa_id=$2 OR $3='admin') RETURNING room_id`,[req.params.roomId,req.user.empresa_id||null,req.user.tipo]); if(!r.rowCount)return res.status(404).json({erro:'Recurso não encontrado'}); res.json({ok:true,ended:true}); }
   catch(e){ console.error('[VIDEO END]',e.message); res.status(503).json({erro:'Serviço de vídeo indisponível'}); }
 });
@@ -1705,7 +1722,7 @@ app.get('/api/candidato/entrevistas', authCandidato, async (req, res) => {
     const { rows } = await pool.query(`
       SELECT
         e.id, e.candidatura_id, e.etapa, e.data_hora, e.duracao_minutos,
-        e.local, e.link_reuniao, e.observacoes, e.status,
+        e.local, NULL AS link_reuniao, e.observacoes, e.status,
         vr.room_id AS video_room_id,
         v.titulo AS vaga_titulo, v.empresa AS vaga_empresa
       FROM entrevistas e
@@ -1860,7 +1877,7 @@ app.get('/api/vagas', async (req, res) => {
                 AND (e.id = v.empresa_id
                   OR (v.empresa_id IS NULL AND NULLIF(TRIM(v.empresa), '') IS NOT NULL
                       AND LOWER(TRIM(e.nome)) = LOWER(TRIM(v.empresa))))
-             WHERE v.status = 'publicada'`;
+             WHERE LOWER(TRIM(v.status)) = 'publicada'`;
   const params = [];
   if (cidade) { params.push(`%${cidade}%`); sql += ` AND v.cidade ILIKE $${params.length}`; }
   if (estado) { params.push(`%${estado}%`); sql += ` AND v.estado ILIKE $${params.length}`; }
@@ -1891,10 +1908,10 @@ app.get('/api/vagas/:id', async (req, res) => {
     const { rows } = await pool.query(
       `SELECT v.id, v.titulo, v.empresa, v.descricao, v.requisitos, v.beneficios, v.salario_min, v.salario_max,
               v.tipo_contrato, v.nivel, v.area, v.cidade, v.estado, v.etapas,
-              CASE WHEN v.status = 'publicada' THEN 'publicada' ELSE NULL END as status,
+              CASE WHEN LOWER(TRIM(v.status)) = 'publicada' THEN 'publicada' ELSE NULL END as status,
               ARRAY(SELECT tag FROM vaga_tags WHERE vaga_id = v.id ORDER BY criado_em) AS tags
        FROM vagas v
-       WHERE v.id = $1 AND v.status = 'publicada'
+       WHERE v.id = $1 AND LOWER(TRIM(v.status)) = 'publicada'
          AND EXISTS (
            SELECT 1 FROM empresas e
            WHERE e.ativo = true
@@ -2131,7 +2148,7 @@ app.get('/api/admin/vagas-fechadas-sem-contratacao', authAdmin, async (req, res)
 // DIAGNÓSTICO DE SCHEMA (Fase 1) — admin only
 // Confirma quais colunas da Fase 1 estão presentes + contagens de dados.
 // =========================================================================
-app.get('/api/admin/_diag-schema-fase1', authAdmin, async (req, res) => {
+app.get('/api/admin/_diag-schema-fase1', authAdminOnly, async (req, res) => {
   try {
     const cols = (tabela) => pool.query(
       `SELECT column_name FROM information_schema.columns
@@ -2264,7 +2281,7 @@ app.get('/api/admin/dashboard', authAdmin, async (req, res) => {
     const proximas = await pool.query(`
       SELECT
         e.id, e.candidatura_id, e.etapa, e.data_hora, e.duracao_minutos,
-        e.local, e.link_reuniao, e.observacoes, e.status,
+        e.local, NULL AS link_reuniao, e.observacoes, e.status,
         c.vaga_id, v.titulo as vaga_titulo, v.empresa,
         cd.id as candidato_id, cd.nome as candidato_nome, cd.foto_url, cd.email
       FROM entrevistas e
@@ -2585,7 +2602,7 @@ app.get('/api/admin/candidaturas-por-etapa', authAdmin, async (req, res) => {
   }
 });
 
-app.post('/api/admin/vagas', authAdmin, async (req, res) => {
+app.post('/api/admin/vagas', authAdminOnly, async (req, res) => {
   try {
     const v = req.body;
     if (!v.titulo) return res.status(400).json({ erro: 'Título é obrigatório' });
@@ -2613,7 +2630,7 @@ app.post('/api/admin/vagas', authAdmin, async (req, res) => {
 
 // P0 — inventário temporário somente leitura.
 // Restrito aos IDs levantados na investigação; não altera dados e não usa SELECT *.
-app.get('/api/admin/p0-inventory', authAdmin, async (req, res) => {
+app.get('/api/admin/p0-inventory', authAdminOnly, async (req, res) => {
   const p0Ids = [
     166, 167, 168, 174, 182, 183, 184, 185, 186, 189,
     197, 198, 199, 200, 201, 206, 214, 215, 216, 219, 220,
@@ -2789,7 +2806,7 @@ app.get('/api/admin/vagas', authAdmin, async (req, res) => {
   }
 });
 
-app.put('/api/admin/vagas/:id', authAdmin, async (req, res) => {
+app.put('/api/admin/vagas/:id', authAdminOnly, async (req, res) => {
   const v = req.body;
   // Monta query dinâmica para permitir atualizar etapas opcionalmente
   const updates = [];
@@ -2820,7 +2837,7 @@ app.put('/api/admin/vagas/:id', authAdmin, async (req, res) => {
   res.json({ ok: true, vaga: rows[0] });
 });
 
-app.delete('/api/admin/vagas/:id', authAdmin, async (req, res) => {
+app.delete('/api/admin/vagas/:id', authAdminOnly, async (req, res) => {
   try {
     await pool.query('DELETE FROM vagas WHERE id = $1', [req.params.id]);
     await audit(req, 'admin.vaga.deleted', { resource_type: 'vaga', resource_id: Number(req.params.id) });
@@ -2848,7 +2865,7 @@ app.get('/api/admin/vagas/:id', authAdmin, async (req, res) => {
   }
 });
 
-app.get('/api/admin/candidatos', authAdmin, async (req, res) => {
+app.get('/api/admin/candidatos', authAdminOnly, denyGlobalPrivateUntilSupport, async (req, res) => {
   try {
     const { area } = req.query;
     // Inclui info da última candidatura (status + id) + vaga + total de candidaturas
@@ -2884,7 +2901,7 @@ app.get('/api/admin/candidatos', authAdmin, async (req, res) => {
 });
 
 // Retorna os dados completos de um candidato (currículo) para o admin
-app.get('/api/admin/candidato/:id', authAdmin, async (req, res) => {
+app.get('/api/admin/candidato/:id', authAdminOnly, denyGlobalPrivateUntilSupport, async (req, res) => {
   try {
     const { rows } = await pool.query(
       `SELECT id, nome, email, cpf, celular, data_nascimento, sexo,
@@ -2901,7 +2918,7 @@ app.get('/api/admin/candidato/:id', authAdmin, async (req, res) => {
   }
 });
 
-app.get('/api/admin/candidaturas', authAdmin, async (req, res) => {
+app.get('/api/admin/candidaturas', authAdminOnly, denyGlobalPrivateUntilSupport, async (req, res) => {
   try {
     // Filtro opcional por etapa (?etapa=3,4 ou ?etapa=3)
     const { etapa } = req.query;
@@ -2953,7 +2970,7 @@ app.get('/api/admin/vagas-com-candidaturas', authAdmin, async (req, res) => {
 });
 
 // Candidatos de uma vaga específica
-app.get('/api/admin/vagas/:id/candidaturas', authAdmin, async (req, res) => {
+app.get('/api/admin/vagas/:id/candidaturas', authAdminOnly, denyGlobalPrivateUntilSupport, async (req, res) => {
   try {
     const vagaId = req.params.id;
     const { rows: vagaRows } = await pool.query(
@@ -2979,7 +2996,7 @@ app.get('/api/admin/vagas/:id/candidaturas', authAdmin, async (req, res) => {
   }
 });
 
-app.get('/api/admin/candidatura/:id', authAdmin, async (req, res) => {
+app.get('/api/admin/candidatura/:id', authAdminOnly, denyGlobalPrivateUntilSupport, async (req, res) => {
   try {
     const { rows: cand } = await pool.query(`
       SELECT c.*, v.titulo, v.empresa, v.etapas, v.cidade as v_cidade, v.estado as v_estado, v.descricao, v.requisitos,
@@ -3163,6 +3180,10 @@ app.post('/api/candidatura/:id/documentos', authCandidato, async (req, res) => {
       console.error('Falha ao notificar admin sobre documentos:', e.message);
     }
 
+    await audit(req, 'candidato.documentos.submitted', {
+      resource_type: 'candidatura', resource_id: candidaturaId,
+      metadata: { quantidade: salvos, tipos: tipos.slice(0, 20) }
+    });
     res.json({ ok: true, salvos });
   } catch (e) {
     console.error('[DOCS] erro ao enviar:', e);
@@ -3222,7 +3243,8 @@ app.get('/api/candidatura/:id/documentos/:docId/arquivo', authCandidato, async (
     `, [documentoId, candidaturaId, req.user.email || '']);
     if (!rows.length) return res.status(404).json({ erro: 'Arquivo não encontrado' });
     const row = rows[0];
-    const sourceUrl = cloudinaryAuthenticatedUrl(row.arquivo_public_id, row.arquivo_nome, row.arquivo_tipo) || row.arquivo_url;
+    const sourceUrl = cloudinaryAuthenticatedUrl(row.arquivo_public_id, row.arquivo_nome, row.arquivo_tipo);
+    if (!sourceUrl) return res.status(404).json({ erro: 'Arquivo não encontrado' });
     let remote;
     try { remote = new URL(sourceUrl); } catch (_) { return res.status(404).json({ erro: 'Arquivo não encontrado' }); }
     if (!['http:', 'https:'].includes(remote.protocol)) return res.status(404).json({ erro: 'Arquivo não encontrado' });
@@ -3246,7 +3268,7 @@ app.get('/api/candidatura/:id/documentos/:docId/arquivo', authCandidato, async (
 // POST /api/admin/candidato/:id/deletar { confirm: 'SIM_DELETAR' }
 // Apaga o candidato, suas candidaturas, documentos e mensagens de chat (cascade manual).
 // Operação IRREVERSÍVEL — exige confirmação textual.
-app.post('/api/admin/candidato/:id/deletar', authAdmin, async (req, res) => {
+app.post('/api/admin/candidato/:id/deletar', authAdminOnly, denyGlobalPrivateUntilSupport, async (req, res) => {
   try {
     const candId = Number(req.params.id);
     if (!candId) return res.status(400).json({ erro: 'id inválido' });
@@ -3297,7 +3319,7 @@ app.post('/api/admin/candidato/:id/deletar', authAdmin, async (req, res) => {
 });
 
 // Admin lista documentos de uma candidatura
-app.get('/api/admin/candidatura/:id/documentos', authAdmin, async (req, res) => {
+app.get('/api/admin/candidatura/:id/documentos', authAdminOnly, denyGlobalPrivateUntilSupport, async (req, res) => {
   try {
     const candidaturaId = Number(req.params.id);
     const { rows } = await pool.query(
@@ -3313,7 +3335,7 @@ app.get('/api/admin/candidatura/:id/documentos', authAdmin, async (req, res) => 
 });
 
 // Admin aprova ou reprova um documento (com justificativa)
-app.post('/api/admin/documento/:id/revisar', authAdmin, async (req, res) => {
+app.post('/api/admin/documento/:id/revisar', authAdminOnly, denyGlobalPrivateUntilSupport, async (req, res) => {
   try {
     const docId = Number(req.params.id);
     // Aceita tanto {status: 'aprovado'|'reprovado'|'retornado'|'pendente'}
@@ -3353,6 +3375,10 @@ app.post('/api/admin/documento/:id/revisar', authAdmin, async (req, res) => {
       `UPDATE documentos_candidatura SET status = $1, justificativa_admin = $2, revisado_em = NOW() WHERE id = $3`,
       [status, justificativa || null, docId]
     );
+    await audit(req, 'admin.documento.reviewed', {
+      resource_type: 'documento', resource_id: docId,
+      metadata: { status, candidatura_id: docInfo.candidatura_id, tipo: docInfo.tipo }
+    });
 
     // Se for "retornado", adiciona uma mensagem na timeline da candidatura (aparece pro candidato no painel)
     if (status === 'retornado' && justificativa) {
@@ -3437,7 +3463,7 @@ app.post('/api/admin/documento/:id/revisar', authAdmin, async (req, res) => {
 });
 
 // Admin: APROVAR TODOS os documentos pendentes de uma candidatura e AVANÇAR etapa de uma vez
-app.post('/api/admin/candidatura/:id/aprovar-documentos', authAdmin, async (req, res) => {
+app.post('/api/admin/candidatura/:id/aprovar-documentos', authAdminOnly, denyGlobalPrivateUntilSupport, async (req, res) => {
   try {
     const candId = Number(req.params.id);
     // 1) Buscar candidatura + vaga + candidato
@@ -3553,7 +3579,7 @@ app.post('/api/admin/candidatura/:id/aprovar-documentos', authAdmin, async (req,
 });
 
 // Admin: salva APENAS um comentário interno da etapa (sem mexer em status/etapa/historico)
-app.post('/api/admin/candidatura/:id/comentario', authAdmin, async (req, res) => {
+app.post('/api/admin/candidatura/:id/comentario', authAdminOnly, denyGlobalPrivateUntilSupport, async (req, res) => {
   const { etapa, comentario } = req.body;
   if (etapa == null || !comentario || !String(comentario).trim()) {
     return res.status(400).json({ erro: 'etapa e comentario são obrigatórios' });
@@ -3574,7 +3600,7 @@ app.post('/api/admin/candidatura/:id/comentario', authAdmin, async (req, res) =>
 
 // ==== ENTREVISTAS (jul/2026) ====
 // Agendar entrevista para uma candidatura (etapa 3=RH ou 4=Gestor)
-app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
+app.post('/api/admin/entrevista', authAdminOnly, denyGlobalPrivateUntilSupport, async (req, res) => {
   try {
     const { candidatura_id, etapa, data_hora, duracao_minutos, local, link_reuniao, observacoes } = req.body;
     if (!candidatura_id || !etapa || !data_hora) {
@@ -3617,27 +3643,30 @@ app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
 
     // Online interviews require an authenticated VagasIO room. Historical Meet columns remain compatibility-only.
     const isOnline = !local || /online/i.test(local);
+    if (isOnline && req.user?.tipo === 'admin') {
+      return res.status(403).json({ erro: 'Administrador Global não participa de videochamadas privadas sem Modo de Suporte' });
+    }
     let linkGerado = null;
     let googleEventId = null;
     let meetHtmlLink = null;
     let video = null;
     let entrevista;
     if (isOnline) {
+      const previousUserForVideo = req.user;
       try {
         const r = await pool.query(`INSERT INTO entrevistas (candidatura_id, etapa, data_hora, duracao_minutos, local, link_reuniao, google_event_id, observacoes, criado_por)
           VALUES ($1,$2,$3,$4,'Videochamada VagasIO',NULL,NULL,$5,$6)
           RETURNING id,candidatura_id,etapa,data_hora,duracao_minutos,local,link_reuniao,google_event_id,observacoes,status,criado_em,criado_por`,
-          [candidatura_id, etapa, dataHoraFinal, duracao_minutos || 60, observacoes || null, req.admin?.id || null]);
+          [candidatura_id, etapa, dataHoraFinal, duracao_minutos || 60, observacoes || null, req.user?.id || null]);
         entrevista = r.rows[0];
-        const previousUser = req.user;
-        req.user = { id: req.admin?.id, tipo: 'admin' };
+        req.user = { ...previousUserForVideo, id: previousUserForVideo?.id, tipo: 'admin' };
         const room = await videoRooms.getOrCreate(req, entrevista.id);
-        req.user = previousUser;
+        req.user = previousUserForVideo;
         if (!room) throw new Error('Sala VagasIO não autorizada');
         video = { provider:'vagasio', room_id:room.room_id, roomId:room.room_id };
         console.log(`[VAGASIO VIDEO] Sala criada: ${room.room_id}`);
       } catch (videoErr) {
-        req.user = undefined;
+        req.user = previousUserForVideo;
         if (videoErr?.entrevistaId || true) { try { await pool.query('DELETE FROM entrevistas WHERE candidatura_id=$1 AND data_hora=$2', [candidatura_id, dataHoraFinal]); } catch (_) {} }
         console.error('[VAGASIO VIDEO ERRO] entrevista não agendada:', videoErr.message);
         return res.status(503).json({ erro:'Videochamada VagasIO indisponível. Tente novamente.', codigo:'VAGASIO_ROOM_UNAVAILABLE' });
@@ -3649,7 +3678,7 @@ app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
       const r = await pool.query(`INSERT INTO entrevistas (candidatura_id, etapa, data_hora, duracao_minutos, local, link_reuniao, google_event_id, observacoes, criado_por)
         VALUES ($1,$2,$3,$4,$5,NULL,NULL,$6,$7)
         RETURNING id,candidatura_id,etapa,data_hora,duracao_minutos,local,link_reuniao,google_event_id,observacoes,status,criado_em,criado_por`,
-        [candidatura_id, etapa, dataHoraFinal, duracao_minutos || 60, local || null, observacoes || null, req.admin?.id || null]);
+        [candidatura_id, etapa, dataHoraFinal, duracao_minutos || 60, local || null, observacoes || null, req.user?.id || null]);
       entrevista = r.rows[0];
     }
     // Adiciona no histórico da candidatura
@@ -3666,7 +3695,7 @@ app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
       em: new Date().toISOString(),
       tipo: 'entrevista',
       data_hora: dataHoraFinal,
-      por: req.admin?.nome || 'Recrutador',
+      por: req.user?.nome || 'Administrador Global',
       formato: isOnline ? 'online' : 'presencial',
       detalhes: `Data: ${dataFormatada}${linkGerado ? ` • Meet: ${linkGerado}` : ''}${local && !isOnline ? ` • ${local}` : ''}`
     }]), candidatura_id]);
@@ -3700,7 +3729,7 @@ app.post('/api/admin/entrevista', authAdmin, async (req, res) => {
 });
 
 // Cancela uma entrevista (libera novo agendamento) - chamada pelo botão "❌ Falhou" na agenda
-app.post('/api/admin/entrevista/:id/cancelar', authAdmin, async (req, res) => {
+app.post('/api/admin/entrevista/:id/cancelar', authAdminOnly, denyGlobalPrivateUntilSupport, async (req, res) => {
   try {
     const id = parseInt(req.params.id);
     const { motivo } = req.body || {};
@@ -3727,7 +3756,7 @@ app.post('/api/admin/entrevista/:id/cancelar', authAdmin, async (req, res) => {
       etapa: entrevista.etapa,
       em: new Date().toISOString(),
       tipo: 'entrevista_cancelada',
-      por: req.admin?.nome || 'Recrutador',
+      por: req.user?.nome || 'Administrador Global',
       detalhes: motivo ? `Motivo: ${motivo}` : 'Candidato/recrutador não compareceu.'
     }]), entrevista.candidatura_id]);
 
@@ -3759,7 +3788,7 @@ app.post('/api/admin/entrevista/:id/cancelar', authAdmin, async (req, res) => {
 // (NÃO expor como endpoint público). Ver RULES.md.
 
 // Listar TODAS as entrevistas (pra página Agenda)
-app.get('/api/admin/entrevistas', authAdmin, async (req, res) => {
+app.get('/api/admin/entrevistas', authAdminOnly, denyGlobalPrivateUntilSupport, async (req, res) => {
   try {
     const { periodo } = req.query; // 'hoje' | 'proximas' | 'passadas' | 'todas'
     let where = '';
@@ -3773,7 +3802,7 @@ app.get('/api/admin/entrevistas', authAdmin, async (req, res) => {
     }
     const r = await pool.query(`
       SELECT e.id, e.candidatura_id, e.etapa, e.data_hora, e.duracao_minutos, e.local,
-             e.link_reuniao, e.observacoes, e.status, e.criado_em,
+             NULL AS link_reuniao, e.observacoes, e.status, e.criado_em,
              v.titulo as vaga_titulo, v.id as vaga_id,
              c.nome as candidato_nome, c.email as candidato_email, c.celular as candidato_telefone
       FROM entrevistas e
@@ -3791,7 +3820,7 @@ app.get('/api/admin/entrevistas', authAdmin, async (req, res) => {
 });
 
 // Atualizar status da entrevista (cancelar, realizar, no-show)
-app.put('/api/admin/entrevista/:id', authAdmin, async (req, res) => {
+app.put('/api/admin/entrevista/:id', authAdminOnly, denyGlobalPrivateUntilSupport, async (req, res) => {
   try {
     const { status, data_hora, link_reuniao, observacoes, duracao_minutos, local } = req.body;
     const updates = [];
@@ -3816,7 +3845,7 @@ app.put('/api/admin/entrevista/:id', authAdmin, async (req, res) => {
   }
 });
 
-app.post('/api/admin/candidatura/:id/status', authAdmin, async (req, res) => {
+app.post('/api/admin/candidatura/:id/status', authAdminOnly, denyGlobalPrivateUntilSupport, async (req, res) => {
   let { status, etapa, mensagem, acao, comentario } = req.body;
   // Sanitiza textos de admin (defesa em profundidade)
   if (typeof mensagem === 'string') mensagem = sanitizeText(mensagem);
@@ -3918,7 +3947,7 @@ app.post('/api/admin/candidatura/:id/status', authAdmin, async (req, res) => {
     novoStatus = 'em_analise';
   }
 
-  historico.push({ etapa: novaEtapa, status: novoStatus, mensagem, acao, data: new Date().toISOString(), por: req.user.nome });
+  historico.push({ etapa: novaEtapa, status: novoStatus, mensagem, acao, data: new Date().toISOString(), por: req.user.nome || req.user.email || 'Administrador Global' });
 
   // Se o admin mandou um comentário, salva no índice da etapa ATUAL (a que ele tava atuando)
   // Quando avançar, vai pra próxima etapa e a próxima observação será salva lá.
@@ -4049,7 +4078,7 @@ app.post('/api/admin/candidatura/:id/status', authAdmin, async (req, res) => {
 // Empresa NUNCA acessa chat de candidato.
 
 // Lista mensagens de uma candidatura (candidato ou admin autenticado)
-app.get('/api/chat/:candidatura_id/mensagens', authCandidatoOrAdminStrict, async (req, res) => {
+app.get('/api/chat/:candidatura_id/mensagens', authCandidato, async (req, res) => {
   try {
     const cid = parseInt(req.params.candidatura_id);
     const { rows: cand } = await pool.query(`
@@ -4096,7 +4125,7 @@ app.get('/api/chat/:candidatura_id/mensagens', authCandidatoOrAdminStrict, async
 });
 
 // Envia mensagem (candidato ou admin)
-app.post('/api/chat/:candidatura_id/mensagens', authCandidatoOrAdminStrict, async (req, res) => {
+app.post('/api/chat/:candidatura_id/mensagens', authCandidato, async (req, res) => {
   try {
     const cid = parseInt(req.params.candidatura_id);
     // Bloqueia envio se a candidatura já foi encerrada OU se ainda tá na etapa 1 (inscrição)
@@ -4189,7 +4218,7 @@ app.post('/api/chat/:candidatura_id/mensagens', authCandidatoOrAdminStrict, asyn
 
 // Upload de arquivo pra chat (POST /api/chat/:cid/upload)
 // Body JSON: { texto?: string, arquivo: { nome, mime, base64 } }
-app.post('/api/chat/:candidatura_id/upload', authCandidatoOrAdminStrict, rateLimitByIp('upload'), async (req, res) => {
+app.post('/api/chat/:candidatura_id/upload', authCandidato, rateLimitByIp('upload'), async (req, res) => {
   try {
     const cid = parseInt(req.params.candidatura_id);
     const { texto, arquivo } = req.body;
@@ -4256,7 +4285,7 @@ app.post('/api/chat/:candidatura_id/upload', authCandidatoOrAdminStrict, rateLim
 });
 
 // Download de arquivo do chat
-app.get('/api/chat/arquivo/:id', authCandidatoOrAdminStrict, rateLimitByIp('chat-download'), async (req, res) => {
+app.get('/api/chat/arquivo/:id', authCandidato, rateLimitByIp('chat-download'), async (req, res) => {
   // FIX Etapa 2 (2026-07-27): whitelist + verificação de tamanho ANTES de carregar base64.
   // Atacante podia tentar baixar arquivo de outro candidato via ID guessing.
   try {
@@ -4306,7 +4335,7 @@ app.get('/api/chat/arquivo/:id', authCandidatoOrAdminStrict, rateLimitByIp('chat
 });
 
 // Lista arquivos de uma mensagem
-app.get('/api/chat/mensagem/:id/arquivos', authCandidatoOrAdminStrict, async (req, res) => {
+app.get('/api/chat/mensagem/:id/arquivos', authCandidato, async (req, res) => {
   try {
     const id = parseInt(req.params.id);
     const { rows } = await pool.query(
@@ -4322,7 +4351,7 @@ app.get('/api/chat/mensagem/:id/arquivos', authCandidatoOrAdminStrict, async (re
 // Lista TODAS as conversas (admin) agrupadas por candidatura
 // Regra (22/07/2026): chat só aparece se candidato passou da INSCRIÇÃO (etapa_atual >= 2)
 // e se a vaga não foi fechada/encerrada
-app.get('/api/admin/conversas', authAdmin, async (req, res) => {
+app.get('/api/admin/conversas', authAdminOnly, denyGlobalPrivateUntilSupport, async (req, res) => {
   try {
     // Filtro opcional: ?candidatura_id=X → só 1 conversa
     // Sem filtro: lista conversas ATIVAS (candidatura não encerrada E etapa >= 2 E vaga ativa)
@@ -4372,7 +4401,7 @@ function indicesFluxoProposta(etapas) {
 
 // ===== Admin: enviar proposta ao candidato =====
 // Recebe texto da proposta + opcional PDF (data URL base64) ou já com URL pública
-app.post('/api/admin/candidatura/:id/enviar-proposta', authAdmin, async (req, res) => {
+app.post('/api/admin/candidatura/:id/enviar-proposta', authAdminOnly, denyGlobalPrivateUntilSupport, async (req, res) => {
   const { texto, pdf_url, pdf_nome } = req.body;
   if (!texto && !pdf_url) return res.status(400).json({ erro: 'Envie um texto ou um PDF da proposta' });
   if (pdf_url && !String(pdf_url).startsWith('data:application/pdf')) {
@@ -4423,7 +4452,7 @@ app.post('/api/admin/candidatura/:id/enviar-proposta', authAdmin, async (req, re
     acao: 'enviar_proposta',
     mensagem: 'Proposta enviada ao candidato',
     data: new Date().toISOString(),
-    por: req.user.nome
+    por: req.user.nome || req.user.email || 'Administrador Global'
   });
 
   await pool.query(
@@ -4464,7 +4493,7 @@ app.post('/api/admin/candidatura/:id/enviar-proposta', authAdmin, async (req, re
 });
 
 // ===== Admin: visualizar proposta enviada (pra imprimir/baixar de novo) =====
-app.get('/api/admin/candidatura/:id/proposta', authAdmin, async (req, res) => {
+app.get('/api/admin/candidatura/:id/proposta', authAdminOnly, denyGlobalPrivateUntilSupport, async (req, res) => {
   const { rows } = await pool.query(
     'SELECT proposta_texto, proposta_pdf_url, proposta_pdf_public_id, proposta_enviada_em, proposta_aceita_em, proposta_recusada_em, proposta_motivo_recusa FROM candidaturas WHERE id = $1',
     [req.params.id]
@@ -4507,15 +4536,16 @@ app.post('/api/candidato/aceitar-proposta/:candidaturaId', authCandidato, async 
     por: cand.cand_email
   });
 
-  await pool.query(
+  const atualizacaoAceite = await pool.query(
     `UPDATE candidaturas
      SET proposta_aceita_em = NOW(),
          etapa_atual = $2,
          status = 'em_andamento',
          historico = $1
-     WHERE id = $3`,
+     WHERE id = $3 AND proposta_aceita_em IS NULL AND proposta_recusada_em IS NULL`,
     [JSON.stringify(historico), idxProposta.coleta, req.params.candidaturaId]
   );
+  if (!atualizacaoAceite.rowCount) return res.status(409).json({ erro: 'A proposta já foi respondida ou a candidatura foi alterada.' });
 
   // FASE 7 — notificação no feed global
   inserirNotificacao(pool, 'empresa', cand.empresa_id, 'proposta_aceita',
@@ -4564,7 +4594,8 @@ app.post('/api/candidato/aceitar-proposta/:candidaturaId', authCandidato, async 
 // Candidato desiste da vaga a qualquer momento
 app.post('/api/candidatura/:id/desistir', authCandidato, async (req, res) => {
   await audit(req, 'candidatura.desistir', { resource_type: 'candidatura', resource_id: req.params.id });
-  const { motivo } = req.body;
+  let { motivo } = req.body || {};
+  if (typeof motivo === 'string') motivo = sanitizeText(motivo).slice(0, 1000);
   const { rows: c } = await pool.query(`
     SELECT c.*, v.titulo, cd.email as cand_email, cd.nome_completo as cand_nome
     FROM candidaturas c
@@ -4609,7 +4640,8 @@ app.post('/api/candidatura/:id/desistir', authCandidato, async (req, res) => {
 
 app.post('/api/candidato/recusar-proposta/:candidaturaId', authCandidato, async (req, res) => {
   await audit(req, 'candidatura.proposta.recusar', { resource_type: 'candidatura', resource_id: req.params.candidaturaId });
-  const { motivo } = req.body;
+  let { motivo } = req.body || {};
+  if (typeof motivo === 'string') motivo = sanitizeText(motivo).slice(0, 1000);
   const { rows: c } = await pool.query(`
     SELECT c.*, v.titulo, v.etapas, cd.email as cand_email
     FROM candidaturas c
@@ -4635,15 +4667,16 @@ app.post('/api/candidato/recusar-proposta/:candidaturaId', authCandidato, async 
     por: cand.cand_email
   });
 
-  await pool.query(
+  const atualizacaoRecusa = await pool.query(
     `UPDATE candidaturas
      SET proposta_recusada_em = NOW(),
          proposta_motivo_recusa = $1,
          status = 'rejeitado',
          historico = $2
-     WHERE id = $3`,
+     WHERE id = $3 AND proposta_aceita_em IS NULL AND proposta_recusada_em IS NULL`,
     [motivo || null, JSON.stringify(historico), req.params.candidaturaId]
   );
+  if (!atualizacaoRecusa.rowCount) return res.status(409).json({ erro: 'A proposta já foi respondida ou a candidatura foi alterada.' });
 
   // FASE 7 — notificação no feed global
   inserirNotificacao(pool, 'empresa', cand.empresa_id, 'proposta_recusada',
@@ -4716,7 +4749,7 @@ app.get('/api/candidato/candidatura/:id/proposta', authCandidato, async (req, re
   });
 });
 
-app.post('/api/admin/recrutadores', authAdmin, async (req, res) => {
+app.post('/api/admin/recrutadores', authAdminOnly, async (req, res) => {
   const { nome, email, senha } = req.body;
   if (!nome || !email || !senha) return res.status(400).json({ erro: 'Nome, e-mail e senha obrigatórios' });
   const hash = await bcrypt.hash(senha, 10);
@@ -5360,8 +5393,8 @@ app.post('/api/auth/trocar-senha-empresa', requireEmpresaViewer, async (req, res
 // ========== EMPRESA CRIAR VAGA (Etapa 3 — SaaS B2B) ==========
 // 2026-07-27: Empresas agora podem criar suas próprias vagas.
 // Fluxo: cria a vaga + vincula automaticamente no empresa_vaga_acesso.
-// A vaga começa com status='rascunho' e a empresa precisa publicar depois
-// (futuro: publicar imediato pra planos pagos; moderação pra free beta).
+// A vaga começa em rascunho por padrão; o status enviado pela empresa é
+// validado e respeitado para que a UI possa publicar imediatamente quando escolhido.
 app.post('/api/empresa/vagas', requireRecrutadorOuAdmin, async (req, res) => {
   try {
     const v = req.body || {};
@@ -5383,7 +5416,13 @@ app.post('/api/empresa/vagas', requireRecrutadorOuAdmin, async (req, res) => {
           { nome: 'Contratação' }
         ];
 
-    // INSERT vaga (empresa = nome da empresa do usuário logado; empresa_id vem do JWT)
+    // INSERT vaga (empresa = nome da empresa do usuário logado; empresa_id vem do JWT).
+    // O formulário da empresa envia o status escolhido; antes, este valor era
+    // ignorado e toda criação virava rascunho, embora a UI exibisse Publicada.
+    // Mantém rascunho como padrão e aceita apenas estados de vaga válidos.
+    const statusInicial = ['publicada', 'pausada', 'rascunho', 'encerrada'].includes(String(v.status || '').trim().toLowerCase())
+      ? String(v.status).trim().toLowerCase()
+      : 'rascunho';
     const { rows: vagaRows } = await pool.query(
       `INSERT INTO vagas (
         titulo, empresa, empresa_id, cidade, estado, tipo_contrato, nivel, area,
@@ -5408,7 +5447,7 @@ app.post('/api/empresa/vagas', requireRecrutadorOuAdmin, async (req, res) => {
         v.requisitos || null,
         v.beneficios || null,
         JSON.stringify(etapas),
-        'rascunho',           // empresa cria em rascunho; admin pode aprovar depois
+        statusInicial,        // padrão rascunho; respeita o status escolhido pela empresa
         null                  // criada_por FK → admins(id). NULL pq é empresa (não admin).
       ]
     );
@@ -5510,6 +5549,14 @@ app.put('/api/empresa/vagas/:id', requireRecrutadorOuAdmin, async (req, res) => 
     if (v.requisitos !== undefined) push('requisitos', v.requisitos);
     if (v.beneficios !== undefined) push('beneficios', v.beneficios);
     if (v.etapas !== undefined && Array.isArray(v.etapas)) push('etapas', JSON.stringify(v.etapas));
+    // O formulário da empresa envia status ao salvar; aceitar somente os estados
+    // permitidos e somente para a vaga própria já verificada acima.
+    if (v.status !== undefined) {
+      if (!['publicada', 'pausada', 'rascunho', 'encerrada'].includes(v.status)) {
+        return res.status(400).json({ erro: 'Status inválido. Use: publicada, pausada, rascunho ou encerrada' });
+      }
+      push('status', v.status);
+    }
     if (updates.length === 0) return res.status(400).json({ erro: 'Nenhum campo para atualizar' });
     values.push(id);
     const { rows } = await pool.query(
@@ -5581,6 +5628,15 @@ function empresaVagaFilialScopeByVaga(req, alias = 'v') {
     ? `EXISTS (SELECT 1 FROM empresa_usuario_vagas euv_scope WHERE euv_scope.empresa_id = ${alias}.empresa_id AND euv_scope.usuario_id = ${uid} AND euv_scope.vaga_id = ${alias}.id)`
     : 'FALSE';
 }
+
+registrarRotasTriagem({
+  app,
+  pool,
+  requireEmpresaViewer,
+  requireRecrutadorOuAdmin,
+  empresaVagaFilialScope,
+  audit
+});
 
 // Dashboard da empresa
 app.get('/api/empresa/dashboard', requireEmpresaViewer, async (req, res) => {
@@ -5718,6 +5774,7 @@ app.get('/api/empresa/dashboard', requireEmpresaViewer, async (req, res) => {
         cd.nome as candidato_nome, cd.email as candidato_email,
         v.titulo as vaga_titulo
       FROM entrevistas e
+      LEFT JOIN video_rooms vr ON vr.entrevista_id = e.id AND vr.status = 'active'
       JOIN candidaturas c ON c.id = e.candidatura_id
       JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.revogado_em IS NULL
       JOIN candidatos cd ON cd.id = c.candidato_id
@@ -6020,11 +6077,14 @@ app.get('/api/empresa/agenda', requireEmpresaViewer, async (req, res) => {
       whereExtra = `AND e.status = 'cancelada'`;
     }
     const { rows } = await pool.query(`
-      SELECT e.id, e.etapa, e.data_hora, e.duracao_minutos, e.local, e.link_reuniao, e.observacoes, e.status,
+      SELECT e.id, e.etapa, e.data_hora, e.duracao_minutos, e.local, NULL AS link_reuniao, e.observacoes, e.status,
         c.id as candidatura_id, c.etapa_atual, c.status as cand_status,
+        vr.room_id AS video_room_id,
+        CASE WHEN vr.room_id IS NOT NULL THEN 'vagasio' ELSE NULL END AS video_provider,
         cd.id as candidato_id, cd.nome as candidato_nome, cd.email as candidato_email, cd.foto_url,
         v.id as vaga_id, v.titulo as vaga_titulo, v.empresa as vaga_empresa, v.etapas as vaga_etapas
       FROM entrevistas e
+      LEFT JOIN video_rooms vr ON vr.entrevista_id = e.id AND vr.status = 'active'
       JOIN candidaturas c ON c.id = e.candidatura_id
       JOIN empresa_vaga_acesso eva ON eva.vaga_id = c.vaga_id AND eva.revogado_em IS NULL AND eva.empresa_id = $1
       JOIN candidatos cd ON cd.id = c.candidato_id
@@ -6134,7 +6194,7 @@ app.get('/api/empresa/candidatura/:id', requireEmpresaViewer, async (req, res) =
     // atual, preservando a compatibilidade da análise de candidatura.
     const { rows: entrevistas } = await pool.query(
       `SELECT e.id, e.candidatura_id, e.etapa, e.data_hora, e.duracao_minutos, e.local,
-              e.link_reuniao, e.observacoes, e.status, e.criado_em,
+              NULL AS link_reuniao, e.observacoes, e.status, e.criado_em,
               vr.room_id AS video_room_id,
               CASE WHEN vr.room_id IS NOT NULL THEN 'vagasio' ELSE NULL END AS video_provider
        FROM entrevistas e
@@ -6156,7 +6216,7 @@ app.get('/api/empresa/candidatura/:id', requireEmpresaViewer, async (req, res) =
 });
 
 // Empresa visualiza documentos de uma candidatura das suas vagas (READ-ONLY)
-app.get('/api/empresa/candidatura/:id/documentos', requireEmpresaViewer, async (req, res) => {
+app.get('/api/empresa/candidatura/:id/documentos', requireRecrutadorOuAdmin, async (req, res) => {
   const { empresa_id } = req.user;
   const candidaturaId = Number(req.params.id);
   if (!Number.isInteger(candidaturaId) || candidaturaId <= 0) {
@@ -6190,7 +6250,7 @@ app.get('/api/empresa/candidatura/:id/documentos', requireEmpresaViewer, async (
 
 // Download autenticado do arquivo de documento para montagem de PDF no navegador.
 // O proxy evita bloqueios CORS do storage e mantém a autorização por empresa.
-app.get('/api/empresa/candidatura/:id/documentos/:docId/arquivo', requireEmpresaViewer, async (req, res) => {
+app.get('/api/empresa/candidatura/:id/documentos/:docId/arquivo', requireRecrutadorOuAdmin, async (req, res) => {
   const candidaturaId = Number(req.params.id);
   const documentoId = Number(req.params.docId);
   const empresaId = req.user.empresa_id;
@@ -6208,8 +6268,8 @@ app.get('/api/empresa/candidatura/:id/documentos/:docId/arquivo', requireEmpresa
       WHERE d.id = $1 AND d.candidatura_id = $2
       LIMIT 1
     `, [documentoId, candidaturaId, empresaId]);
-    if (!rows.length || !rows[0].arquivo_url) return res.status(404).json({ erro: 'Arquivo não encontrado' });
-    const sourceUrl = cloudinaryAuthenticatedUrl(rows[0].arquivo_public_id, rows[0].arquivo_nome, rows[0].arquivo_tipo) || rows[0].arquivo_url;
+    if (!rows.length || !rows[0].arquivo_public_id) return res.status(404).json({ erro: 'Arquivo não encontrado' });
+    const sourceUrl = cloudinaryAuthenticatedUrl(rows[0].arquivo_public_id, rows[0].arquivo_nome, rows[0].arquivo_tipo);
     let remote;
     try { remote = new URL(sourceUrl); } catch (_) { return res.status(400).json({ erro: 'URL de arquivo inválida' }); }
     if (!['http:', 'https:'].includes(remote.protocol)) return res.status(400).json({ erro: 'Origem de arquivo inválida' });
@@ -6863,7 +6923,7 @@ app.get('/api/candidato/dashboard/kpis', authCandidato, async (req, res) => {
 });
 
 // ============= CHAT RH <-> EMPRESA (visão do Admin) =============
-app.get('/api/admin/candidatura/:id/chat-empresa', authAdmin, async (req, res) => {
+app.get('/api/admin/candidatura/:id/chat-empresa', authAdminOnly, denyGlobalPrivateUntilSupport, async (req, res) => {
   const { id } = req.params;
   try {
     const { rows } = await pool.query(`
@@ -6884,7 +6944,7 @@ app.get('/api/admin/candidatura/:id/chat-empresa', authAdmin, async (req, res) =
   }
 });
 
-app.post('/api/admin/candidatura/:id/chat-empresa', authAdmin, async (req, res) => {
+app.post('/api/admin/candidatura/:id/chat-empresa', authAdminOnly, denyGlobalPrivateUntilSupport, async (req, res) => {
   const { id } = req.params;
   let { mensagem } = req.body;
   const { id: admin_id, nome: admin_nome } = req.user;
@@ -6905,7 +6965,7 @@ app.post('/api/admin/candidatura/:id/chat-empresa', authAdmin, async (req, res) 
 
 // ============= LISTA DE CONVERSAS CHAT EMPRESA (para bolinha flutuante) =============
 // Lista TODAS as candidaturas com mensagens trocadas com empresas (para o admin)
-app.get('/api/admin/chat-empresa-lista', authAdmin, async (req, res) => {
+app.get('/api/admin/chat-empresa-lista', authAdminOnly, denyGlobalPrivateUntilSupport, async (req, res) => {
   try {
     const { rows } = await pool.query(`
       SELECT
@@ -6988,7 +7048,7 @@ process.on('unhandledRejection', (e) => {
 
   // ========== SEED DEMO: Importa 6 vagas de exemplo (apenas admin) ==========
   // Idempotente: se a vaga já existe (mesmo título+empresa), não duplica.
-  app.post('/api/admin/seed-vagas-demo', authAdmin, async (req, res) => {
+  app.post('/api/admin/seed-vagas-demo', authAdminOnly, async (req, res) => {
     try {
       const vagasDemo = [
         {
@@ -7086,7 +7146,7 @@ process.on('unhandledRejection', (e) => {
   });
 
   // ============= AUDIT LOGS (admin) =============
-  app.get('/api/admin/audit-logs', authAdmin, async (req, res) => {
+  app.get('/api/admin/audit-logs', authAdminOnly, async (req, res) => {
     try {
       const { user_id, action, resource_id, limit, offset, since } = req.query;
       const queryLimit = Math.min(500, Math.max(1, parseInt(limit, 10) || 100));
@@ -7102,11 +7162,15 @@ process.on('unhandledRejection', (e) => {
       const count = await pool.query(`SELECT COUNT(*) FROM audit_logs ${whereClause}`, values);
       const { rows } = await pool.query(
         `SELECT id, user_id, user_type, user_email, action, resource_type,
-                resource_id, ip, user_agent, result, metadata, created_at
+                resource_id, result, metadata, created_at
          FROM audit_logs ${whereClause} ORDER BY created_at DESC LIMIT $${values.length + 1} OFFSET $${values.length + 2}`,
         [...values, queryLimit, queryOffset]
       );
-      res.json({ logs: rows, total: parseInt(count.rows[0].count, 10) });
+      res.json({ logs: rows.map(item => ({
+        ...item,
+        user_email: mascararEmail(item.user_email),
+        metadata: sanitizarMetadata(item.metadata)
+      })), total: parseInt(count.rows[0].count, 10) });
     } catch (e) {
       console.error('[AUDIT LOGS]', e);
       res.status(500).json({ erro: 'Erro ao consultar logs de auditoria' });
@@ -7723,10 +7787,10 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
   // ─── SaaS Admin: Gestão Global de Empresas ────────────────────────────────
 
   // GET /api/saas/empresas — lista todas as empresas (admin global)
-  app.get('/api/saas/empresas', authAdmin, async (req, res) => {
+  app.get('/api/saas/empresas', authGlobalRead, async (req, res) => {
     try {
       const { rows } = await pool.query(`
-        SELECT e.id, e.nome, e.slug, e.cnpj, e.email_principal, e.telefone,
+        SELECT e.id, e.nome, e.slug,
                e.ativo, e.plano, e.plano_id, e.onboarding_step, e.criado_em,
                p.nome AS plano_nome, p.slug AS plano_slug,
                COUNT(DISTINCT v.id) FILTER (WHERE v.status='publicada') AS total_vagas,
@@ -7746,7 +7810,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
   });
 
   // PUT /api/saas/empresas/:id — atualiza empresa (admin global)
-  app.put('/api/saas/empresas/:id', authAdmin, async (req, res) => {
+  app.put('/api/saas/empresas/:id', authAdminOnly, async (req, res) => {
     try {
       const { id } = req.params;
       const { ativo, plano, plano_id } = req.body || {};
@@ -7763,6 +7827,10 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
         vals
       );
       if (rows.length === 0) return res.status(404).json({ erro: 'Empresa não encontrada' });
+      await audit(req, 'saas.empresa.updated', {
+        resource_type: 'empresa', resource_id: Number(id),
+        metadata: { campos: updates.map(u => u.split(' ')[0]), resultado: rows[0] }
+      });
       res.json({ ok: true, empresa: rows[0] });
     } catch (e) {
       console.error('[SAAS/EMPRESAS PUT]', e);
@@ -7773,7 +7841,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
   // ─── SaaS Master: visão executiva e saúde operacional ─────────────────────
   // Dados reais disponíveis no produto. Métricas financeiras ficam como
   // "não conectado" até a integração com um gateway de pagamentos.
-  app.get('/api/saas/overview', authAdmin, async (req, res) => {
+  app.get('/api/saas/overview', authGlobalRead, async (req, res) => {
     const safe = async (sql, params = []) => {
       try { return (await pool.query(sql, params)).rows; }
       catch (e) { console.error('[SAAS/OVERVIEW]', e.message); return []; }
@@ -7827,7 +7895,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
         gerado_em: new Date().toISOString(),
         resumo: resumo[0] || {},
         planos,
-        atividade,
+        atividade: atividade.map(item => ({ ...item, metadata: sanitizarMetadata(item.metadata) })),
         ranking,
         crescimento,
         seguranca: seguranca[0] || {},
@@ -9419,8 +9487,8 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
   });
 
   // POST /api/saas/email/test — admin SaaS envia e-mail de teste (não público)
-  app.post('/api/saas/email/test', authAdmin, async (req, res) => {
-    if (!req.admin?.is_saas) return res.status(403).json({ erro: 'Apenas admin SaaS' });
+  app.post('/api/saas/email/test', authAdminOnly, async (req, res) => {
+    // authAdminOnly garante Administrador Global; o Portal SaaS não usa impersonação.
     const { destinatario, tipo } = req.body;
     if (!destinatario) return res.status(400).json({ erro: 'destinatario obrigatório' });
     try {
@@ -9447,21 +9515,28 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
           })
         });
       }
+      await audit(req, 'saas.email.test_sent', {
+        resource_type: 'email', metadata: { tipo: tipoTest, destinatario: String(destinatario).replace(/(.{2}).*(@.*)/, '$1***$2') }
+      });
       res.json({ ok: true, tipo: tipoTest, result });
     } catch (e) {
-      res.status(500).json({ ok: false, erro: e.message });
+      res.status(500).json({ ok: false, erro: 'Não foi possível enviar o e-mail de teste' });
     }
   });
 
   // POST /api/saas/email/digest — dispara digest diário manualmente (admin SaaS)
-  app.post('/api/saas/email/digest', authAdmin, async (req, res) => {
-    if (!req.admin?.is_saas) return res.status(403).json({ erro: 'Apenas admin SaaS' });
+  app.post('/api/saas/email/digest', authAdminOnly, async (req, res) => {
+    // authAdminOnly garante Administrador Global; o Portal SaaS não usa impersonação.
     try {
       const { empresa_id } = req.body || {};
       const result = await emailSvc.bgDigestDiario({ empresaId: empresa_id || null });
+      await audit(req, 'saas.email.digest_dispatched', {
+        resource_type: 'empresa', resource_id: empresa_id ? Number(empresa_id) : null,
+        metadata: { escopo: empresa_id ? 'empresa' : 'global' }
+      });
       res.json({ ok: true, result });
     } catch (e) {
-      res.status(500).json({ ok: false, erro: e.message });
+      res.status(500).json({ ok: false, erro: 'Não foi possível disparar o digest' });
     }
   });
 
@@ -9560,7 +9635,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
   });
 
   // ── GET /api/saas/analytics — métricas globais (admin) ───────────────────
-  app.get('/api/saas/analytics', authAdmin, async (req, res) => {
+  app.get('/api/saas/analytics', authGlobalRead, async (req, res) => {
     try {
       const { periodo, vaga_id } = req.query;
       const data = await analytics.metricasSaas({ periodo, vaga_id: vaga_id ? parseInt(vaga_id) : null });
@@ -9600,7 +9675,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
 
   // ── GET /api/saas/auditoria — logs de auditoria (admin) ──────────────────
   // Reutiliza tabela audit_logs existente. Somente leitura. Nunca DELETE/PUT/PATCH.
-  app.get('/api/saas/auditoria', authAdmin, async (req, res) => {
+  app.get('/api/saas/auditoria', authGlobalRead, async (req, res) => {
     try {
       const {
         usuario, empresa_id, acao, recurso,
@@ -9629,7 +9704,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
       const cnt  = await pool.query(`SELECT COUNT(*) FROM audit_logs ${whereClause}`, vals);
       const { rows } = await pool.query(
         `SELECT id, created_at, user_id, user_type, user_email, action,
-                resource_type, resource_id, ip, result, metadata
+                resource_type, resource_id, result, metadata
          FROM audit_logs ${whereClause}
          ORDER BY created_at DESC
          LIMIT $${vals.length + 1} OFFSET $${vals.length + 2}`,
@@ -9637,7 +9712,11 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
       );
       const total = parseInt(cnt.rows[0].count);
       res.json({
-        logs: rows,
+        logs: rows.map(item => ({
+          ...item,
+          user_email: mascararEmail(item.user_email),
+          metadata: sanitizarMetadata(item.metadata)
+        })),
         paginacao: { total, pagina: pg, limite: lim, paginas: Math.ceil(total / lim) }
       });
     } catch (e) {
@@ -9658,7 +9737,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
 
 
 // ── GET /api/admin/me (Fechamento Funcional 28/07/2026) ──────
-app.get('/api/admin/me', authAdmin, async (req, res) => {
+app.get('/api/admin/me', authAdminOnly, async (req, res) => {
   try {
     const { rows } = await pool.query(
       'SELECT id, nome, email, role FROM admins WHERE id = $1',
