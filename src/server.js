@@ -177,6 +177,9 @@ app.use('/api/admin/candidatura/:id/enviar-proposta', express.json({ limit: '9mb
 app.use('/api/empresa/candidatura/:id/proposta', express.json({ limit: '9mb' }));
 
 // JSON normal: payloads de negócio não precisam de dezenas de megabytes.
+// Render health check — rota pública, rápida e sem dependência do banco.
+app.get('/health', (req, res) => res.status(200).json({ ok: true, service: 'vagasio-api-staging' }));
+
 app.use(express.json({ limit: '2mb' }));
 
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
