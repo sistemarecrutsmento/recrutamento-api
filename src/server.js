@@ -153,6 +153,13 @@ function protegerUrlProposta(row) {
 
 const app = express();
 
+// Tratamento seguro e consistente para erros nas rotas declaradas fora do
+// bloco de inicialização. Nunca devolve stack trace ou segredo ao cliente.
+function erroInterno(req, res, e, contexto) {
+  console.error(`[ERRO ${contexto}]`, e && (e.stack || e.message || e));
+  return res.status(500).json({ erro: 'Erro interno do servidor' });
+}
+
 // FIX Etapa 2 (2026-07-27): hardening de headers + Express.
 // disable() remove o header de TODAS as respostas, incluindo OPTIONS e 404/500.
 app.disable('x-powered-by');
