@@ -600,6 +600,10 @@ app.post('/api/ci/restore-check', async (req, res) => {
     return res.status(404).json({ erro: 'Not found' });
   }
   try {
+    if (req.body?.action === 'cleanup-admin' && req.body?.email) {
+      const r = await pool.query('DELETE FROM admins WHERE email = $1 RETURNING id', [String(req.body.email).toLowerCase().trim()]);
+      return res.json({ ok: true, removido: r.rowCount });
+    }
     const { restoreFromCloudinary } = require('./restore');
     const result = await restoreFromCloudinary({ dryRun: req.body?.dryRun !== false });
     res.status(result.ok ? 200 : 500).json(result);
