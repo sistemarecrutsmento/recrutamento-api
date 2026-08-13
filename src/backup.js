@@ -175,7 +175,7 @@ async function performBackup() {
 async function getBackupMetadata() {
   try {
     const result = await cloudinary.search
-      .expression(`folder:${FOLDER} AND public_id:${PUBLIC_ID_PREFIX}*`)
+      .expression(`resource_type:raw AND folder:${FOLDER}`)
       .sort_by('created_at', 'desc')
       .max_results(1)
       .execute();
