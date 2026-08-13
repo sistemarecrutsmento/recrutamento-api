@@ -604,7 +604,14 @@ async function init() {
     } catch (migrationErr) {
       console.error('[MIGRATION 029] Erro não tratado (mas segui):', migrationErr.message);
     }
-    console.log('Tabelas criadas/verificadas + migrations Fase 1-029 aplicadas');
+    try {
+      const { up: migration030 } = require('./migrations/030_performance_fase8');
+      await migration030();
+      console.log('[MIGRATION 030] índices de performance OK');
+    } catch (migrationErr) {
+      console.error('[MIGRATION 030] Erro não tratado (mas segui):', migrationErr.message);
+    }
+    console.log('Tabelas criadas/verificadas + migrations Fase 1-030 aplicadas');
   } finally {
     client.release();
   }
