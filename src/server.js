@@ -593,26 +593,6 @@ app.post('/api/ci/admin-token', async (req, res) => {
   }
 });
 
-// Endpoint temporário de validação do restore, protegido pelo mesmo segredo CI.
-// Remover após a validação do staging; nunca disponível em produção.
-app.post('/api/ci/restore-check', async (req, res) => {
-  if (process.env.NODE_ENV === 'production' || !process.env.CI_ADMIN_SECRET || req.body?.secret !== process.env.CI_ADMIN_SECRET) {
-    return res.status(404).json({ erro: 'Not found' });
-  }
-  try {
-    if (req.body?.action === 'cleanup-admin' && req.body?.email) {
-      const r = await pool.query('DELETE FROM admins WHERE email = $1 RETURNING id', [String(req.body.email).toLowerCase().trim()]);
-      return res.json({ ok: true, removido: r.rowCount });
-    }
-    const { restoreFromCloudinary } = require('./restore');
-    const result = await restoreFromCloudinary({ dryRun: req.body?.dryRun !== false });
-    res.status(result.ok ? 200 : 500).json(result);
-  } catch (e) {
-    console.error('[CI RESTORE CHECK]', e.message);
-    res.status(500).json({ erro: 'Falha no teste de restore' });
-  }
-});
-
 // DEBUG FASE 6 — versão top-level (não depende do wrapper async)
 // /api/_debug/fase6 removido (dados internos de schema)
 
