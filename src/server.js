@@ -3484,13 +3484,22 @@ app.get('/api/candidatura/:id/documentos/:docId/arquivo', authCandidato, async (
 // POST /api/admin/candidato/:id/deletar { confirm: 'SIM_DELETAR' }
 // Apaga o candidato, suas candidaturas, documentos e mensagens de chat (cascade manual).
 // Operação IRREVERSÍVEL — exige confirmação textual.
-app.post('/api/admin/candidato/:id/deletar', authAdminOnly, async (req, res) => {
+app.post('/api/admin/candidato/:id/deletar', authAdminOnly, denyGlobalPrivateUntilSupport, async (req, res) => {
   try {
     const candId = Number(req.params.id);
     if (!candId) return res.status(400).json({ erro: 'id inválido' });
     if (req.body.confirm !== 'SIM_DELETAR') {
       return res.status(400).json({ erro: 'Confirme com { confirm: "SIM_DELETAR" }' });
     }
+    const backupId = String(req.body.backup_id || '').trim();
+    const reviewId = Number(req.body.review_id);
+    if (backupId.length < 6 || !Number.isInteger(reviewId) || reviewId < 1) {
+      return res.status(400).json({ erro: 'backup_id e review_id de anonimização são obrigatórios' });
+    }
+    const review = await pool.query(`SELECT r.id, r.empresa_id FROM lgpd_retention_reviews r WHERE r.id=$1 AND r.decisao='anonimizar'`, [reviewId]);
+    if (!review.rowCount) return res.status(409).json({ erro: 'Revisão LGPD de anonimização não encontrada' });
+    const holds = await pool.query(`SELECT 1 FROM empresas e WHERE e.legal_hold=true AND EXISTS (SELECT 1 FROM vagas v JOIN candidaturas c ON c.vaga_id=v.id WHERE c.candidato_id=$1 AND v.empresa_id=e.id) LIMIT 1`, [candId]);
+    if (holds.rowCount) return res.status(409).json({ erro: 'Anonimização bloqueada por legal hold' });
     const { rows: cand } = await pool.query(
       'SELECT id, email, nome FROM candidatos WHERE id = $1',
       [candId]
@@ -3530,7 +3539,7 @@ app.post('/api/admin/candidato/:id/deletar', authAdminOnly, async (req, res) => 
         recebe_comunicacoes = false, anonimizado_em = COALESCE(anonimizado_em, NOW())
       WHERE id = $2 RETURNING id`, [anonEmail, candId]);
 
-    await audit(req, 'admin.candidato.anonymized', { resource_type: 'candidato', resource_id: candId, user_email: req.user?.email, metadata: { preservado_historico: true, pii_removida: true } });
+    await audit(req, 'admin.candidato.anonymized', { resource_type: 'candidato', resource_id: candId, user_email: req.user?.email, metadata: { preservado_historico: true, pii_removida: true, backup_id: backupId, review_id: reviewId } });
 
     res.json({
       ok: true,
