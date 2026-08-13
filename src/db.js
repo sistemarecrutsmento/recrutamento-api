@@ -569,7 +569,14 @@ async function init() {
     } catch (migrationErr) {
       console.error('[MIGRATION 024] Erro não tratado (mas segui):', migrationErr.message);
     }
-    console.log('Tabelas criadas/verificadas + migrations Fase 1-024 aplicadas');
+    try {
+      const { up: migration025 } = require('./migrations/025_candidato_convites');
+      await migration025();
+      console.log('[MIGRATION 025] convites do Banco de Talentos OK');
+    } catch (migrationErr) {
+      console.error('[MIGRATION 025] Erro não tratado (mas segui):', migrationErr.message);
+    }
+    console.log('Tabelas criadas/verificadas + migrations Fase 1-025 aplicadas');
   } finally {
     client.release();
   }
