@@ -1,4 +1,5 @@
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const { audit } = require('./audit');
 const { pool } = require('./db');
 
@@ -57,6 +58,18 @@ function authAdmin(req, res, next) {
   });
 }
 
+// Portal Global/SaaS: leitura operacional. Recrutador Global pode consultar,
+// mas não pode executar mutações nem acessar rotas privadas protegidas por
+// authAdminOnly.
+function authGlobalRead(req, res, next) {
+  return authMiddleware(req, res, () => {
+    if (req.user.tipo !== 'admin' && req.user.tipo !== 'recrutador') {
+      return res.status(403).json({ erro: 'Acesso apenas ao Portal Global' });
+    }
+    next();
+  });
+}
+
 function authEmpresa(req, res, next) {
   return authMiddleware(req, res, () => {
     if (req.user.tipo !== 'empresa') {
@@ -64,6 +77,43 @@ function authEmpresa(req, res, next) {
     }
     next();
   });
+}
+
+// Conteúdo privado global: até existir sessão formal de suporte com escopo,
+// o Administrador Global não entra em dados de candidato/empresa.
+async function denyGlobalPrivateUntilSupport(req, res, next) {
+  // Modo de Suporte é somente leitura por padrão. Nenhuma mutação passa por este middleware.
+  if (req.method !== 'GET') return res.status(403).json({ erro: 'Modo de Suporte permite somente leitura' });
+  const raw = req.headers['x-support-session'];
+  if (!raw || typeof raw !== 'string' || raw.length < 32) {
+    return res.status(403).json({ erro: 'Conteúdo privado exige Modo de Suporte autorizado' });
+  }
+  try {
+    const tokenHash = crypto.createHash('sha256').update(raw).digest('hex');
+    const q = await pool.query(`
+      SELECT id, iniciado_por, escopo, somente_leitura
+      FROM sessoes_suporte
+      WHERE token_hash = $1 AND iniciado_por = $2 AND encerrado_em IS NULL AND expira_em > NOW()
+    `, [tokenHash, req.user?.id]);
+    if (!q.rowCount || !q.rows[0].somente_leitura) {
+      return res.status(403).json({ erro: 'Sessão de suporte inexistente, expirada ou inválida' });
+    }
+    const escopo = q.rows[0].escopo || {};
+    if (escopo.amplo !== true) {
+      const idsRota = (req.path.match(/\d+/g) || []).map(Number);
+      const idsPermitidos = Array.isArray(escopo.ids) ? escopo.ids.map(Number) : [];
+      if (!idsRota.length || !idsRota.some(id => idsPermitidos.includes(id))) {
+        await audit(req, 'support.private_read_denied', { result: 'blocked', metadata: { session_id: q.rows[0].id, rota: req.path, motivo: 'fora_do_escopo' } });
+        return res.status(403).json({ erro: 'Recurso fora do escopo da sessão de suporte' });
+      }
+    }
+    req.supportSession = q.rows[0];
+    await audit(req, 'support.private_read', { result: 'allowed', metadata: { session_id: q.rows[0].id, rota: req.path } });
+    return next();
+  } catch (e) {
+    console.error('[AUTH SUPPORT]', e.message);
+    return res.status(503).json({ erro: 'Não foi possível validar o Modo de Suporte' });
+  }
 }
 
 // Permissão total: só admin (recrutador NÃO pode criar usuários / mexer em config)
@@ -194,6 +244,19 @@ function requireRecrutadorOuAdmin(req, res, next) {
 
 // Viewer ou superior: usado em GETs. authEmpresa passa por todos os 3 roles
 // mas exige tipo=empresa. Viewers podem ler tudo da propria empresa.
+function requireFinanceiroEmpresa(req, res, next) {
+  return authMiddleware(req, res, () => {
+    if (req.user.tipo !== 'empresa') return res.status(403).json({ erro: 'Acesso apenas para usuarios de empresa' });
+    if (req.user.role !== EMPRESA_ROLES.ADMIN) {
+      return res.status(403).json({ erro: 'Operacao financeira restrita ao administrador da empresa' });
+    }
+    if (!req.user.empresa_id || typeof req.user.empresa_id !== 'number') {
+      return res.status(401).json({ erro: 'Token invalido: empresa_id ausente' });
+    }
+    return ensureEmpresaAccessAtivo(req, res, next);
+  });
+}
+
 function requireEmpresaViewer(req, res, next) {
   return authMiddleware(req, res, () => {
     if (req.user.tipo !== 'empresa') {
@@ -213,6 +276,8 @@ module.exports = {
   authMiddleware,
   authCandidato,
   authAdmin,
+  authGlobalRead,
+  denyGlobalPrivateUntilSupport,
   authEmpresa,
   authAdminOnly,
   authCandidatoOrEmpresaOrAdmin,
@@ -220,6 +285,7 @@ module.exports = {
   requireAdminEmpresa,
   requireAdminOuRecrutadorEquipe,
   requireRecrutadorOuAdmin,
+  requireFinanceiroEmpresa,
   requireEmpresaViewer,
   EMPRESA_ROLES,
   JWT_VERIFY_OPTIONS

@@ -144,10 +144,20 @@ async function restoreFromBuffer(gzipBuffer, options = {}) {
           // Erro em outro tipo de statement (não esperado)
           erros.push({ index: i, statement: stmt.substring(0, 80), erro: e.message });
         }
-        if (erros.length > 10) {
-          // Muitos erros — aborta
-          throw new Error(`Muitos erros (${erros.length}). Último: ${e.message}`);
-        }
+        // Uma falha aborta a transação no PostgreSQL. Interromper logo,
+        // fazer rollback explícito e evitar a cascata de erros "transaction
+        // is aborted" que ocultava a causa original.
+        await client.query('ROLLBACK');
+        console.error(`[RESTORE] ROLLBACK — falha em ${extractTable(stmt)}`);
+        return {
+          ok: false,
+          rollback: true,
+          erro: 'Rollback executado após falha na restauração',
+          erros: erros.slice(0, 10),
+          insertOk,
+          insertErro,
+          duracaoMs: Date.now() - inicio
+        };
       }
     }
 
@@ -193,7 +203,7 @@ async function restoreFromBuffer(gzipBuffer, options = {}) {
 async function restoreFromCloudinary(options = {}) {
   // Busca o último backup
   const result = await cloudinary.search
-    .expression('folder:backups-vagas AND public_id:backup-vagas*')
+    .expression('resource_type:raw AND folder:backups-vagas')
     .sort_by('created_at', 'desc')
     .max_results(1)
     .execute();
@@ -206,12 +216,11 @@ async function restoreFromCloudinary(options = {}) {
   console.log(`[RESTORE] Último backup: ${r.public_id} (${r.created_at})`);
 
   // Backups são authenticated; o download usa URL assinada gerada no servidor.
-  const downloadUrl = cloudinary.url(r.public_id, {
+  const downloadUrl = cloudinary.utils.private_download_url(r.public_id, 'gz', {
     resource_type: r.resource_type || 'raw',
     type: 'authenticated',
-    sign_url: true,
-    secure: true,
-    format: 'gz'
+    expires_at: Math.floor(Date.now() / 1000) + 300,
+    attachment: false
   });
   const response = await fetch(downloadUrl);
   if (!response.ok) {

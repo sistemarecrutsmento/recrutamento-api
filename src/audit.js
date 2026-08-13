@@ -1,5 +1,29 @@
 const { pool } = require('./db');
 
+const CAMPOS_SENSIVEIS = [
+  'senha', 'password', 'token', 'secret', 'refresh_token', 'codigo', '2fa',
+  'cpf', 'rg', 'cnpj', 'mensagem', 'message', 'texto', 'content', 'arquivo_url'
+];
+
+function sanitizarMetadata(metadata) {
+  if (typeof metadata === 'string') {
+    try { metadata = JSON.parse(metadata); } catch (_) { return {}; }
+  }
+  if (!metadata || typeof metadata !== 'object') return {};
+  const saida = {};
+  for (const [chave, valor] of Object.entries(metadata)) {
+    const k = String(chave).toLowerCase();
+    if (CAMPOS_SENSIVEIS.some(item => k.includes(item))) continue;
+    if (valor && typeof valor === 'object' && !Array.isArray(valor)) {
+      saida[chave] = sanitizarMetadata(valor);
+    } else {
+      saida[chave] = valor;
+    }
+  }
+  const json = JSON.stringify(saida);
+  return Buffer.byteLength(json) <= 4096 ? saida : { _truncado: true };
+}
+
 /**
  * Registra um evento de auditoria no banco de dados.
  * NUNCA quebra o fluxo principal — erros são apenas logados no console.
@@ -33,7 +57,7 @@ async function audit(req, action, opts = {}) {
       req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || null,
       (req.headers['user-agent'] || '').substring(0, 500),
       opts.result || 'success',
-      JSON.stringify(opts.metadata || {})
+      JSON.stringify(sanitizarMetadata(opts.metadata))
     ]);
   } catch (e) {
     // NUNCA quebrar o fluxo por erro de log
@@ -49,4 +73,4 @@ function auditFireAndForget(req, action, opts = {}) {
   audit(req, action, opts).catch(() => {});
 }
 
-module.exports = { audit, auditFireAndForget };
+module.exports = { audit, auditFireAndForget, sanitizarMetadata };

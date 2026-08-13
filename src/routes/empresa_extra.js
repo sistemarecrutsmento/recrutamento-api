@@ -116,12 +116,9 @@ function registrar(app, ctx) {
       const { rows } = await pool.query(`
         SELECT e.id, e.candidatura_id, e.etapa, e.data_hora, e.duracao_minutos,
                e.local, NULL AS link_reuniao, e.observacoes, e.status,
-               vr.room_id AS video_room_id,
-               CASE WHEN vr.room_id IS NOT NULL THEN 'vagasio' ELSE NULL END AS video_provider,
                c.vaga_id, v.titulo as vaga_titulo,
                cd.id as candidato_id, cd.nome as candidato_nome, cd.foto_url, cd.email
         FROM entrevistas e
-        LEFT JOIN video_rooms vr ON vr.entrevista_id=e.id AND vr.status='active'
         JOIN candidaturas c ON c.id = e.candidatura_id
         JOIN vagas v ON v.id = c.vaga_id
         JOIN candidatos cd ON cd.id = c.candidato_id
@@ -248,13 +245,13 @@ function registrar(app, ctx) {
       const check = await pool.query(`
         SELECT c.id FROM candidaturas c
         JOIN vagas v ON v.id = c.vaga_id
-        WHERE c.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2 AND revogado_em IS NULL))
-      `, [id, empresa_id]);
+        WHERE c.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3 AND revogado_em IS NULL))
+      `, [id, req.user.id, empresa_id]);
       if (check.rows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
       const { rows } = await pool.query(
         `SELECT e.id, e.candidatura_id, e.etapa, e.data_hora, e.duracao_minutos, e.local, NULL AS link_reuniao, e.observacoes, e.status, e.criado_em,
                 vr.room_id AS video_room_id
-         FROM entrevistas e LEFT JOIN video_rooms vr ON vr.entrevista_id=e.id AND vr.status='active' WHERE e.candidatura_id = $1 ORDER BY e.data_hora DESC, e.id DESC`, [id]
+         FROM entrevistas e LEFT JOIN video_rooms vr ON vr.entrevista_id=e.id AND vr.status='active' WHERE candidatura_id = $1 ORDER BY data_hora DESC, id DESC`, [id]
       );
       res.json({ entrevistas: rows });
     } catch (e) {
@@ -270,43 +267,31 @@ function registrar(app, ctx) {
     try {
       const videoRooms = require('../videoRooms');
       const { empresa_id } = req.user;
-      const { candidatura_id, etapa: etapaBody, data_hora, duracao_minutos, local, link_reuniao, observacoes, tipo } = req.body;
+      const { candidatura_id, etapa: etapaBody, data_hora, duracao_minutos, local, link_reuniao, observacoes, tipo, entrevistadores } = req.body;
+      const listaEntrevistadores = Array.isArray(entrevistadores) ? entrevistadores.slice(0, 20).map(x => ({ nome: String(x?.nome || '').trim().slice(0,160), email: String(x?.email || '').trim().toLowerCase().slice(0,254), papel: String(x?.papel || '').trim().slice(0,120) })).filter(x => x.nome || x.email) : [];
       const etapa = etapaBody != null ? Number(etapaBody) : 4;
       if (!candidatura_id || !data_hora) return res.status(400).json({ erro: 'candidatura_id e data_hora são obrigatórios' });
       const candCheck = await pool.query(`SELECT c.id,c.vaga_id,c.historico,cd.nome AS candidato_nome,v.titulo AS vaga_titulo FROM candidaturas c JOIN candidatos cd ON cd.id=c.candidato_id JOIN vagas v ON v.id=c.vaga_id WHERE c.id=$1 AND v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id=$2 AND revogado_em IS NULL)`, [candidatura_id,empresa_id]);
       if (!candCheck.rowCount) return res.status(403).json({ erro:'Candidatura não pertence a esta empresa' });
-      // Serialize scheduling per candidature. This prevents double-clicks and concurrent tabs
-      // from creating two active interviews, even before a partial unique index is installed.
-      const client = await pool.connect();
-      let lockHeld = false;
-      try {
-        await client.query('SELECT pg_advisory_lock(hashtext($1))', [`vagasio:entrevista:${candidatura_id}`]); lockHeld = true;
-        const active = await client.query(`SELECT id FROM entrevistas WHERE candidatura_id=$1 AND etapa=$2 AND COALESCE(status,'agendada') NOT IN ('cancelada','realizada','concluida','concluído','no_show','pendente') ORDER BY id DESC LIMIT 1`, [candidatura_id, etapa]);
-        if (active.rowCount) return res.status(409).json({ erro:'Esta candidatura já possui uma entrevista ativa nesta etapa. Edite o agendamento existente.', codigo:'ENTREVISTA_ATIVA_EXISTENTE', entrevista_id:active.rows[0].id });
-        // O avanço de etapa cria um placeholder pendente. Ao preencher o horário,
-        // removemos esse placeholder para não duplicar a entrevista na agenda.
-        await client.query(`DELETE FROM entrevistas WHERE candidatura_id=$1 AND etapa=$2 AND status='pendente'`, [candidatura_id, etapa]);
-        // Online interviews require a VagasIO room; link_reuniao/Meet is never a fallback.
-        const isOnline = !local || /online|video/i.test(String(local)) || tipo === 'video';
-        let videoRoom = null;
-        const dataFinal = new Date(data_hora);
-        if (isNaN(dataFinal.getTime())) return res.status(400).json({ erro: 'data_hora inválida' });
-        const { rows } = await client.query(`INSERT INTO entrevistas (candidatura_id,etapa,data_hora,duracao_minutos,local,link_reuniao,observacoes,status,criado_em)
-          VALUES ($1,$2,$3,$4,$5,NULL,$6,'agendada',NOW()) RETURNING id,candidatura_id,etapa,data_hora,duracao_minutos,local,link_reuniao,observacoes,status,criado_em`,
-          [candidatura_id, etapa, dataFinal.toISOString(), duracao_minutos || 60, isOnline ? 'Videochamada VagasIO' : local, observacoes]);
-        await client.query('COMMIT').catch(()=>{});
-        if (isOnline) {
-          try { videoRoom = await videoRooms.getOrCreate(req, rows[0].id); if (!videoRoom) throw new Error('Sala não autorizada'); }
-          catch (e) { await client.query('DELETE FROM entrevistas WHERE id=$1',[rows[0].id]).catch(()=>{}); return res.status(503).json({ erro:'Videochamada VagasIO indisponível. Tente novamente.', codigo:'VAGASIO_ROOM_UNAVAILABLE' }); }
-        }
-        const hist = Array.isArray(candCheck.rows[0].historico) ? candCheck.rows[0].historico : [];
-        hist.push({ tipo: 'entrevista', acao: 'entrevista_agendada', etapa, data_hora: dataFinal.toISOString(), por: `empresa:${req.user.nome || empresa_id}`, quando: new Date().toISOString(), detalhes: `Entrevista agendada para ${candCheck.rows[0].candidato_nome || 'candidato'}` });
-        await pool.query(`UPDATE candidaturas SET historico = $1::jsonb, atualizada_em = NOW() WHERE id = $2`, [JSON.stringify(hist), candidatura_id]);
-        return res.json({ ok: true, entrevista: rows[0], id: rows[0].id, video: videoRoom ? { provider:'vagasio', room_id:videoRoom.room_id, candidature_id:videoRoom.candidatura_id, interview_id:videoRoom.entrevista_id } : null });
-      } finally {
-        if (lockHeld) await client.query('SELECT pg_advisory_unlock(hashtext($1))',[`vagasio:entrevista:${candidatura_id}`]).catch(()=>{});
-        client.release();
+      // Online interviews require a VagasIO room; Meet/link_reuniao is never an active fallback.
+      const isOnline = !local || /online|video/i.test(String(local)) || tipo === 'video';
+      let videoRoom = null;
+      const dataFinal = new Date(data_hora);
+      if (isNaN(dataFinal.getTime())) return res.status(400).json({ erro: 'data_hora inválida' });
+      const { rows } = await pool.query(`INSERT INTO entrevistas (candidatura_id,etapa,data_hora,duracao_minutos,local,link_reuniao,observacoes,status,entrevistadores,criado_em)
+        VALUES ($1,$2,$3,$4,$5,NULL,$6,'agendada',$7,NOW()) RETURNING id,candidatura_id,etapa,data_hora,duracao_minutos,local,link_reuniao,observacoes,status,entrevistadores,criado_em`,
+        [candidatura_id, etapa, dataFinal.toISOString(), duracao_minutos || 60, isOnline ? 'Videochamada VagasIO' : local, observacoes, JSON.stringify(listaEntrevistadores)]);
+      if (isOnline) {
+        try { videoRoom = await videoRooms.getOrCreate(req, rows[0].id); if (!videoRoom) throw new Error('Sala não autorizada'); }
+        catch (e) { try { await pool.query('DELETE FROM entrevistas WHERE id=$1',[rows[0].id]); } catch (_) {} return res.status(503).json({ erro:'Videochamada VagasIO indisponível. Tente novamente.', codigo:'VAGASIO_ROOM_UNAVAILABLE' }); }
       }
+      const hist = Array.isArray(candCheck.rows[0].historico) ? candCheck.rows[0].historico : [];
+      hist.push({ tipo: 'entrevista', acao: 'entrevista_agendada', etapa, data_hora: dataFinal.toISOString(),
+        por: `empresa:${req.user.nome || empresa_id}`, quando: new Date().toISOString(),
+        detalhes: `Entrevista agendada para ${candCheck.rows[0].candidato_nome || 'candidato'}` });
+      await pool.query(`UPDATE candidaturas SET historico = $1::jsonb, atualizada_em = NOW() WHERE id = $2`, [JSON.stringify(hist), candidatura_id]);
+      res.json({ ok: true, entrevista: rows[0], id: rows[0].id,
+        video: videoRoom ? { provider: 'vagasio', room_id: videoRoom.room_id, candidature_id: videoRoom.candidatura_id, interview_id: videoRoom.entrevista_id } : null });
     } catch (e) {
       console.error('[EMPRESA ENTREVISTA POST]', e);
       res.status(500).json({ erro: 'Erro ao agendar entrevista' });
@@ -320,13 +305,15 @@ function registrar(app, ctx) {
     try {
       const { empresa_id } = req.user;
       const { id } = req.params;
-      const { data_hora, duracao_minutos, local, link_reuniao, observacoes, status } = req.body;
+      const { data_hora, duracao_minutos, local, link_reuniao, observacoes, status, entrevistadores } = req.body;
+      if (status !== undefined && !['agendada','realizada','no-show','cancelada'].includes(String(status))) return res.status(400).json({ erro: 'Status de entrevista inválido' });
+      const listaEntrevistadores = Array.isArray(entrevistadores) ? entrevistadores.slice(0, 20).map(x => ({ nome: String(x?.nome || '').trim().slice(0,160), email: String(x?.email || '').trim().toLowerCase().slice(0,254), papel: String(x?.papel || '').trim().slice(0,120) })).filter(x => x.nome || x.email) : null;
       const check = await pool.query(`
         SELECT e.id FROM entrevistas e
         JOIN candidaturas c ON c.id = e.candidatura_id
         JOIN vagas v ON v.id = c.vaga_id
-        WHERE e.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3 AND revogado_em IS NULL))
-      `, [id, req.user.id, empresa_id]);
+        WHERE e.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2 AND revogado_em IS NULL))
+      `, [id, empresa_id]);
       if (check.rows.length === 0) return res.status(403).json({ erro: 'Entrevista não pertence a esta empresa' });
       await pool.query(`
         UPDATE entrevistas
@@ -335,9 +322,10 @@ function registrar(app, ctx) {
             local = COALESCE($3, local),
             link_reuniao = COALESCE($4, link_reuniao),
             observacoes = COALESCE($5, observacoes),
-            status = COALESCE($6, status)
-        WHERE id = $7
-      `, [data_hora, duracao_minutos, local, link_reuniao, observacoes, status, id]);
+            status = COALESCE($6, status),
+            entrevistadores = COALESCE($7::jsonb, entrevistadores)
+        WHERE id = $8
+      `, [data_hora, duracao_minutos, local, link_reuniao, observacoes, status, listaEntrevistadores ? JSON.stringify(listaEntrevistadores) : null, id]);
       res.json({ ok: true });
     } catch (e) {
       console.error('[EMPRESA ENTREVISTA PUT]', e);
@@ -357,10 +345,10 @@ function registrar(app, ctx) {
         SELECT e.id FROM entrevistas e
         JOIN candidaturas c ON c.id = e.candidatura_id
         JOIN vagas v ON v.id = c.vaga_id
-        WHERE e.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3 AND revogado_em IS NULL))
-      `, [id, req.user.id, empresa_id]);
+        WHERE e.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2 AND revogado_em IS NULL))
+      `, [id, empresa_id]);
       if (check.rows.length === 0) return res.status(403).json({ erro: 'Entrevista não pertence a esta empresa' });
-      await pool.query(`UPDATE entrevistas SET status = 'cancelada', observacoes = COALESCE($1, observacoes) WHERE id = $2`, [motivo ? `[CANCELADA] ${motivo}` : null, id]);
+      await pool.query(`UPDATE entrevistas SET status = 'cancelada', observacoes = COALESCE($1, observacoes), atualizado_em = NOW() WHERE id = $2`, [motivo ? `[CANCELADA] ${motivo}` : null, id]);
       res.json({ ok: true });
     } catch (e) {
       console.error('[EMPRESA ENTREVISTA CANCEL]', e);
@@ -478,8 +466,8 @@ function registrar(app, ctx) {
       const check = await pool.query(`
         SELECT c.id, c.historico, c.observacoes_etapas FROM candidaturas c
         JOIN vagas v ON v.id = c.vaga_id
-        WHERE c.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2 AND revogado_em IS NULL))
-      `, [id, empresa_id]);
+        WHERE c.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3 AND revogado_em IS NULL))
+      `, [id, req.user.id, empresa_id]);
       if (check.rows.length === 0) return res.status(403).json({ erro: 'Candidatura não pertence a esta empresa' });
       const hist = Array.isArray(check.rows[0].historico) ? check.rows[0].historico : [];
       const observacoes = check.rows[0].observacoes_etapas && typeof check.rows[0].observacoes_etapas === 'object'
@@ -509,20 +497,15 @@ function registrar(app, ctx) {
       const check = await pool.query(`
         SELECT c.*, v.etapas as vaga_etapas FROM candidaturas c
         JOIN vagas v ON v.id = c.vaga_id
-        WHERE c.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2 AND revogado_em IS NULL))
-      `, [id, empresa_id]);
+        WHERE c.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3 AND revogado_em IS NULL))
+      `, [id, req.user.id, empresa_id]);
       if (check.rows.length === 0) return res.status(403).json({ erro: 'Candidatura não pertence a esta empresa' });
       const cand = check.rows[0];
-      let etapaAtual = Number(cand.etapa_atual);
-      if (!Number.isFinite(etapaAtual)) etapaAtual = 1;
-      let novaEtapa = etapa !== undefined ? Number(etapa) : etapaAtual;
-      if (!Number.isFinite(novaEtapa)) novaEtapa = etapaAtual;
+      let novaEtapa = etapa !== undefined ? etapa : cand.etapa_atual;
       let novoStatus = cand.status;
       if (acao === 'avancar') {
-        novaEtapa = etapaAtual + 1;
-        let etapas = cand.vaga_etapas;
-        if (typeof etapas === 'string') { try { etapas = JSON.parse(etapas); } catch (_) { etapas = []; } }
-        const totalEtapas = Array.isArray(etapas) ? etapas.length : 7;
+        novaEtapa = cand.etapa_atual + 1;
+        const totalEtapas = Array.isArray(cand.vaga_etapas) ? cand.vaga_etapas.length : 7;
         if (novaEtapa >= totalEtapas) novoStatus = 'contratado';
         else novoStatus = 'em_andamento';
       } else if (acao === 'reprovar') {
@@ -530,11 +513,7 @@ function registrar(app, ctx) {
       } else if (acao === 'reabrir') {
         novoStatus = 'em_andamento';
       }
-      // O histórico pode vir nulo ou como objeto em candidaturas antigas.
-      // Normaliza antes de adicionar o novo evento para não quebrar a transição de etapa.
-      let hist = cand.historico;
-      if (typeof hist === 'string') { try { hist = JSON.parse(hist); } catch (_) { hist = []; } }
-      if (!Array.isArray(hist)) hist = [];
+      const hist = cand.historico || [];
       hist.push({ tipo: 'status', por: `empresa:${req.user.email}`, quando: new Date().toISOString(), acao, etapa: novaEtapa, status: novoStatus, parecer: parecer || null });
       await pool.query(`UPDATE candidaturas SET etapa_atual = $1, status = $2, historico = $3::jsonb, atualizada_em = NOW() WHERE id = $4`, [novaEtapa, novoStatus, JSON.stringify(hist), id]);
       res.json({ ok: true, etapa_atual: novaEtapa, status: novoStatus });
@@ -554,8 +533,8 @@ function registrar(app, ctx) {
       const check = await pool.query(`
         SELECT c.id FROM candidaturas c
         JOIN vagas v ON v.id = c.vaga_id
-        WHERE c.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $2 AND revogado_em IS NULL))
-      `, [id, empresa_id]);
+        WHERE c.id = $1 AND (v.id IN (SELECT vaga_id FROM empresa_vaga_acesso WHERE empresa_id = $3 AND revogado_em IS NULL))
+      `, [id, req.user.id, empresa_id]);
       if (check.rows.length === 0) return res.status(403).json({ erro: 'Candidatura não pertence a esta empresa' });
       const { rows } = await pool.query(`
         SELECT id, proposta_texto as texto, proposta_pdf_url as arquivo_url, proposta_pdf_public_id,
