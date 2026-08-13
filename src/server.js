@@ -572,7 +572,7 @@ app.post('/api/empresa/tickets', requireRecrutadorOuAdmin, async (req,res) => {
   try { const q=await pool.query(`INSERT INTO suporte_tickets(empresa_id,criado_por,assunto,descricao,prioridade) VALUES($1,$2,$3,$4,$5) RETURNING id,assunto,descricao,prioridade,status,criado_em`,[req.user.empresa_id,req.user.id,assunto,descricao,prioridade]); await audit(req,'support.ticket_created',{resource_type:'suporte_ticket',resource_id:q.rows[0].id,metadata:{empresa_id:req.user.empresa_id}}); res.status(201).json({ok:true,ticket:q.rows[0]}); } catch(e){console.error('[TICKET CREATE]',e.message);res.status(500).json({erro:'Não foi possível abrir o ticket'});}
 });
 app.get('/api/empresa/tickets', requireEmpresaViewer, async (req,res) => { try { const q=await pool.query(`SELECT id,assunto,descricao,prioridade,status,criado_em,atualizado_em,fechado_em FROM suporte_tickets WHERE empresa_id=$1 ORDER BY criado_em DESC LIMIT 100`,[req.user.empresa_id]); res.json({tickets:q.rows}); } catch(e){res.status(500).json({erro:'Não foi possível listar os tickets'});} });
-app.get('/api/saas/tickets', authGlobalRead, async (req,res) => { try { const q=await pool.query(`SELECT id,empresa_id,assunto,descricao,prioridade,status,criado_em,atualizado_em,fechado_em FROM suporte_tickets ORDER BY criado_em DESC LIMIT 200`); res.json({tickets:q.rows}); } catch(e){res.status(500).json({erro:'Não foi possível listar os tickets'});} });
+app.get('/api/saas/tickets', authGlobalRead, denyGlobalPrivateUntilSupport, async (req,res) => { try { const q=await pool.query(`SELECT id,empresa_id,assunto,descricao,prioridade,status,criado_em,atualizado_em,fechado_em FROM suporte_tickets ORDER BY criado_em DESC LIMIT 200`); res.json({tickets:q.rows}); } catch(e){res.status(500).json({erro:'Não foi possível listar os tickets'});} });
 app.patch('/api/saas/tickets/:id', authAdminOnly, async (req,res) => { const status=String(req.body?.status||''); if(!['aberto','em_atendimento','resolvido','fechado'].includes(status)) return res.status(400).json({erro:'Status inválido'}); try { const q=await pool.query(`UPDATE suporte_tickets SET status=$1,atualizado_em=NOW(),fechado_em=CASE WHEN $1 IN ('resolvido','fechado') THEN NOW() ELSE NULL END WHERE id=$2 RETURNING id,status,atualizado_em,fechado_em`,[status,Number(req.params.id)]); if(!q.rowCount)return res.status(404).json({erro:'Ticket não encontrado'}); await audit(req,'support.ticket_updated',{resource_type:'suporte_ticket',resource_id:q.rows[0].id,metadata:{status}});res.json({ok:true,ticket:q.rows[0]}); } catch(e){res.status(500).json({erro:'Não foi possível atualizar o ticket'});} });
 
 // ── CI: token admin sem 2FA ─────────────────────────────────────────────────
@@ -3498,6 +3498,11 @@ app.post('/api/admin/candidato/:id/deletar', authAdminOnly, denyGlobalPrivateUnt
     }
     const review = await pool.query(`SELECT r.id, r.empresa_id FROM lgpd_retention_reviews r WHERE r.id=$1 AND r.decisao='anonimizar'`, [reviewId]);
     if (!review.rowCount) return res.status(409).json({ erro: 'Revisão LGPD de anonimização não encontrada' });
+    const candidateCompanies = await pool.query(`SELECT DISTINCT v.empresa_id FROM vagas v JOIN candidaturas c ON c.vaga_id=v.id WHERE c.candidato_id=$1 AND v.empresa_id IS NOT NULL`, [candId]);
+    const companyIds = candidateCompanies.rows.map(r => Number(r.empresa_id));
+    if (!companyIds.includes(Number(review.rows[0].empresa_id))) return res.status(409).json({ erro: 'Revisão LGPD não corresponde às empresas do candidato' });
+    const backup = await cloudinary.search.expression(`resource_type:raw AND public_id:${backupId.replace(/[^a-zA-Z0-9_\/-]/g, '')}`).max_results(1).execute();
+    if (!backup.resources?.length) return res.status(409).json({ erro: 'Backup não encontrado no Cloudinary' });
     const holds = await pool.query(`SELECT 1 FROM empresas e WHERE e.legal_hold=true AND EXISTS (SELECT 1 FROM vagas v JOIN candidaturas c ON c.vaga_id=v.id WHERE c.candidato_id=$1 AND v.empresa_id=e.id) LIMIT 1`, [candId]);
     if (holds.rowCount) return res.status(409).json({ erro: 'Anonimização bloqueada por legal hold' });
     const { rows: cand } = await pool.query(
@@ -3511,13 +3516,17 @@ app.post('/api/admin/candidato/:id/deletar', authAdminOnly, denyGlobalPrivateUnt
       'SELECT arquivo_public_id, arquivo_tipo FROM documentos_candidatura WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE candidato_id = $1) AND arquivo_public_id IS NOT NULL',
       [candId]
     );
+    // Remove primeiro os assets externos e só avança se todos confirmarem.
+    // Assim uma falha nunca deixa PII armazenada fora do banco sem sinalização.
+    const assetResults = await Promise.all(docsAssets.rows.map(a => cloudinary.uploader.destroy(a.arquivo_public_id, {
+      resource_type: String(a.arquivo_tipo || '').startsWith('image/') ? 'image' : 'raw', type: 'authenticated'
+    })));
+    const assetFailures = assetResults.filter(r => !['ok', 'not found'].includes(String(r?.result || '').toLowerCase()));
+    if (assetFailures.length) return res.status(502).json({ erro: 'Não foi possível confirmar a remoção de todos os arquivos', codigo: 'LGPD_ASSET_DELETE_INCOMPLETE' });
     const docs = await pool.query(
       'DELETE FROM documentos_candidatura WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE candidato_id = $1) RETURNING id',
       [candId]
     );
-    await Promise.all(docsAssets.rows.map(a => cloudinary.uploader.destroy(a.arquivo_public_id, {
-      resource_type: String(a.arquivo_tipo || '').startsWith('image/') ? 'image' : 'raw', type: 'authenticated'
-    }).catch(() => {})));
     const arquivos = await pool.query(
       'DELETE FROM chat_arquivos WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE candidato_id = $1) RETURNING id',
       [candId]
