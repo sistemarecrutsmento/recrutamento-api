@@ -8884,9 +8884,17 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
         </div>
       </div>`;
       const text = `Olá, ${c.candidato_nome}!\\n\\n${c.empresa_nome} convidou você para participar do processo seletivo da vaga ${c.titulo}.\\nLocal: ${[c.cidade,c.estado].filter(Boolean).join('/') || 'Não informado'}\\n\\nVeja os detalhes e participe: ${vagaUrl}${mensagem ? `\\n\\nMensagem do recrutador:\\n${mensagem}` : ''}`;
-      await enviarEmail({ to: c.candidato_email, subject: `Convite para participar do processo seletivo — ${c.titulo}`, html, text });
-      await audit(req, 'empresa.candidato.invited', { resource_type: 'candidato', resource_id: candidatoId, metadata: { vaga_id: vagaId } });
-      res.json({ ok: true, email: c.candidato_email, vaga: { id: c.vaga_id, titulo: c.titulo } });
+      let emailEnviado = true;
+      try {
+        const entrega = await enviarEmail({ to: c.candidato_email, subject: `Convite para participar do processo seletivo — ${c.titulo}`, html, text });
+        emailEnviado = entrega?.ok !== false;
+      } catch (emailErr) {
+        // O convite continua válido; falha de provedor não desfaz a ação nem cria candidatura.
+        emailEnviado = false;
+        console.error('[empresa candidato convite email]', emailErr.message);
+      }
+      await audit(req, 'empresa.candidato.invited', { resource_type: 'candidato', resource_id: candidatoId, metadata: { vaga_id: vagaId, email_enviado: emailEnviado } });
+      res.json({ ok: true, email: c.candidato_email, email_enviado: emailEnviado, vaga: { id: c.vaga_id, titulo: c.titulo } });
     } catch (e) {
       console.error('[empresa candidato convite]', e.message);
       res.status(503).json({ erro: 'Não foi possível enviar o convite por e-mail' });
