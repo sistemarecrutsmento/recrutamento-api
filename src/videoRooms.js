@@ -39,6 +39,8 @@ async function access(req, id) {
   return (isCand||isRecruiter||isAdmin) ? {...r, participant_role:isCand?'candidate':'recruiter'} : null;
 }
 async function getOrCreate(req, interviewId) {
+  // Never persist an interview room that cannot issue usable participant tokens.
+  if (!enabled() || !/^wss:\/\//i.test(signalUrl())) return null;
   const a=await access(req, interviewId); if(!a) return null;
   const ttl=Math.min(Math.max(Number(process.env.VAGASIO_VIDEO_ROOM_TTL_SECONDS||7200),900),86400);
   const q=await pool.query(`INSERT INTO video_rooms(room_id,candidatura_id,entrevista_id,empresa_id,expires_at)
