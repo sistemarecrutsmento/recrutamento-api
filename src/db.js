@@ -597,7 +597,14 @@ async function init() {
     } catch (migrationErr) {
       console.error('[MIGRATION 028] Erro não tratado (mas segui):', migrationErr.message);
     }
-    console.log('Tabelas criadas/verificadas + migrations Fase 1-028 aplicadas');
+    try {
+      const { up: migration029 } = require('./migrations/029_lgpd_retention_reviews');
+      await migration029();
+      console.log('[MIGRATION 029] LGPD retention reviews OK');
+    } catch (migrationErr) {
+      console.error('[MIGRATION 029] Erro não tratado (mas segui):', migrationErr.message);
+    }
+    console.log('Tabelas criadas/verificadas + migrations Fase 1-029 aplicadas');
   } finally {
     client.release();
   }
