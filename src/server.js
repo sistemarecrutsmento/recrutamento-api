@@ -3221,29 +3221,14 @@ app.post('/api/candidatura/:id/documentos', authCandidato, async (req, res) => {
         });
       }
     }
-    // Apaga envios anteriores do mesmo tipo (candidato pode reenviar)
-    const tipos = documentos.map(d => d.tipo).filter(Boolean);
-    if (tipos.length) {
-      // Antes de apagar, tenta remover do Cloudinary também (best effort)
-      const { rows: antigos } = await pool.query(
-        `SELECT id, arquivo_public_id FROM documentos_candidatura WHERE candidatura_id = $1 AND tipo = ANY($2)`,
-        [candidaturaId, tipos]
-      );
-      for (const a of antigos) {
-        if (a.arquivo_public_id) {
-          cloudinary.uploader.destroy(a.arquivo_public_id).catch(() => {});
-        }
-      }
-      await pool.query('DELETE FROM documentos_candidatura WHERE candidatura_id = $1 AND tipo = ANY($2)', [candidaturaId, tipos]);
-    }
-    // Insere os novos
-    let salvos = 0;
-    for (const d of documentos) {
-      let arquivoUrl = null, arquivoPublicId = null;
-      if (d.arquivo_base64) {
-        // Sobe pro Cloudinary via data URI
-        const dataUri = d.arquivo_base64.startsWith('data:') ? d.arquivo_base64 : `data:${d.arquivo_tipo || 'application/octet-stream'};base64,${d.arquivo_base64}`;
-        try {
+    // Faz todos os uploads antes de tocar nos documentos antigos. Assim, uma
+    // falha parcial não apaga o envio anterior do candidato.
+    const preparados = [];
+    try {
+      for (const d of documentos) {
+        let arquivoUrl = null, arquivoPublicId = null;
+        if (d.arquivo_base64) {
+          const dataUri = d.arquivo_base64.startsWith('data:') ? d.arquivo_base64 : `data:${d.arquivo_tipo || 'application/octet-stream'};base64,${d.arquivo_base64}`;
           const r = await cloudinary.uploader.upload(dataUri, {
             folder: `vagas-io/candidatura-${candidaturaId}`,
             public_id: `${candidaturaId}_${d.tipo}_${Date.now()}`,
@@ -3252,19 +3237,65 @@ app.post('/api/candidatura/:id/documentos', authCandidato, async (req, res) => {
           });
           arquivoUrl = r.secure_url;
           arquivoPublicId = r.public_id;
-        } catch (upErr) {
-          console.error('[DOCS] cloudinary upload erro:', upErr.message);
-          return res.status(500).json({ erro: `Falha no upload do arquivo "${d.arquivo_nome || d.tipo}": ${upErr.message}` });
         }
+        preparados.push({ d, arquivoUrl, arquivoPublicId });
       }
-      await pool.query(
-        `INSERT INTO documentos_candidatura
-         (candidatura_id, tipo, categoria, valor_texto, arquivo_url, arquivo_public_id, arquivo_nome, arquivo_tipo, arquivo_tamanho, status, enviado_em)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pendente', NOW())`,
-        [candidaturaId, d.tipo, d.categoria || 'arquivo', d.valor_texto || null, arquivoUrl, arquivoPublicId, sanitizeFilename(d.arquivo_nome) || null, d.arquivo_tipo || null, d.arquivo_tamanho || null]
-      );
-      salvos++;
+    } catch (upErr) {
+      // Remove somente os novos uploads desta tentativa; os anteriores ficam intactos.
+      await Promise.all(preparados.filter(x => x.arquivoPublicId).map(x =>
+        cloudinary.uploader.destroy(x.arquivoPublicId, {
+          resource_type: String(x.d.arquivo_tipo || '').startsWith('image/') ? 'image' : 'raw',
+          type: 'authenticated'
+        }).catch(() => {})
+      ));
+      console.error('[DOCS] cloudinary upload erro:', upErr.message);
+      return res.status(500).json({ erro: 'Falha no upload de um dos documentos' });
     }
+
+    const tipos = documentos.map(d => d.tipo).filter(Boolean);
+    const client = await pool.connect();
+    let antigos = [];
+    let salvos = 0;
+    try {
+      await client.query('BEGIN');
+      if (tipos.length) {
+        const antigosResult = await client.query(
+          `SELECT id, arquivo_public_id, arquivo_tipo FROM documentos_candidatura WHERE candidatura_id = $1 AND tipo = ANY($2)`,
+          [candidaturaId, tipos]
+        );
+        antigos = antigosResult.rows;
+        await client.query('DELETE FROM documentos_candidatura WHERE candidatura_id = $1 AND tipo = ANY($2)', [candidaturaId, tipos]);
+      }
+      for (const item of preparados) {
+        const d = item.d;
+        await client.query(
+          `INSERT INTO documentos_candidatura
+           (candidatura_id, tipo, categoria, valor_texto, arquivo_url, arquivo_public_id, arquivo_nome, arquivo_tipo, arquivo_tamanho, status, enviado_em)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,'pendente', NOW())`,
+          [candidaturaId, d.tipo, d.categoria || 'arquivo', d.valor_texto || null, item.arquivoUrl, item.arquivoPublicId, sanitizeFilename(d.arquivo_nome) || null, d.arquivo_tipo || null, d.arquivo_tamanho || null]
+        );
+        salvos++;
+      }
+      await client.query('COMMIT');
+    } catch (dbErr) {
+      await client.query('ROLLBACK').catch(() => {});
+      await Promise.all(preparados.filter(x => x.arquivoPublicId).map(x =>
+        cloudinary.uploader.destroy(x.arquivoPublicId, {
+          resource_type: String(x.d.arquivo_tipo || '').startsWith('image/') ? 'image' : 'raw',
+          type: 'authenticated'
+        }).catch(() => {})
+      ));
+      throw dbErr;
+    } finally {
+      client.release();
+    }
+    // Limpeza best-effort somente depois do commit do novo conjunto.
+    await Promise.all(antigos.filter(a => a.arquivo_public_id).map(a =>
+      cloudinary.uploader.destroy(a.arquivo_public_id, {
+        resource_type: String(a.arquivo_tipo || '').startsWith('image/') ? 'image' : 'raw',
+        type: 'authenticated'
+      }).catch(() => {})
+    ));
     // Marca a etapa como "em_andamento" (candidato enviou) — admin ainda precisa revisar
     await pool.query(
       `UPDATE candidaturas SET etapa_atual = GREATEST(etapa_atual, $1) WHERE id = $2`,
