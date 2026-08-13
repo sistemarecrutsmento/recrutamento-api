@@ -590,7 +590,14 @@ async function init() {
     } catch (migrationErr) {
       console.error('[MIGRATION 027] Erro não tratado (mas segui):', migrationErr.message);
     }
-    console.log('Tabelas criadas/verificadas + migrations Fase 1-027 aplicadas');
+    try {
+      const { up: migration028 } = require('./migrations/028_suporte_tickets');
+      await migration028();
+      console.log('[MIGRATION 028] suporte/tickets OK');
+    } catch (migrationErr) {
+      console.error('[MIGRATION 028] Erro não tratado (mas segui):', migrationErr.message);
+    }
+    console.log('Tabelas criadas/verificadas + migrations Fase 1-028 aplicadas');
   } finally {
     client.release();
   }
