@@ -1130,7 +1130,7 @@ app.post('/api/candidato/analisar-curriculo', rateLimitByIp('upload'), async (re
 // Cria conta nova com email+senha (sem código de verificação).
 // Recebe dados básicos; o resto do perfil (endereço, formação, etc.) pode ser completado depois em /api/candidato/cadastrar.
 app.post('/api/candidato/cadastro', rateLimitLogin, async (req, res) => {
-  const { email, senha, nome, cpf, celular, data_nascimento, sexo, cidade, estado, formacao } = req.body;
+  const { email, senha, nome, cpf, celular, data_nascimento, sexo, cidade, estado, formacao, banco_talentos, recebe_comunicacoes } = req.body;
   if (!email || !senha || !nome) {
     return res.status(400).json({ erro: 'E-mail, senha e nome são obrigatórios' });
   }
@@ -1176,10 +1176,10 @@ app.post('/api/candidato/cadastro', rateLimitLogin, async (req, res) => {
   try {
     const senhaHash = await bcrypt.hash(senha, 10);
     const { rows } = await pool.query(
-      `INSERT INTO candidatos (email, senha_hash, nome, cpf, celular, data_nascimento, sexo, cidade, estado, formacao, email_verificado)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, true)
-       RETURNING id, email, nome`,
-      [emailLower, senhaHash, nome, cpf || null, celular || null, data_nascimento || null, sexo || null, cidade || null, estado || null, formacao || null]
+      `INSERT INTO candidatos (email, senha_hash, nome, cpf, celular, data_nascimento, sexo, cidade, estado, formacao, banco_talentos, recebe_comunicacoes, email_verificado)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, true)
+       RETURNING id, email, nome, banco_talentos, recebe_comunicacoes`,
+      [emailLower, senhaHash, nome, cpf || null, celular || null, data_nascimento || null, sexo || null, cidade || null, estado || null, formacao || null, !!banco_talentos, !!recebe_comunicacoes]
     );
 
     // FIX Etapa 2: access (15m) + refresh (7d, hash no DB)
@@ -1416,8 +1416,10 @@ app.put('/api/candidato/perfil', authCandidato, async (req, res) => {
         sobre_voce = COALESCE($19, sobre_voce),
         experiencia = COALESCE($20, experiencia),
         primeiro_emprego = COALESCE($21, primeiro_emprego),
-        areas_interesse = COALESCE($22, areas_interesse)
-       WHERE email = $23 RETURNING ${CANDIDATO_COLUNAS_PUBLICAS}`,
+        areas_interesse = COALESCE($22, areas_interesse),
+        banco_talentos = COALESCE($23, banco_talentos),
+        recebe_comunicacoes = COALESCE($24, recebe_comunicacoes)
+       WHERE email = $25 RETURNING ${CANDIDATO_COLUNAS_PUBLICAS}`,
       [
         d.nome, d.cpf, d.data_nascimento, d.sexo, d.celular,
         d.cep, d.estado, d.cidade, d.bairro, d.logradouro, d.numero, d.complemento,
@@ -1425,6 +1427,8 @@ app.put('/api/candidato/perfil', authCandidato, async (req, res) => {
         d.acessibilidade, d.sobre_voce, d.experiencia,
         d.primeiro_emprego === undefined ? null : !!d.primeiro_emprego,
         areasInteresse ? JSON.stringify(areasInteresse) : null,
+        d.banco_talentos === undefined ? null : !!d.banco_talentos,
+        d.recebe_comunicacoes === undefined ? null : !!d.recebe_comunicacoes,
         req.user.email
       ]
     );
@@ -8852,12 +8856,9 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
         JOIN empresa_vaga_acesso eva ON eva.vaga_id = v.id
           AND eva.empresa_id = $3 AND eva.revogado_em IS NULL
         WHERE c.id = $1
-          AND EXISTS (
-            SELECT 1 FROM candidaturas cx
-            JOIN empresa_vaga_acesso exa ON exa.vaga_id = cx.vaga_id
-              AND exa.empresa_id = $3 AND exa.revogado_em IS NULL
-            WHERE cx.candidato_id = c.id
-          )
+          AND c.banco_talentos = true
+          AND c.recebe_comunicacoes = true
+          AND c.anonimizado_em IS NULL
         LIMIT 1
       `, [candidatoId, vagaId, req.user.empresa_id]);
       if (!rows.length) return res.status(404).json({ erro: 'Candidato ou vaga não encontrado' });
@@ -9136,15 +9137,16 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
       );
       const vagaTags = tagRows.map(r => r.tag);
 
-      // Candidatos com candidatura nesta vaga
+      // Banco de Talentos com consentimento explícito; candidatura é opcional.
       const { rows: candidatos } = await pool.query(`
         SELECT c.id, c.nome, c.email, c.cidade, c.estado,
                c.areas_interesse, c.nivel_experiencia, c.competencias, c.foto_url,
                can.id AS candidatura_id, can.status, can.etapa_atual
         FROM candidatos c
-        JOIN candidaturas can ON can.candidato_id = c.id
-        WHERE can.vaga_id = $1
+        LEFT JOIN candidaturas can ON can.candidato_id = c.id AND can.vaga_id = $1
+        WHERE c.banco_talentos = true AND c.recebe_comunicacoes = true AND c.anonimizado_em IS NULL
         ORDER BY c.nome
+        LIMIT 200
       `, [vagaId]);
 
       // Calcular scores
