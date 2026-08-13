@@ -244,6 +244,19 @@ function requireRecrutadorOuAdmin(req, res, next) {
 
 // Viewer ou superior: usado em GETs. authEmpresa passa por todos os 3 roles
 // mas exige tipo=empresa. Viewers podem ler tudo da propria empresa.
+function requireFinanceiroEmpresa(req, res, next) {
+  return authMiddleware(req, res, () => {
+    if (req.user.tipo !== 'empresa') return res.status(403).json({ erro: 'Acesso apenas para usuarios de empresa' });
+    if (req.user.role !== EMPRESA_ROLES.ADMIN) {
+      return res.status(403).json({ erro: 'Operacao financeira restrita ao administrador da empresa' });
+    }
+    if (!req.user.empresa_id || typeof req.user.empresa_id !== 'number') {
+      return res.status(401).json({ erro: 'Token invalido: empresa_id ausente' });
+    }
+    return ensureEmpresaAccessAtivo(req, res, next);
+  });
+}
+
 function requireEmpresaViewer(req, res, next) {
   return authMiddleware(req, res, () => {
     if (req.user.tipo !== 'empresa') {
@@ -272,6 +285,7 @@ module.exports = {
   requireAdminEmpresa,
   requireAdminOuRecrutadorEquipe,
   requireRecrutadorOuAdmin,
+  requireFinanceiroEmpresa,
   requireEmpresaViewer,
   EMPRESA_ROLES,
   JWT_VERIFY_OPTIONS
