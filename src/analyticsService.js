@@ -114,9 +114,9 @@ async function metricasSaas({ periodo_inicio, periodo_fim, vaga_id } = {}) {
     pool.query(`SELECT COUNT(*) c ${base} AND evento IN ('login_candidato','empresa_login')${vagaFilter}`, argsVaga),
     pool.query(`
       SELECT vaga_id, COUNT(*) cnt
-      ${base} AND evento = 'vaga_visualizada' AND vaga_id IS NOT NULL
+      ${base} AND evento = 'vaga_visualizada' AND vaga_id IS NOT NULL${vagaFilter}
       GROUP BY vaga_id ORDER BY cnt DESC LIMIT 10
-    `, args),
+    `, argsVaga),
     pool.query(`
       SELECT DATE_TRUNC('day', criado_em) dia,
              evento, COUNT(*) cnt
@@ -182,9 +182,10 @@ async function metricasEmpresa({ empresa_id, periodo_inicio, periodo_fim, vaga_i
       FROM analytics_eventos ae
       LEFT JOIN vagas v ON v.id = ae.vaga_id
       WHERE ae.empresa_id = $1 AND ae.criado_em BETWEEN $2 AND $3
-        AND ae.evento = 'vaga_visualizada' AND ae.vaga_id IS NOT NULL
+        AND v.empresa_id = $1
+        AND ae.evento = 'vaga_visualizada' AND ae.vaga_id IS NOT NULL${vagaFilter}
       GROUP BY ae.vaga_id, v.titulo ORDER BY cnt DESC LIMIT 10
-    `, args),
+    `, argsVaga),
     pool.query(`
       SELECT evento, COUNT(*) cnt
       ${base} AND evento IN (

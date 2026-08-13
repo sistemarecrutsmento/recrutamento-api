@@ -89,6 +89,14 @@ async function performBackup() {
 
     for (const tabela of TABELAS) {
       try {
+        // O schema pode variar entre instalações antigas e o staging. Não
+        // interromper o backup por uma tabela opcional ausente.
+        const existe = await client.query('SELECT to_regclass($1) AS tabela', [tabela]);
+        if (!existe.rows[0]?.tabela) {
+          contagens[tabela] = 0;
+          console.warn(`[BACKUP] ${tabela}: tabela ausente, ignorada`);
+          continue;
+        }
         const sql = await dumpTable(client, tabela);
         if (sql) {
           partes.push(`-- ${tabela}`);
@@ -167,7 +175,7 @@ async function performBackup() {
 async function getBackupMetadata() {
   try {
     const result = await cloudinary.search
-      .expression(`folder:${FOLDER} AND public_id:${PUBLIC_ID_PREFIX}*`)
+      .expression(`resource_type:raw AND folder:${FOLDER}`)
       .sort_by('created_at', 'desc')
       .max_results(1)
       .execute();
@@ -190,7 +198,7 @@ async function getBackupMetadata() {
     };
   } catch (e) {
     console.error('[BACKUP META ERROR]', e.message);
-    return { ok: false, erro: e.message };
+    return { ok: false, erro: 'Falha ao consultar metadados do backup' };
   }
 }
 
