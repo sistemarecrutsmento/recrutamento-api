@@ -1786,12 +1786,14 @@ app.post('/api/candidato/candidatar/:vagaId', authCandidato, async (req, res) =>
       return res.status(400).json({ erro: 'ID de vaga inválido' });
     }
     const { rows: vagaRows } = await pool.query(
-      `SELECT id, status FROM vagas WHERE id = $1 FOR KEY SHARE`, [vagaId]
+      `SELECT id, status, empresa_id FROM vagas WHERE id = $1 FOR KEY SHARE`, [vagaId]
     );
     if (!vagaRows.length) return res.status(404).json({ erro: 'Vaga não encontrada' });
     if (['fechada', 'encerrada', 'cancelada', 'pausada'].includes(vagaRows[0].status)) {
       return res.status(409).json({ erro: 'Esta vaga não está aceitando candidaturas' });
     }
+    const limiteCandidaturas = await verificarLimitePlano(vagaRows[0].empresa_id, 'candidaturas_mes');
+    if (!limiteCandidaturas.ok) return res.status(403).json({ erro: 'Limite mensal de candidaturas do plano atingido', limite: limiteCandidaturas.limite, atual: limiteCandidaturas.atual });
     // etapa_atual=0: candidato acabou de se inscrever, está na etapa 0 (Inscrição) — semântica 0-indexed.
     // A unicidade no banco + ON CONFLICT protege contra dois cliques/requisições concorrentes.
     const { rows } = await pool.query(
@@ -5628,6 +5630,28 @@ app.post('/api/auth/trocar-senha-empresa', requireEmpresaViewer, async (req, res
 // Fluxo: cria a vaga + vincula automaticamente no empresa_vaga_acesso.
 // A vaga começa em rascunho por padrão; o status enviado pela empresa é
 // validado e respeitado para que a UI possa publicar imediatamente quando escolhido.
+async function verificarLimitePlano(empresaId, recurso) {
+  const { rows } = await pool.query(`
+    SELECT p.limite_vagas, p.limite_usuarios, p.limite_candidaturas_mes
+    FROM empresas e LEFT JOIN planos p ON p.id = e.plano_id
+    WHERE e.id = $1`, [empresaId]);
+  if (!rows.length) return { ok: false, erro: 'Empresa não encontrada' };
+  const limite = Number(rows[0][`limite_${recurso}`]);
+  if (!Number.isFinite(limite) || limite <= 0) return { ok: true };
+  let atual = 0;
+  if (recurso === 'vagas') {
+    const r = await pool.query(`SELECT COUNT(*)::int AS total FROM vagas WHERE empresa_id = $1 AND status <> 'cancelada'`, [empresaId]);
+    atual = r.rows[0].total;
+  } else if (recurso === 'usuarios') {
+    const r = await pool.query(`SELECT COUNT(*)::int AS total FROM empresa_usuarios WHERE empresa_id = $1 AND ativo = true`, [empresaId]);
+    atual = r.rows[0].total;
+  } else if (recurso === 'candidaturas_mes') {
+    const r = await pool.query(`SELECT COUNT(*)::int AS total FROM candidaturas c JOIN vagas v ON v.id = c.vaga_id WHERE v.empresa_id = $1 AND c.criada_em >= date_trunc('month', NOW())`, [empresaId]);
+    atual = r.rows[0].total;
+  }
+  return atual >= limite ? { ok: false, limite, atual } : { ok: true, limite, atual };
+}
+
 app.post('/api/empresa/vagas', requireRecrutadorOuAdmin, async (req, res) => {
   try {
     const v = req.body || {};
@@ -5635,6 +5659,8 @@ app.post('/api/empresa/vagas', requireRecrutadorOuAdmin, async (req, res) => {
       return res.status(400).json({ erro: 'Título é obrigatório (mínimo 2 caracteres)' });
     }
     const { empresa_id, empresa_nome } = req.user;
+    const limiteVagas = await verificarLimitePlano(empresa_id, 'vagas');
+    if (!limiteVagas.ok) return res.status(403).json({ erro: 'Limite de vagas do plano atingido', limite: limiteVagas.limite, atual: limiteVagas.atual });
 
     // Etapas padrão (mesmas do admin). Empresa pode customizar enviando array.
     const etapas = (Array.isArray(v.etapas) && v.etapas.length > 0)
@@ -7583,6 +7609,8 @@ process.on('unhandledRejection', (e) => {
     }
     if (!roleFinal) roleFinal = 'recrutador';
     try {
+      const limiteUsuarios = await verificarLimitePlano(empresa_id, 'usuarios');
+      if (!limiteUsuarios.ok) return res.status(403).json({ erro: 'Limite de usuários do plano atingido', limite: limiteUsuarios.limite, atual: limiteUsuarios.atual });
       const hash = await bcrypt.hash(senha, 10);
       const { rows } = await pool.query(`
         INSERT INTO empresa_usuarios (empresa_id, nome, email, senha_hash, cargo, criado_por, role, ativo)
