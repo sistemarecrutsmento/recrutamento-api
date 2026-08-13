@@ -8711,9 +8711,10 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
       const lim = Math.min(100, Math.max(1, parseInt(limite) || 20));
       const offset = (pg - 1) * lim;
 
-      // Base: candidatos que têm candidatura em vagas desta empresa
-      // Permite filtrar por qualquer combinação de campos existentes
-      let where = [`eva.empresa_id = $1`, empresaVagaFilialScope(req)];
+      // Base: candidatos que consentiram com o Banco de Talentos e possuem
+      // candidatura acessível à empresa OU nenhum processo anterior.
+      // Nunca inclui candidatos anonimizados ou sem consentimento.
+      let where = [`c.banco_talentos = true`, `c.recebe_comunicacoes = true`, `c.anonimizado_em IS NULL`, `(can.id IS NULL OR eva.empresa_id = $1)`, empresaVagaFilialScope(req, 'eva')];
       const params = [emp];
 
       if (q) {
@@ -8754,9 +8755,10 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
       const { rows: cnt } = await pool.query(`
         SELECT COUNT(DISTINCT c.id) AS total
         FROM candidatos c
-        JOIN candidaturas can ON can.candidato_id = c.id
-        JOIN vagas v          ON v.id = can.vaga_id
-        JOIN empresa_vaga_acesso eva ON eva.vaga_id = v.id AND eva.revogado_em IS NULL
+        LEFT JOIN candidaturas can ON can.candidato_id = c.id
+        LEFT JOIN vagas v ON v.id = can.vaga_id
+        LEFT JOIN empresa_vaga_acesso eva ON eva.vaga_id = v.id AND eva.revogado_em IS NULL
+          AND eva.empresa_id = $1
         WHERE ${whereSql}
       `, params);
       const total = parseInt(cnt[0].total);
@@ -8774,9 +8776,10 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
                v.titulo   AS ultima_vaga_titulo,
                v.id       AS ultima_vaga_id
         FROM candidatos c
-        JOIN candidaturas can ON can.candidato_id = c.id
-        JOIN vagas v          ON v.id = can.vaga_id
-        JOIN empresa_vaga_acesso eva ON eva.vaga_id = v.id AND eva.revogado_em IS NULL
+        LEFT JOIN candidaturas can ON can.candidato_id = c.id
+        LEFT JOIN vagas v ON v.id = can.vaga_id
+        LEFT JOIN empresa_vaga_acesso eva ON eva.vaga_id = v.id AND eva.revogado_em IS NULL
+          AND eva.empresa_id = $1
         WHERE ${whereSql}
         ORDER BY c.id, can.criada_em DESC
         LIMIT $${params.length - 1} OFFSET $${params.length}
@@ -8810,10 +8813,14 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
           c.sobre_voce, c.experiencia, c.foto_url, c.areas_interesse,
           c.nivel_experiencia, c.competencias, c.banco_talentos, c.criado_em
         FROM candidatos c
-        JOIN candidaturas can ON can.candidato_id = c.id
-        JOIN empresa_vaga_acesso eva ON eva.vaga_id = can.vaga_id AND eva.revogado_em IS NULL
-        WHERE c.id = $1 AND eva.revogado_em IS NULL AND eva.empresa_id = $2
-          AND ${empresaVagaFilialScope(req, 'eva')}
+        LEFT JOIN candidaturas can ON can.candidato_id = c.id
+        LEFT JOIN empresa_vaga_acesso eva ON eva.vaga_id = can.vaga_id AND eva.revogado_em IS NULL
+          AND eva.empresa_id = $2
+        WHERE c.id = $1
+          AND c.anonimizado_em IS NULL
+          AND ((c.banco_talentos = true AND c.recebe_comunicacoes = true)
+               OR eva.empresa_id = $2)
+          AND (can.id IS NULL OR ${empresaVagaFilialScope(req, 'eva')})
         LIMIT 1
       `, [candidatoId, empresaId]);
       if (!rows.length) return res.status(404).json({ erro: 'Candidato não encontrado' });
@@ -9180,6 +9187,26 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
       console.error('[empresa matches]', e);
       res.status(500).json({ erro: 'Erro ao calcular matches' });
     }
+  });
+
+  // Análise assistida segura: ranking explicável, sem enviar PII a provedor externo.
+  // A participação continua dependendo do candidato; este endpoint só apoia a triagem.
+  app.get('/api/empresa/vagas/:id/ia/triagem', requireEmpresaViewer, async (req, res) => {
+    try {
+      const vagaId = Number(req.params.id), empresaId = req.user.empresa_id;
+      const { rows: vagas } = await pool.query(`
+        SELECT v.id, v.titulo, v.area, v.cidade, v.estado, v.nivel
+        FROM vagas v JOIN empresa_vaga_acesso eva ON eva.vaga_id=v.id AND eva.empresa_id=$2 AND eva.revogado_em IS NULL
+        WHERE v.id=$1 AND ${empresaVagaFilialScope(req, 'eva')}`,[vagaId,empresaId]);
+      if (!vagas.length) return res.status(404).json({ erro: 'Vaga não encontrada ou sem acesso' });
+      const { rows: tags } = await pool.query('SELECT tag FROM vaga_tags WHERE vaga_id=$1',[vagaId]);
+      const { rows: candidatos } = await pool.query(`
+        SELECT id,nome,cidade,estado,areas_interesse,nivel_experiencia,competencias,foto_url
+        FROM candidatos WHERE banco_talentos=true AND recebe_comunicacoes=true AND anonimizado_em IS NULL
+        ORDER BY criado_em DESC LIMIT 200`);
+      const ranking = candidatos.map(c => { const m=calcularMatch(c,vagas[0],tags.map(x=>x.tag)); return { candidato_id:c.id,nome:c.nome,cidade:c.cidade,estado:c.estado,foto_url:c.foto_url,score:m.score,detalhes:m.detalhes }; }).sort((a,b)=>b.score-a.score);
+      res.json({ vaga_id:vagaId, modo:'triagem_explicável', sem_decisão_automática:true, participacao_exigida:true, ranking });
+    } catch(e) { console.error('[triagem assistida]',e); res.status(500).json({ erro:'Erro ao gerar triagem' }); }
   });
 
   // GET /api/candidato/vagas/:id/match — score do próprio candidato naquela vaga
