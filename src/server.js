@@ -3433,7 +3433,7 @@ app.get('/api/candidatura/:id/documentos/:docId/arquivo', authCandidato, async (
 // POST /api/admin/candidato/:id/deletar { confirm: 'SIM_DELETAR' }
 // Apaga o candidato, suas candidaturas, documentos e mensagens de chat (cascade manual).
 // Operação IRREVERSÍVEL — exige confirmação textual.
-app.post('/api/admin/candidato/:id/deletar', authAdminOnly, denyGlobalPrivateUntilSupport, async (req, res) => {
+app.post('/api/admin/candidato/:id/deletar', authAdminOnly, async (req, res) => {
   try {
     const candId = Number(req.params.id);
     if (!candId) return res.status(400).json({ erro: 'id inválido' });
