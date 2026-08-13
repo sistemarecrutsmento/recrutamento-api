@@ -10234,6 +10234,12 @@ app.get('/api/admin/me', authAdminOnly, async (req, res) => {
           AND assinatura_vence_em IS NOT NULL
           AND assinatura_vence_em::timestamp + INTERVAL '2 days' <= NOW()
       `);
+      // Expiração LGPD é marcada para revisão; não há exclusão automática sem legal hold.
+      await pool.query(`
+        UPDATE empresas SET retencao_status = 'review_due'
+        WHERE ativo = false AND retencao_status = 'scheduled'
+          AND retencao_ate IS NOT NULL AND retencao_ate <= NOW()
+      `);
     } catch (e) {
       console.error('[trial] processamento diário falhou:', e.message);
     }
