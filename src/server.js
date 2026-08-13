@@ -48,6 +48,11 @@ const ADMIN_NOTIF_EMAIL = process.env.ADMIN_NOTIF_EMAIL || process.env.ADMIN_EMA
 const { authMiddleware, authCandidato, authAdmin, authGlobalRead, authEmpresa, authAdminOnly, denyGlobalPrivateUntilSupport, authCandidatoOrEmpresaOrAdmin, authCandidatoOrAdminStrict, requireAdminEmpresa, requireAdminOuRecrutadorEquipe, requireRecrutadorOuAdmin, requireFinanceiroEmpresa, requireEmpresaViewer, JWT_VERIFY_OPTIONS } = require('./auth');
 const { sanitizeText, sanitizeFilename, escapeContentDispositionFilename } = require('./sanitize');
 
+// Escapa valores dinâmicos antes de inseri-los nos e-mails HTML.
+function escapeEmailHtml(value) {
+  return String(value || '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
+}
+
 // =========================================================================
 // WHITELISTS DE COLUNAS (defesa contra vazamento de dados sensíveis)
 // =========================================================================
