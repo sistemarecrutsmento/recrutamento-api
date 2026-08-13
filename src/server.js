@@ -567,11 +567,20 @@ app.post('/api/ci/admin-token', async (req, res) => {
     return res.status(401).json({ erro: 'Não autorizado' });
   }
   try {
-    // Busca admin SaaS real — não cria usuário fantasma
-    const { rows } = await pool.query(
-      `SELECT id, email, nome, role FROM admin_users WHERE is_saas = true ORDER BY id LIMIT 1`
-    );
-    if (!rows.length) return res.status(404).json({ erro: 'Admin SaaS não encontrado' });
+    // Busca um administrador real. Ambientes antigos do VagasIO usam `admins`,
+    // enquanto versões SaaS mais novas usam `admin_users`; o fallback evita que
+    // o endpoint de CI dependa de uma tabela inexistente no staging.
+    let rows;
+    try {
+      ({ rows } = await pool.query(
+        `SELECT id, email, nome, role FROM admin_users WHERE is_saas = true ORDER BY id LIMIT 1`
+      ));
+    } catch (_) {
+      ({ rows } = await pool.query(
+        `SELECT id, email, nome, role FROM admins ORDER BY id LIMIT 1`
+      ));
+    }
+    if (!rows.length) return res.status(404).json({ erro: 'Administrador de staging não encontrado' });
     const admin = rows[0];
     const token = criarAccessToken({
       id: admin.id, email: admin.email, nome: admin.nome, tipo: 'admin',
