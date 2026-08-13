@@ -10116,14 +10116,24 @@ app.get('/api/admin/me', authAdminOnly, async (req, res) => {
       if (!esperado || !recebido || recebido !== esperado) return res.status(401).json({ ok: false });
       const payload = req.body || {}, eventId = String(payload.id || ''), evento = String(payload.event || '');
       if (!eventId || !evento) return res.status(400).json({ ok: false, erro: 'Evento inválido' });
-      const saved = await pool.query(`INSERT INTO asaas_webhook_events (event_id,event,payload) VALUES ($1,$2,$3) ON CONFLICT (event_id) DO NOTHING RETURNING id`, [eventId, evento, payload]);
-      if (!saved.rowCount) return res.json({ ok: true, duplicado: true });
       const recurso = payload.subscription || payload.payment || {};
       const customerId = recurso.customer || null;
       const subscriptionId = recurso.id && String(recurso.object || '').toLowerCase() === 'subscription' ? recurso.id : (recurso.subscription || null);
       const empresaRef = Number(recurso.externalReference || payload.externalReference) || null;
+      let targetId = null;
       if (customerId || subscriptionId || empresaRef) {
-        const params = [customerId, subscriptionId, empresaRef];
+        const matches = await pool.query(`
+          SELECT DISTINCT id FROM empresas
+          WHERE ($1::text IS NOT NULL AND asaas_customer_id = $1)
+             OR ($2::text IS NOT NULL AND asaas_subscription_id = $2)
+             OR ($3::integer IS NOT NULL AND id = $3)
+        `, [customerId, subscriptionId, empresaRef]);
+        if (matches.rows.length > 1) return res.status(409).json({ ok: false, erro: 'Identificadores de pagamento apontam para empresas diferentes' });
+        targetId = matches.rows[0]?.id || null;
+      }
+      const saved = await pool.query(`INSERT INTO asaas_webhook_events (event_id,event,payload) VALUES ($1,$2,$3) ON CONFLICT (event_id) DO NOTHING RETURNING id`, [eventId, evento, payload]);
+      if (!saved.rowCount) return res.json({ ok: true, duplicado: true });
+      if (targetId) {
         let extra = '';
         const ativos = ['PAYMENT_CONFIRMED', 'PAYMENT_RECEIVED'];
         const vencidos = ['PAYMENT_OVERDUE', 'PAYMENT_DUNNING_RECEIVED'];
@@ -10132,7 +10142,7 @@ app.get('/api/admin/me', authAdminOnly, async (req, res) => {
         else if (vencidos.includes(evento)) extra = ", assinatura_status = 'past_due', ativo = true";
         else if (cancelados.includes(evento)) extra = ", assinatura_status = 'canceled', ativo = false";
         else if (evento === 'SUBSCRIPTION_CREATED' || evento === 'SUBSCRIPTION_UPDATED') extra = ", pagamento_configurado = true";
-        await pool.query(`UPDATE empresas SET asaas_customer_id = COALESCE(asaas_customer_id, $1), asaas_subscription_id = COALESCE($2, asaas_subscription_id), assinatura_vence_em = COALESCE($4::date, assinatura_vence_em)${extra} WHERE id = COALESCE($3, id) OR asaas_customer_id = $1 OR asaas_subscription_id = $2`, [customerId, subscriptionId, empresaRef, recurso.nextDueDate || null]);
+        await pool.query(`UPDATE empresas SET asaas_customer_id = COALESCE(asaas_customer_id, $1), asaas_subscription_id = COALESCE($2, asaas_subscription_id), assinatura_vence_em = COALESCE($4::date, assinatura_vence_em)${extra} WHERE id = $3`, [customerId, subscriptionId, targetId, recurso.nextDueDate || null]);
       }
       res.json({ ok: true });
     } catch (e) {
