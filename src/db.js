@@ -1,5 +1,6 @@
 // force-deploy: 2026-07-28T17:53:11Z
 const { Pool } = require('pg');
+const { triagemAmbienteAutorizado } = require('./triagemConfig');
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -530,7 +531,38 @@ async function init() {
       await migration019();
       console.log('[MIGRATION 019] video_rooms OK');
     } catch (migrationErr) { console.error('[MIGRATION 019] Erro não tratado (mas segui):', migrationErr.message); }
-    console.log('Tabelas criadas/verificadas + migrations Fase 1-019 aplicadas');
+
+    // Triagem IA fica desligada por padrão. A tabela só é criada no ambiente
+    // explicitamente habilitado para evitar qualquer impacto em produção.
+    const triagemHabilitada = ['1', 'true', 'yes', 'sim', 'on']
+      .includes(String(process.env.TRIAGEM_IA_ENABLED || '').toLowerCase());
+    const triagemAmbientePermitido = triagemAmbienteAutorizado();
+    if (triagemHabilitada && triagemAmbientePermitido) {
+      try {
+        const { up: migration021 } = require('./migrations/021_triagem_ia');
+        await migration021();
+        console.log('[MIGRATION 021] candidatura_analises_ia OK');
+      } catch (migrationErr) {
+        console.error('[MIGRATION 021] Erro não tratado (mas segui):', migrationErr.message);
+      }
+    } else if (triagemHabilitada) {
+      console.warn('[MIGRATION 021] bloqueada: ambiente não autorizado para Triagem IA');
+    }
+    try {
+      const { up: migration022 } = require('./migrations/022_integridade_candidaturas');
+      await migration022();
+      console.log('[MIGRATION 022] unicidade de candidaturas OK');
+    } catch (migrationErr) {
+      console.error('[MIGRATION 022] Erro não tratado (mas segui):', migrationErr.message);
+    }
+    try {
+      const { up: migration023 } = require('./migrations/023_modo_suporte');
+      await migration023();
+      console.log('[MIGRATION 023] modo de suporte OK');
+    } catch (migrationErr) {
+      console.error('[MIGRATION 023] Erro não tratado (mas segui):', migrationErr.message);
+    }
+    console.log('Tabelas criadas/verificadas + migrations Fase 1-023 aplicadas');
   } finally {
     client.release();
   }
@@ -571,6 +603,6 @@ async function inserirNotificacao(client, user_type, user_id, tipo, titulo, mens
     return { ok: true, id: r.rows[0]?.id };
   } catch (e) {
     console.error('[notificacao] Falha ao inserir:', e.message);
-    return { ok: false, erro: e.message };
+    return { ok: false, erro: 'Falha ao registrar notificação' };
   }
 }
