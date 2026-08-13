@@ -576,7 +576,14 @@ async function init() {
     } catch (migrationErr) {
       console.error('[MIGRATION 025] Erro não tratado (mas segui):', migrationErr.message);
     }
-    console.log('Tabelas criadas/verificadas + migrations Fase 1-025 aplicadas');
+    try {
+      const { up: migration026 } = require('./migrations/026_entrevistadores');
+      await migration026();
+      console.log('[MIGRATION 026] entrevistadores de entrevista OK');
+    } catch (migrationErr) {
+      console.error('[MIGRATION 026] Erro não tratado (mas segui):', migrationErr.message);
+    }
+    console.log('Tabelas criadas/verificadas + migrations Fase 1-026 aplicadas');
   } finally {
     client.release();
   }
