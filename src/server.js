@@ -1086,7 +1086,8 @@ app.post('/api/candidato/analisar-curriculo', rateLimitByIp('upload'), async (re
   } catch (e) {
     console.error('[CURRICULO PDF]', e.message);
     const status = e.code === 'PDF_SEM_TEXTO' ? 422 : 422;
-    return res.status(status).json({ erro: e.message || 'Não foi possível ler este PDF. Você pode preencher o cadastro manualmente.' });
+    console.error('[PDF CURRICULO]', e.message);
+    return res.status(status).json({ erro: 'Não foi possível ler este PDF. Você pode preencher o cadastro manualmente.' });
   }
 });
 
@@ -1745,16 +1746,31 @@ app.post('/api/candidato/candidatar/:vagaId', authCandidato, async (req, res) =>
   if (c.length === 0) return res.status(400).json({ erro: 'Complete seu cadastro antes de se candidatar' });
 
   try {
-    // etapa_atual=0: candidato acabou de se inscrever, está na etapa 0 (Inscrição) — semântica 0-indexed
-    // (o admin trata etapa_atual=N como "próxima a fazer é N+1", ver comentário em analisar.html linha 356)
+    const vagaId = Number(req.params.vagaId);
+    if (!Number.isInteger(vagaId) || vagaId <= 0) {
+      return res.status(400).json({ erro: 'ID de vaga inválido' });
+    }
+    const { rows: vagaRows } = await pool.query(
+      `SELECT id, status FROM vagas WHERE id = $1 FOR KEY SHARE`, [vagaId]
+    );
+    if (!vagaRows.length) return res.status(404).json({ erro: 'Vaga não encontrada' });
+    if (['fechada', 'encerrada', 'cancelada', 'pausada'].includes(vagaRows[0].status)) {
+      return res.status(409).json({ erro: 'Esta vaga não está aceitando candidaturas' });
+    }
+    // etapa_atual=0: candidato acabou de se inscrever, está na etapa 0 (Inscrição) — semântica 0-indexed.
+    // A unicidade no banco + ON CONFLICT protege contra dois cliques/requisições concorrentes.
     const { rows } = await pool.query(
       `INSERT INTO candidaturas (vaga_id, candidato_id, status, etapa_atual, historico)
        VALUES ($1, $2, 'em_andamento', 0, $3)
+       ON CONFLICT (vaga_id, candidato_id) DO NOTHING
        RETURNING id, vaga_id, candidato_id, status, etapa_atual, historico, criada_em`,
-      [req.params.vagaId, c[0].id, JSON.stringify([
+      [vagaId, c[0].id, JSON.stringify([
         { etapa: 0, status: 'concluida', acao: 'inscricao', data: new Date().toISOString(), mensagem: 'Inscrição realizada' }
       ])]
     );
+    if (!rows.length) {
+      return res.status(409).json({ erro: 'Você já possui uma candidatura para esta vaga' });
+    }
     // E-mail de boas-vindas: inscrição recebida (em background, não trava a response)
     try {
       const { rows: vd } = await pool.query(
@@ -2034,6 +2050,63 @@ app.post('/api/admin/login', rateLimitLogin, async (req, res) => {
 });
 
 // ============================================================
+// MODO DE SUPORTE — sessão explícita, temporária e somente leitura
+// ============================================================
+app.post('/api/admin/suporte/iniciar', authAdminOnly, async (req, res) => {
+  try {
+    const motivo = typeof req.body?.motivo === 'string' ? sanitizeText(req.body.motivo).trim().slice(0, 1000) : '';
+    if (!motivo) return res.status(400).json({ erro: 'Motivo obrigatório para iniciar o Modo de Suporte' });
+    const escopo = req.body?.escopo;
+    if (!escopo || typeof escopo !== 'object' || Array.isArray(escopo) ||
+        (!escopo.amplo && (!escopo.tipo || !Array.isArray(escopo.ids) || escopo.ids.length === 0))) {
+      return res.status(400).json({ erro: 'Escopo obrigatório: informe amplo=true ou tipo e ids específicos' });
+    }
+    const tiposEscopo = new Set(['candidato', 'candidatura', 'vaga', 'empresa', 'entrevista', 'documento']);
+    if (escopo.amplo !== true && (!tiposEscopo.has(String(escopo.tipo)) || escopo.ids.length > 100)) {
+      return res.status(400).json({ erro: 'Tipo de escopo inválido ou quantidade de IDs excedida' });
+    }
+    if (escopo.amplo !== true && escopo.ids.some(id => !Number.isInteger(Number(id)) || Number(id) <= 0)) {
+      return res.status(400).json({ erro: 'Os ids do escopo devem ser inteiros positivos' });
+    }
+    const minutos = Number(req.body?.duracao_minutos ?? 30);
+    if (!Number.isInteger(minutos) || minutos < 1 || minutos > 120) {
+      return res.status(400).json({ erro: 'Duração deve estar entre 1 e 120 minutos' });
+    }
+    const token = crypto.randomBytes(48).toString('hex');
+    const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+    const expira = new Date(Date.now() + minutos * 60 * 1000);
+    const q = await pool.query(`
+      INSERT INTO sessoes_suporte (token_hash, iniciado_por, motivo, escopo, expira_em)
+      VALUES ($1, $2, $3, $4::jsonb, $5)
+      RETURNING id, iniciado_em, expira_em, somente_leitura, escopo
+    `, [tokenHash, req.user.id, motivo, JSON.stringify(escopo), expira.toISOString()]);
+    await audit(req, 'support.session_started', { resource_type: 'support_session', resource_id: q.rows[0].id, metadata: { motivo, escopo, duracao_minutos: minutos, somente_leitura: true } });
+    res.status(201).json({ ok: true, modo_suporte: true, token, sessao: q.rows[0] });
+  } catch (e) {
+    console.error('[SUPORTE INICIAR]', e.message);
+    res.status(500).json({ erro: 'Não foi possível iniciar o Modo de Suporte' });
+  }
+});
+
+app.post('/api/admin/suporte/encerrar', authAdminOnly, async (req, res) => {
+  const raw = req.headers['x-support-session'];
+  if (!raw || typeof raw !== 'string') return res.status(400).json({ erro: 'Sessão de suporte não informada' });
+  const hash = crypto.createHash('sha256').update(raw).digest('hex');
+  const q = await pool.query(`UPDATE sessoes_suporte SET encerrado_em = NOW(), encerrado_por = $1 WHERE encerrado_por IS NULL AND token_hash = $2 AND iniciado_por = $1 AND encerrado_em IS NULL RETURNING id`, [req.user.id, hash]);
+  if (!q.rowCount) return res.status(404).json({ erro: 'Sessão de suporte não encontrada ou já encerrada' });
+  await audit(req, 'support.session_ended', { resource_type: 'support_session', resource_id: q.rows[0].id });
+  res.json({ ok: true, modo_suporte: false });
+});
+
+app.get('/api/admin/suporte/status', authAdminOnly, async (req, res) => {
+  const raw = req.headers['x-support-session'];
+  if (!raw || typeof raw !== 'string') return res.json({ modo_suporte: false });
+  const hash = crypto.createHash('sha256').update(raw).digest('hex');
+  const q = await pool.query(`SELECT id, iniciado_em, expira_em, escopo, somente_leitura FROM sessoes_suporte WHERE token_hash = $1 AND iniciado_por = $2 AND encerrado_em IS NULL AND expira_em > NOW()`, [hash, req.user.id]);
+  res.json({ modo_suporte: !!q.rowCount, sessao: q.rows[0] || null });
+});
+
+// ============================================================
 // 2FA — Verificar código (segunda etapa)
 // ============================================================
 app.post('/api/admin/2fa/verificar', rateLimitByIp('twofa'), async (req, res) => {
@@ -2198,7 +2271,7 @@ app.get('/api/admin/_diag-schema-fase1', authAdminOnly, async (req, res) => {
     });
   } catch (e) {
     console.error('[DIAG SCHEMA]', e);
-    res.status(500).json({ erro: 'Erro no diagnóstico', detalhes: e.message });
+    return erroInterno(req, res, e, 'api-diagnostico-schema');
   }
 });
 
@@ -2806,8 +2879,28 @@ app.get('/api/admin/vagas', authAdmin, async (req, res) => {
   }
 });
 
+const STATUS_VAGA_VALIDOS = new Set(['rascunho', 'publicada', 'pausada', 'fechada', 'encerrada', 'cancelada']);
+const TRANSICOES_VAGA = {
+  rascunho: new Set(['rascunho', 'publicada', 'cancelada']),
+  publicada: new Set(['publicada', 'pausada', 'fechada', 'encerrada', 'cancelada']),
+  pausada: new Set(['pausada', 'publicada', 'fechada', 'encerrada', 'cancelada']),
+  fechada: new Set(['fechada', 'publicada', 'encerrada']),
+  encerrada: new Set(['encerrada']),
+  cancelada: new Set(['cancelada'])
+};
+function transicaoVagaPermitida(atual, proximo) {
+  return STATUS_VAGA_VALIDOS.has(proximo) && (TRANSICOES_VAGA[atual] || new Set()).has(proximo);
+}
+
 app.put('/api/admin/vagas/:id', authAdminOnly, async (req, res) => {
   const v = req.body;
+  if (v.status !== undefined) {
+    const atual = await pool.query('SELECT status FROM vagas WHERE id = $1', [req.params.id]);
+    if (!atual.rows.length) return res.status(404).json({ erro: 'Vaga não encontrada' });
+    if (!transicaoVagaPermitida(atual.rows[0].status, v.status)) {
+      return res.status(409).json({ erro: `Transição de vaga inválida: ${atual.rows[0].status} → ${v.status}` });
+    }
+  }
   // Monta query dinâmica para permitir atualizar etapas opcionalmente
   const updates = [];
   const values = [];
@@ -3475,6 +3568,9 @@ app.post('/api/admin/candidatura/:id/aprovar-documentos', authAdminOnly, denyGlo
        WHERE c.id = $1`, [candId]);
     if (cRows.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
     const cand = cRows[0];
+    if (['contratado', 'rejeitado', 'reprovado', 'cancelado'].includes(cand.status)) {
+      return res.status(409).json({ erro: 'Candidatura encerrada; não é possível aprovar documentos' });
+    }
 
     // 2) Listar docs da candidatura e checar quais foram ENVIADOS
     const { rows: docs } = await pool.query(
@@ -3505,13 +3601,8 @@ app.post('/api/admin/candidatura/:id/aprovar-documentos', authAdminOnly, denyGlo
       return res.status(400).json({ erro: 'Nenhum documento enviado ainda.' });
     }
 
-    // 3) Marcar TODOS os docs como aprovados
-    await pool.query(
-      `UPDATE documentos_candidatura SET status = 'aprovado', justificativa_admin = 'Aprovado em lote', revisado_em = NOW()
-       WHERE candidatura_id = $1 AND status != 'aprovado'`,
-      [candId]
-    );
-
+    // 3) A aprovação dos documentos e o avanço são uma única operação SQL.
+    // O CTE bloqueia a candidatura e impede que duas requisições avancem a mesma etapa.
     // 4) Avançar etapa
     const novaEtapa = (cand.etapa_atual || 0) + 1;
     let totalEtapas = 7;
@@ -3531,10 +3622,28 @@ app.post('/api/admin/candidatura/:id/aprovar-documentos', authAdminOnly, denyGlo
       data: new Date().toISOString(),
       por: req.user.nome
     });
-    await pool.query(
-      'UPDATE candidaturas SET status = $1, etapa_atual = $2, historico = $3 WHERE id = $4',
-      [novoStatus, novaEtapa, JSON.stringify(historico), candId]
+    const avancou = await pool.query(
+      `WITH alvo AS (
+         SELECT id FROM candidaturas
+         WHERE id = $4 AND etapa_atual = $5 AND status = $6
+         FOR UPDATE
+       ), docs_aprovados AS (
+         UPDATE documentos_candidatura d
+         SET status = 'aprovado', justificativa_admin = 'Aprovado em lote', revisado_em = NOW()
+         FROM alvo
+         WHERE d.candidatura_id = alvo.id AND d.status != 'aprovado'
+         RETURNING d.id
+       )
+       UPDATE candidaturas c
+       SET status = $1, etapa_atual = $2, historico = $3, atualizada_em = NOW()
+       FROM alvo
+       WHERE c.id = alvo.id
+       RETURNING c.id`,
+      [novoStatus, novaEtapa, JSON.stringify(historico), candId, cand.etapa_atual, cand.status]
     );
+    if (avancou.rowCount !== 1) {
+      return res.status(409).json({ erro: 'A candidatura foi alterada por outra requisição. Recarregue e tente novamente.' });
+    }
 
     // FASE 7 — notificação no feed global
     inserirNotificacao(pool, 'empresa', cand.empresa_id, 'docs_aprovados',
@@ -3861,10 +3970,34 @@ app.post('/api/admin/candidatura/:id/status', authAdminOnly, denyGlobalPrivateUn
   if (c.length === 0) return res.status(404).json({ erro: 'Candidatura não encontrada' });
 
   const cand = c[0];
+  const STATUS_CANDIDATURA_VALIDOS = new Set(['em_analise', 'em_andamento', 'rejeitado', 'reprovado', 'cancelado', 'contratado']);
+  const ACOES_STATUS_VALIDAS = new Set(['avancar', 'reprovar', 'reabrir', 'aprovar']);
+  if (acao && !ACOES_STATUS_VALIDAS.has(acao)) {
+    return res.status(400).json({ erro: 'Ação de candidatura inválida' });
+  }
+  if (status && !STATUS_CANDIDATURA_VALIDOS.has(status)) {
+    return res.status(400).json({ erro: 'Status de candidatura inválido' });
+  }
+  if (etapa !== undefined && (!Number.isInteger(Number(etapa)) || Number(etapa) < 0)) {
+    return res.status(400).json({ erro: 'Etapa inválida' });
+  }
+  const TERMINAIS = new Set(['rejeitado', 'reprovado', 'cancelado', 'contratado']);
+  if (TERMINAIS.has(cand.status) && acao !== 'reabrir') {
+    return res.status(409).json({ erro: 'Candidatura encerrada; reabra antes de alterar' });
+  }
+  if (acao === 'reabrir' && !TERMINAIS.has(cand.status)) {
+    return res.status(409).json({ erro: 'Somente candidaturas encerradas podem ser reabertas' });
+  }
   const historico = Array.isArray(cand.historico) ? cand.historico : [];
   const observacoes = (cand.observacoes_etapas && typeof cand.observacoes_etapas === 'object') ? { ...cand.observacoes_etapas } : {};
-  let novoStatus = status;
+  let novoStatus = status ?? cand.status;
   let novaEtapa = etapa ?? cand.etapa_atual;
+  if (!acao && status === undefined && etapa === undefined && !mensagem && !comentario) {
+    return res.status(400).json({ erro: 'Informe uma ação, status, etapa ou comentário' });
+  }
+  if (etapa !== undefined && acao !== 'avancar' && acao !== 'reabrir' && Number(etapa) !== Number(cand.etapa_atual)) {
+    return res.status(409).json({ erro: 'A etapa só pode avançar pela ação avançar' });
+  }
 
   if (acao === 'avancar') {
     // Trava: se a etapa atual for a "Coleta de Documentos" (índice 4) e a vaga tiver 5 etapas
@@ -3943,10 +4076,24 @@ app.post('/api/admin/candidatura/:id/status', authAdminOnly, denyGlobalPrivateUn
     }
   } else if (acao === 'reprovar') {
     novoStatus = 'rejeitado';
+  } else if (acao === 'aprovar') {
+    novoStatus = 'em_andamento';
   } else if (acao === 'reabrir') {
     novoStatus = 'em_analise';
   }
 
+  let totalEtapasStatus = 7;
+  try {
+    const etapasStatus = typeof cand.etapas === 'string' ? JSON.parse(cand.etapas) : cand.etapas;
+    if (Array.isArray(etapasStatus) && etapasStatus.length) totalEtapasStatus = etapasStatus.length;
+  } catch (_) {}
+  if (novoStatus === 'contratado' && Number(novaEtapa) < totalEtapasStatus) {
+    return res.status(409).json({ erro: 'A candidatura só pode ser contratada ao concluir todas as etapas' });
+  }
+  if (acao !== 'avancar' && acao !== 'reabrir' && Number(novaEtapa) !== Number(cand.etapa_atual)) {
+    return res.status(409).json({ erro: 'A etapa só pode mudar pela ação avançar' });
+  }
+  const etapaMudou = Number(novaEtapa) !== Number(cand.etapa_atual);
   historico.push({ etapa: novaEtapa, status: novoStatus, mensagem, acao, data: new Date().toISOString(), por: req.user.nome || req.user.email || 'Administrador Global' });
 
   // Se o admin mandou um comentário, salva no índice da etapa ATUAL (a que ele tava atuando)
@@ -3957,7 +4104,7 @@ app.post('/api/admin/candidatura/:id/status', authAdminOnly, denyGlobalPrivateUn
 
   const atualizacao = await pool.query(
     `UPDATE candidaturas
-     SET status = $1, etapa_atual = $2, historico = $3, observacoes_etapas = $4
+     SET status = $1, etapa_atual = $2, historico = $3, observacoes_etapas = $4, atualizada_em = NOW()
      WHERE id = $5 AND etapa_atual = $6 AND status = $7`,
     [novoStatus, novaEtapa, JSON.stringify(historico), JSON.stringify(observacoes), req.params.id, cand.etapa_atual, cand.status]
   );
@@ -4455,16 +4602,25 @@ app.post('/api/admin/candidatura/:id/enviar-proposta', authAdminOnly, denyGlobal
     por: req.user.nome || req.user.email || 'Administrador Global'
   });
 
-  await pool.query(
+  const propostaGravada = await pool.query(
     `UPDATE candidaturas
      SET proposta_texto = $1,
          proposta_pdf_url = $2,
          proposta_pdf_public_id = $3,
          proposta_enviada_em = NOW(),
-         historico = $4
-     WHERE id = $5`,
+         historico = $4,
+         atualizada_em = NOW()
+     WHERE id = $5
+       AND proposta_enviada_em IS NULL
+       AND proposta_aceita_em IS NULL
+       AND proposta_recusada_em IS NULL
+       AND status NOT IN ('contratado', 'rejeitado', 'reprovado', 'cancelado')`,
     [texto || null, pdfFinalUrl, pdfFinalId, JSON.stringify(historico), req.params.id]
   );
+  if (propostaGravada.rowCount !== 1) {
+    if (pdfFinalId) cloudinary.uploader.destroy(pdfFinalId, { resource_type: 'raw', type: 'authenticated' }).catch(() => {});
+    return res.status(409).json({ erro: 'A candidatura já possui proposta ou foi encerrada.' });
+  }
 
   // FASE 7 — notificação no feed global
   inserirNotificacao(pool, 'empresa', cand.empresa_id, 'proposta_enviada',
@@ -4524,6 +4680,9 @@ app.post('/api/candidato/aceitar-proposta/:candidaturaId', authCandidato, async 
   }
   if (cand.proposta_aceita_em) {
     return res.status(400).json({ erro: 'Proposta já foi aceita' });
+  }
+  if (['cancelado', 'rejeitado', 'reprovado', 'contratado'].includes(cand.status) || cand.proposta_recusada_em) {
+    return res.status(409).json({ erro: 'A candidatura ou proposta já foi encerrada' });
   }
 
   const historico = Array.isArray(cand.historico) ? [...cand.historico] : [];
@@ -4620,13 +4779,17 @@ app.post('/api/candidatura/:id/desistir', authCandidato, async (req, res) => {
     por: cand.cand_email
   });
 
-  await pool.query(
+  const desistiu = await pool.query(
     `UPDATE candidaturas
      SET status = 'cancelado',
-         historico = $1
-     WHERE id = $2`,
+         historico = $1,
+         atualizada_em = NOW()
+     WHERE id = $2 AND status NOT IN ('cancelado', 'rejeitado', 'reprovado', 'contratado')`,
     [JSON.stringify(historico), req.params.id]
   );
+  if (desistiu.rowCount !== 1) {
+    return res.status(409).json({ erro: 'A candidatura já foi encerrada ou alterada.' });
+  }
 
   // FASE 7 — notificação no feed global
   inserirNotificacao(pool, 'empresa', cand.empresa_id, 'candidato_desistiu',
@@ -4656,6 +4819,9 @@ app.post('/api/candidato/recusar-proposta/:candidaturaId', authCandidato, async 
   if ((cand.etapa_atual || 0) !== idxProposta.proposta) {
     return res.status(400).json({ erro: 'Você só pode recusar a proposta quando estiver na etapa "Proposta"' });
   }
+  if (['cancelado', 'rejeitado', 'reprovado', 'contratado'].includes(cand.status) || cand.proposta_aceita_em || cand.proposta_recusada_em) {
+    return res.status(409).json({ erro: 'A candidatura ou proposta já foi encerrada' });
+  }
 
   const historico = Array.isArray(cand.historico) ? [...cand.historico] : [];
   historico.push({
@@ -4672,7 +4838,8 @@ app.post('/api/candidato/recusar-proposta/:candidaturaId', authCandidato, async 
      SET proposta_recusada_em = NOW(),
          proposta_motivo_recusa = $1,
          status = 'rejeitado',
-         historico = $2
+         historico = $2,
+         atualizada_em = NOW()
      WHERE id = $3 AND proposta_aceita_em IS NULL AND proposta_recusada_em IS NULL`,
     [motivo || null, JSON.stringify(historico), req.params.candidaturaId]
   );
@@ -5483,7 +5650,7 @@ app.post('/api/empresa/vagas', requireRecrutadorOuAdmin, async (req, res) => {
     res.status(201).json({ ok: true, vaga });
   } catch (e) {
     console.error('[EMPRESA CRIAR VAGA ERRO]', e.message, e.stack);
-    res.status(500).json({ erro: 'Erro ao criar vaga: ' + e.message });
+    return erroInterno(req, res, e, 'api-empresa-criar-vaga');
   }
 });
 
@@ -5521,7 +5688,7 @@ app.put('/api/empresa/vagas/:id', requireRecrutadorOuAdmin, async (req, res) => 
     // Acesso de visualização não equivale a permissão de edição.
     // Esta rota só permite alterar vagas próprias da empresa autenticada.
     const check = await pool.query(
-      `SELECT 1
+      `SELECT v.status
        FROM vagas v
        JOIN empresa_vaga_acesso eva ON eva.vaga_id = v.id
          AND eva.empresa_id = $2 AND eva.revogado_em IS NULL
@@ -5552,8 +5719,11 @@ app.put('/api/empresa/vagas/:id', requireRecrutadorOuAdmin, async (req, res) => 
     // O formulário da empresa envia status ao salvar; aceitar somente os estados
     // permitidos e somente para a vaga própria já verificada acima.
     if (v.status !== undefined) {
-      if (!['publicada', 'pausada', 'rascunho', 'encerrada'].includes(v.status)) {
-        return res.status(400).json({ erro: 'Status inválido. Use: publicada, pausada, rascunho ou encerrada' });
+      if (!STATUS_VAGA_VALIDOS.has(v.status)) {
+        return res.status(400).json({ erro: 'Status inválido' });
+      }
+      if (!transicaoVagaPermitida(check.rows[0].status, v.status)) {
+        return res.status(409).json({ erro: `Transição de vaga inválida: ${check.rows[0].status} → ${v.status}` });
       }
       push('status', v.status);
     }
@@ -5584,12 +5754,12 @@ app.patch('/api/empresa/vagas/:id/status', requireRecrutadorOuAdmin, async (req,
   try {
     const { id } = req.params;
     const { status } = req.body || {};
-    if (!['publicada', 'pausada', 'rascunho', 'encerrada'].includes(status)) {
-      return res.status(400).json({ erro: 'Status inválido. Use: publicada, pausada, rascunho ou encerrada' });
+    if (!STATUS_VAGA_VALIDOS.has(status)) {
+      return res.status(400).json({ erro: 'Status inválido' });
     }
     // Alteração de status exige vaga própria, não apenas acesso compartilhado.
     const check = await pool.query(`
-      SELECT 1
+      SELECT v.status
       FROM vagas v
       JOIN empresa_vaga_acesso eva ON eva.vaga_id = v.id
         AND eva.empresa_id = $2 AND eva.revogado_em IS NULL
@@ -5598,6 +5768,9 @@ app.patch('/api/empresa/vagas/:id/status', requireRecrutadorOuAdmin, async (req,
     `, [id, req.user.empresa_id]);
     if (check.rows.length === 0) {
       return res.status(403).json({ erro: 'Vaga não pertence à sua empresa ou não é editável neste contexto' });
+    }
+    if (!transicaoVagaPermitida(check.rows[0].status, status)) {
+      return res.status(409).json({ erro: `Transição de vaga inválida: ${check.rows[0].status} → ${status}` });
     }
     const { rows } = await pool.query(
       `UPDATE vagas SET status = $1 WHERE id = $2 RETURNING id, titulo, empresa, empresa_id, cidade, estado, tipo_contrato, nivel, area, salario_min, salario_max, descricao, requisitos, beneficios, etapas, status, criada_por, criada_em`,
@@ -6325,6 +6498,12 @@ app.post('/api/empresa/candidatura/:id/acao', requireRecrutadorOuAdmin, async (r
       ? ''
       : (typeof etapaObj === 'string' ? etapaObj : (etapaObj.nome || etapaObj.titulo || ''));
     const ehEtapaEmpresa = /gestor|empresa/i.test(etapaNomeAtual || '');
+    if (['contratado', 'rejeitado', 'reprovado', 'cancelado'].includes(cand.status)) {
+      return res.status(409).json({ erro: 'Candidatura encerrada; reabra antes de agir' });
+    }
+    if (acao === 'avancar' && Array.isArray(etapasArr) && cand.etapa_atual + 1 >= etapasArr.length) {
+      return res.status(409).json({ erro: 'A empresa não pode concluir a contratação; essa ação exige o fluxo administrativo final' });
+    }
 
     if (['avancar', 'reprovar', 'comentar'].includes(acao) && !ehEtapaEmpresa) {
       return res.status(403).json({
@@ -6440,12 +6619,20 @@ app.post('/api/empresa/candidatura/:id/proposta', requireRecrutadorOuAdmin, asyn
       data: new Date().toISOString(),
       por: `empresa:${req.user.nome || empresa_id}`
     });
-    await pool.query(`
+    const propostaGravada = await pool.query(`
       UPDATE candidaturas
       SET proposta_texto = $1, proposta_pdf_url = $2, proposta_pdf_public_id = $3,
           proposta_enviada_em = NOW(), historico = $4, atualizada_em = NOW()
       WHERE id = $5
+        AND proposta_enviada_em IS NULL
+        AND proposta_aceita_em IS NULL
+        AND proposta_recusada_em IS NULL
+        AND status NOT IN ('contratado', 'rejeitado', 'reprovado', 'cancelado')
     `, [texto || null, pdfFinalUrl, pdfFinalId, JSON.stringify(historico), candId]);
+    if (propostaGravada.rowCount !== 1) {
+      if (pdfFinalId) cloudinary.uploader.destroy(pdfFinalId, { resource_type: 'raw', type: 'authenticated' }).catch(() => {});
+      return res.status(409).json({ erro: 'A candidatura já possui proposta ou foi encerrada.' });
+    }
     // Notificações
     inserirNotificacao(pool, 'empresa', empresa_id, 'proposta_enviada',
       `📨 Proposta enviada: ${cand.nome}`,
@@ -6521,6 +6708,12 @@ app.patch('/api/empresa/candidaturas/:id/etapa', requireRecrutadorOuAdmin, async
         return res.status(400).json({ erro: `Etapa inválida. Deve ser entre 0 e ${totalEtapas - 1}.` });
       }
       novaEtapa = n;
+      if (n !== cand.etapa_atual && n !== cand.etapa_atual + 1) {
+        return res.status(409).json({ erro: 'Não é permitido saltar etapas' });
+      }
+      if (n === cand.etapa_atual + 1 && totalEtapas > 0 && n >= totalEtapas) {
+        return res.status(409).json({ erro: 'A contratação deve ser concluída pelo fluxo administrativo' });
+      }
     }
 
     // Validar status
@@ -7194,7 +7387,7 @@ process.on('unhandledRejection', (e) => {
       });
     } catch (e) {
       console.error('[BACKUP META]', e);
-      res.status(500).json({ erro: 'Erro ao consultar metadados de backup', detalhes: e.message });
+      return erroInterno(req, res, e, 'api-admin-restore-test');
     }
   });
 
@@ -7209,7 +7402,7 @@ process.on('unhandledRejection', (e) => {
       res.json({ ok: true, msg: 'Backup criado com sucesso', ...result });
     } catch (e) {
       console.error('[BACKUP CREATE]', e);
-      res.status(500).json({ erro: 'Erro ao criar backup', detalhes: e.message });
+      return erroInterno(req, res, e, 'api-admin-backup');
     }
   });
 
@@ -9561,7 +9754,7 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
       res.json({ ok: true, ts: new Date().toISOString(), msg: 'digest disparado em background' });
     } catch (e) {
       console.error('[CRON DIGEST]', e.message);
-      res.status(500).json({ ok: false, erro: e.message });
+      return erroInterno(req, res, e, 'cron-digest');
     }
   });
 
