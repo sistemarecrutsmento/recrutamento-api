@@ -125,8 +125,7 @@ function cloudinaryAuthenticatedUrl(publicId, fileName, mimeType) {
     resource_type: resourceType,
     type: 'authenticated',
     sign_url: true,
-    secure: true,
-    auth_token: { duration: 300 }
+    secure: true
   };
   if (!isImage && /^[a-z0-9]{1,8}$/.test(ext)) options.format = ext;
   return cloudinary.url(publicId, options);
