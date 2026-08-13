@@ -144,10 +144,20 @@ async function restoreFromBuffer(gzipBuffer, options = {}) {
           // Erro em outro tipo de statement (não esperado)
           erros.push({ index: i, statement: stmt.substring(0, 80), erro: e.message });
         }
-        if (erros.length > 10) {
-          // Muitos erros — aborta
-          throw new Error(`Muitos erros (${erros.length}). Último: ${e.message}`);
-        }
+        // Uma falha aborta a transação no PostgreSQL. Interromper logo,
+        // fazer rollback explícito e evitar a cascata de erros "transaction
+        // is aborted" que ocultava a causa original.
+        await client.query('ROLLBACK');
+        console.error(`[RESTORE] ROLLBACK — falha em ${extractTable(stmt)}`);
+        return {
+          ok: false,
+          rollback: true,
+          erro: 'Rollback executado após falha na restauração',
+          erros: erros.slice(0, 10),
+          insertOk,
+          insertErro,
+          duracaoMs: Date.now() - inicio
+        };
       }
     }
 
