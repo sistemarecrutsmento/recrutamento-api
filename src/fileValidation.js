@@ -49,7 +49,8 @@ function isText(buffer) {
 function matchesMime(buffer, mime) {
   switch (normalizeMime(mime)) {
     case 'application/pdf':
-      return startsWithBytes(buffer, [0x25, 0x50, 0x44, 0x46, 0x2d]); // %PDF-
+      return startsWithBytes(buffer, [0x25, 0x50, 0x44, 0x46, 0x2d]) // %PDF-
+        && buffer.includes(Buffer.from('%%EOF')); // exige marcador final básico
     case 'image/png':
       return startsWithBytes(buffer, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
     case 'image/jpeg':
