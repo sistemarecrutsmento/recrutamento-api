@@ -8871,6 +8871,10 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
       if (!rows.length) return res.status(404).json({ erro: 'Candidato ou vaga não encontrado' });
       const c = rows[0];
       if (!c.candidato_email) return res.status(400).json({ erro: 'Este candidato não possui e-mail cadastrado' });
+      const pendingInvite = await pool.query(`SELECT id FROM candidato_convites WHERE candidato_id=$1 AND vaga_id=$2 AND empresa_id=$3 AND cancelado_em IS NULL`, [candidatoId, vagaId, req.user.empresa_id]);
+      if (pendingInvite.rows.length) return res.status(409).json({ erro: 'Já existe um convite pendente para este candidato nesta vaga' });
+      const inviteRow = await pool.query(`INSERT INTO candidato_convites (candidato_id, empresa_id, vaga_id, mensagem, criado_por) VALUES ($1,$2,$3,$4,$5) RETURNING id`, [candidatoId, req.user.empresa_id, vagaId, mensagem || null, req.user.id]);
+      const conviteId = inviteRow.rows[0].id;
       const base = String(process.env.FRONTEND_URL || 'https://vagasio.com.br').replace(/\/$/, '');
       const vagaUrl = `${base}/candidato/vaga.html?id=${encodeURIComponent(vagaId)}`;
       const plain = value => String(value || '').trim();
@@ -8900,12 +8904,25 @@ app.post('/api/empresa/convite/:token/aceitar', rateLimitByIp('cadastro'), async
         emailEnviado = false;
         console.error('[empresa candidato convite email]', emailErr.message);
       }
-      await audit(req, 'empresa.candidato.invited', { resource_type: 'candidato', resource_id: candidatoId, metadata: { vaga_id: vagaId, email_enviado: emailEnviado } });
-      res.json({ ok: true, email: c.candidato_email, email_enviado: emailEnviado, vaga: { id: c.vaga_id, titulo: c.titulo } });
+      if (emailEnviado) await pool.query('UPDATE candidato_convites SET enviado_em=NOW() WHERE id=$1', [conviteId]);
+      await audit(req, 'empresa.candidato.invited', { resource_type: 'candidato_convite', resource_id: conviteId, metadata: { candidato_id: candidatoId, vaga_id: vagaId, email_enviado: emailEnviado } });
+      res.json({ ok: true, convite_id: conviteId, email: c.candidato_email, email_enviado: emailEnviado, vaga: { id: c.vaga_id, titulo: c.titulo } });
     } catch (e) {
       console.error('[empresa candidato convite]', e.message);
       res.status(503).json({ erro: 'Não foi possível enviar o convite por e-mail' });
     }
+  });
+
+  // Cancela convite pendente; não apaga o histórico da ação.
+  app.delete('/api/empresa/candidatos/:id/convite', requireRecrutadorOuAdmin, async (req, res) => {
+    const candidatoId = Number(req.params.id), vagaId = Number(req.body?.vaga_id || req.query?.vaga_id);
+    if (!Number.isInteger(candidatoId) || !Number.isInteger(vagaId) || candidatoId <= 0 || vagaId <= 0) return res.status(400).json({ erro: 'Candidato e vaga são obrigatórios' });
+    try {
+      const q = await pool.query(`UPDATE candidato_convites SET cancelado_em=NOW() WHERE candidato_id=$1 AND vaga_id=$2 AND empresa_id=$3 AND cancelado_em IS NULL RETURNING id`, [candidatoId, vagaId, req.user.empresa_id]);
+      if (!q.rows.length) return res.status(404).json({ erro: 'Convite pendente não encontrado' });
+      await audit(req, 'empresa.candidato.invite_cancelled', { resource_type:'candidato_convite', resource_id:q.rows[0].id, metadata:{ candidato_id:candidatoId, vaga_id:vagaId } });
+      res.json({ ok:true, convite_id:q.rows[0].id });
+    } catch(e) { console.error('[cancelar convite candidato]',e); res.status(500).json({ erro:'Não foi possível cancelar o convite' }); }
   });
 
   // GET /api/empresa/vagas/:id/tags
