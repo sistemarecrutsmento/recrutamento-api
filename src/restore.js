@@ -193,7 +193,7 @@ async function restoreFromBuffer(gzipBuffer, options = {}) {
 async function restoreFromCloudinary(options = {}) {
   // Busca o último backup
   const result = await cloudinary.search
-    .expression('folder:backups-vagas AND public_id:backup-vagas*')
+    .expression('resource_type:raw AND folder:backups-vagas')
     .sort_by('created_at', 'desc')
     .max_results(1)
     .execute();
@@ -206,12 +206,11 @@ async function restoreFromCloudinary(options = {}) {
   console.log(`[RESTORE] Último backup: ${r.public_id} (${r.created_at})`);
 
   // Backups são authenticated; o download usa URL assinada gerada no servidor.
-  const downloadUrl = cloudinary.url(r.public_id, {
+  const downloadUrl = cloudinary.utils.private_download_url(r.public_id, 'gz', {
     resource_type: r.resource_type || 'raw',
     type: 'authenticated',
-    sign_url: true,
-    secure: true,
-    format: 'gz'
+    expires_at: Math.floor(Date.now() / 1000) + 300,
+    attachment: false
   });
   const response = await fetch(downloadUrl);
   if (!response.ok) {
