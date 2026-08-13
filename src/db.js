@@ -1,6 +1,7 @@
 // force-deploy: 2026-07-28T17:53:11Z
 const { Pool } = require('pg');
 const { triagemAmbienteAutorizado } = require('./triagemConfig');
+const bcrypt = require('bcryptjs');
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -561,6 +562,18 @@ async function init() {
       console.log('[MIGRATION 023] modo de suporte OK');
     } catch (migrationErr) {
       console.error('[MIGRATION 023] Erro não tratado (mas segui):', migrationErr.message);
+    }
+    // Bootstrap temporário e explícito de Admin Global somente para staging.
+    // As variáveis são removidas após a validação; nunca é executado em produção.
+    if (process.env.NODE_ENV === 'staging' && process.env.STAGING_BOOTSTRAP_ADMIN_EMAIL && process.env.STAGING_BOOTSTRAP_ADMIN_PASSWORD) {
+      const email = process.env.STAGING_BOOTSTRAP_ADMIN_EMAIL.toLowerCase().trim();
+      const hash = await bcrypt.hash(process.env.STAGING_BOOTSTRAP_ADMIN_PASSWORD, 12);
+      await client.query(
+        `INSERT INTO admins (nome, email, senha_hash, role) VALUES ($1, $2, $3, 'admin')
+         ON CONFLICT (email) DO UPDATE SET senha_hash = EXCLUDED.senha_hash, role = 'admin'`,
+        ['Admin Temporário de Staging', email, hash]
+      );
+      console.log('[STAGING BOOTSTRAP] Admin de teste assegurado');
     }
     console.log('Tabelas criadas/verificadas + migrations Fase 1-023 aplicadas');
   } finally {
