@@ -593,16 +593,6 @@ app.post('/api/ci/admin-token', async (req, res) => {
   }
 });
 
-// Rota temporária de restore no clone isolado de staging; será removida após o teste.
-app.post('/api/ci/restore-check', async (req, res) => {
-  if (process.env.NODE_ENV === 'production' || !process.env.CI_ADMIN_SECRET || req.body?.secret !== process.env.CI_ADMIN_SECRET) return res.status(404).json({ erro: 'Not found' });
-  try {
-    const { restoreFromCloudinary } = require('./restore');
-    const result = await restoreFromCloudinary({ dryRun: req.body?.dryRun !== false });
-    res.status(result.ok ? 200 : 500).json(result);
-  } catch (_) { res.status(500).json({ erro: 'Falha no teste de restore' }); }
-});
-
 // DEBUG FASE 6 — versão top-level (não depende do wrapper async)
 // /api/_debug/fase6 removido (dados internos de schema)
 
