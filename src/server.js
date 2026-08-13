@@ -2158,6 +2158,27 @@ app.get('/api/admin/suporte/status', authAdminOnly, async (req, res) => {
   res.json({ modo_suporte: !!q.rowCount, sessao: q.rows[0] || null });
 });
 
+// LGPD: legal hold exige sessão de suporte válida e escopo explícito da empresa.
+app.post('/api/admin/lgpd/empresa/:id/legal-hold', authAdminOnly, async (req, res) => {
+  const empresaId = Number(req.params.id), raw = req.headers['x-support-session'];
+  if (!Number.isInteger(empresaId) || empresaId <= 0 || typeof raw !== 'string') return res.status(403).json({ erro: 'Sessão de suporte e empresa são obrigatórias' });
+  try {
+    const hash = crypto.createHash('sha256').update(raw).digest('hex');
+    const s = await pool.query(`SELECT escopo FROM sessoes_suporte WHERE token_hash=$1 AND iniciado_por=$2 AND encerrado_em IS NULL AND expira_em>NOW()`, [hash, req.user.id]);
+    if (!s.rowCount) return res.status(403).json({ erro: 'Sessão de suporte inválida ou expirada' });
+    const escopo = s.rows[0].escopo || {};
+    const permitido = escopo.amplo === true || (escopo.tipo === 'empresa' && Array.isArray(escopo.ids) && escopo.ids.map(Number).includes(empresaId));
+    if (!permitido) return res.status(403).json({ erro: 'Empresa fora do escopo da sessão de suporte' });
+    const ativo = req.body?.ativo === true;
+    const motivo = String(req.body?.motivo || '').trim();
+    if (ativo && motivo.length < 5) return res.status(400).json({ erro: 'Motivo obrigatório para ativar legal hold' });
+    const q = await pool.query(`UPDATE empresas SET legal_hold=$1, legal_hold_motivo=$2, legal_hold_em=CASE WHEN $1 THEN NOW() ELSE NULL END, legal_hold_por=CASE WHEN $1 THEN $3 ELSE NULL END WHERE id=$4 RETURNING id, legal_hold, legal_hold_motivo, legal_hold_em`, [ativo, ativo ? motivo : null, req.user.id, empresaId]);
+    if (!q.rowCount) return res.status(404).json({ erro: 'Empresa não encontrada' });
+    await audit(req, ativo ? 'lgpd.legal_hold_enabled' : 'lgpd.legal_hold_released', { resource_type:'empresa', resource_id:empresaId, metadata:{ escopo: 'empresa', suporte:true } });
+    res.json({ ok:true, legal_hold:q.rows[0] });
+  } catch(e) { console.error('[LGPD LEGAL HOLD]',e.message); res.status(500).json({ erro:'Não foi possível atualizar o legal hold' }); }
+});
+
 // ============================================================
 // 2FA — Verificar código (segunda etapa)
 // ============================================================
@@ -10303,6 +10324,7 @@ app.get('/api/admin/me', authAdminOnly, async (req, res) => {
       await pool.query(`
         UPDATE empresas SET retencao_status = 'review_due'
         WHERE ativo = false AND retencao_status = 'scheduled'
+          AND COALESCE(legal_hold, false) = false
           AND retencao_ate IS NOT NULL AND retencao_ate <= NOW()
       `);
     } catch (e) {
