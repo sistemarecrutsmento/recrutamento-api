@@ -3447,10 +3447,17 @@ app.post('/api/admin/candidato/:id/deletar', authAdminOnly, async (req, res) => 
     if (cand.length === 0) return res.status(404).json({ erro: 'Candidato não encontrado' });
 
     // Cascade manual: documentos -> arquivos de chat -> mensagens -> candidaturas -> candidato
+    const docsAssets = await pool.query(
+      'SELECT arquivo_public_id, arquivo_tipo FROM documentos_candidatura WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE candidato_id = $1) AND arquivo_public_id IS NOT NULL',
+      [candId]
+    );
     const docs = await pool.query(
       'DELETE FROM documentos_candidatura WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE candidato_id = $1) RETURNING id',
       [candId]
     );
+    await Promise.all(docsAssets.rows.map(a => cloudinary.uploader.destroy(a.arquivo_public_id, {
+      resource_type: String(a.arquivo_tipo || '').startsWith('image/') ? 'image' : 'raw', type: 'authenticated'
+    }).catch(() => {})));
     const arquivos = await pool.query(
       'DELETE FROM chat_arquivos WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE candidato_id = $1) RETURNING id',
       [candId]
