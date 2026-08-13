@@ -45,7 +45,7 @@ const { criarAccessToken, criarRefreshToken, persistirRefresh, consumirRefresh, 
 
 // Email do admin pra receber notificações de ação do candidato
 const ADMIN_NOTIF_EMAIL = process.env.ADMIN_NOTIF_EMAIL || process.env.ADMIN_EMAIL || 'fabio08dejesusjunior@gmail.com';
-const { authMiddleware, authCandidato, authAdmin, authGlobalRead, authEmpresa, authAdminOnly, denyGlobalPrivateUntilSupport, authCandidatoOrEmpresaOrAdmin, authCandidatoOrAdminStrict, requireAdminEmpresa, requireAdminOuRecrutadorEquipe, requireRecrutadorOuAdmin, requireEmpresaViewer, JWT_VERIFY_OPTIONS } = require('./auth');
+const { authMiddleware, authCandidato, authAdmin, authGlobalRead, authEmpresa, authAdminOnly, denyGlobalPrivateUntilSupport, authCandidatoOrEmpresaOrAdmin, authCandidatoOrAdminStrict, requireAdminEmpresa, requireAdminOuRecrutadorEquipe, requireRecrutadorOuAdmin, requireFinanceiroEmpresa, requireEmpresaViewer, JWT_VERIFY_OPTIONS } = require('./auth');
 const { sanitizeText, sanitizeFilename, escapeContentDispositionFilename } = require('./sanitize');
 
 // =========================================================================
@@ -10011,7 +10011,7 @@ app.get('/api/admin/me', authAdminOnly, async (req, res) => {
 
   // ===== Assinatura da empresa — preparação segura para o Asaas =====
   // Não recebe dados de cartão no Vagas.io. O pagamento será coletado pelo checkout do gateway.
-  app.get('/api/empresa/assinatura', requireRecrutadorOuAdmin, async (req, res) => {
+  app.get('/api/empresa/assinatura', requireFinanceiroEmpresa, async (req, res) => {
     try {
       const empresaId = Number(req.user.empresa_id);
       const { rows } = await pool.query(`
@@ -10025,7 +10025,7 @@ app.get('/api/admin/me', authAdminOnly, async (req, res) => {
     } catch (e) { return erroInterno(req, res, e, 'api-empresa-assinatura-get'); }
   });
 
-  app.post('/api/empresa/assinatura/cliente', requireRecrutadorOuAdmin, async (req, res) => {
+  app.post('/api/empresa/assinatura/cliente', requireFinanceiroEmpresa, async (req, res) => {
     try {
       if (!asaas.configurado()) return res.status(503).json({ erro: 'Gateway de pagamento ainda não configurado' });
       const empresaId = Number(req.user.empresa_id);
@@ -10048,7 +10048,7 @@ app.get('/api/admin/me', authAdminOnly, async (req, res) => {
     }
   });
 
-  app.post('/api/empresa/assinatura/checkout', requireRecrutadorOuAdmin, async (req, res) => {
+  app.post('/api/empresa/assinatura/checkout', requireFinanceiroEmpresa, async (req, res) => {
     try {
       if (!asaas.configurado()) return res.status(503).json({ erro: 'Gateway de pagamento ainda não configurado' });
       const empresaId = Number(req.user.empresa_id);
@@ -10101,7 +10101,7 @@ app.get('/api/admin/me', authAdminOnly, async (req, res) => {
         const vencidos = ['PAYMENT_OVERDUE', 'PAYMENT_DUNNING_RECEIVED'];
         const cancelados = ['SUBSCRIPTION_INACTIVATED', 'SUBSCRIPTION_DELETED', 'PAYMENT_REFUNDED'];
         if (ativos.includes(evento)) extra = ", assinatura_status = 'active', ativo = true, pagamento_configurado = true, assinatura_confirmada_em = COALESCE(assinatura_confirmada_em, NOW())";
-        else if (vencidos.includes(evento)) extra = ", assinatura_status = 'past_due', ativo = false";
+        else if (vencidos.includes(evento)) extra = ", assinatura_status = 'past_due', ativo = true";
         else if (cancelados.includes(evento)) extra = ", assinatura_status = 'canceled', ativo = false";
         else if (evento === 'SUBSCRIPTION_CREATED' || evento === 'SUBSCRIPTION_UPDATED') extra = ", pagamento_configurado = true";
         await pool.query(`UPDATE empresas SET asaas_customer_id = COALESCE(asaas_customer_id, $1), asaas_subscription_id = COALESCE($2, asaas_subscription_id), assinatura_vence_em = COALESCE($4::date, assinatura_vence_em)${extra} WHERE id = COALESCE($3, id) OR asaas_customer_id = $1 OR asaas_subscription_id = $2`, [customerId, subscriptionId, empresaRef, recurso.nextDueDate || null]);
@@ -10168,7 +10168,14 @@ app.get('/api/admin/me', authAdminOnly, async (req, res) => {
       await pool.query(`
         UPDATE empresas
         SET assinatura_status = 'expired', ativo = false
-        WHERE assinatura_status = 'trial' AND trial_fim IS NOT NULL AND trial_fim <= NOW()
+        WHERE assinatura_status = 'trial' AND trial_fim IS NOT NULL AND trial_fim + INTERVAL '2 days' <= NOW()
+      `);
+      await pool.query(`
+        UPDATE empresas
+        SET ativo = false
+        WHERE assinatura_status = 'past_due'
+          AND assinatura_vence_em IS NOT NULL
+          AND assinatura_vence_em::timestamp + INTERVAL '2 days' <= NOW()
       `);
     } catch (e) {
       console.error('[trial] processamento diário falhou:', e.message);
