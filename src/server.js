@@ -2969,12 +2969,16 @@ app.put('/api/admin/vagas/:id', authAdminOnly, async (req, res) => {
 
 app.delete('/api/admin/vagas/:id', authAdminOnly, async (req, res) => {
   try {
-    await pool.query('DELETE FROM vagas WHERE id = $1', [req.params.id]);
-    await audit(req, 'admin.vaga.deleted', { resource_type: 'vaga', resource_id: Number(req.params.id) });
-    res.json({ ok: true });
+    const { rows } = await pool.query(`
+      UPDATE vagas SET status = 'encerrada'
+      WHERE id = $1 AND status NOT IN ('encerrada', 'cancelada')
+      RETURNING id, status`, [req.params.id]);
+    if (!rows.length) return res.status(404).json({ erro: 'Vaga não encontrada ou já encerrada' });
+    await audit(req, 'admin.vaga.closed_instead_of_deleted', { resource_type: 'vaga', resource_id: Number(req.params.id), metadata: { preservado_historico: true } });
+    res.json({ ok: true, encerrada: true, preservado_historico: true, vaga: rows[0] });
   } catch (e) {
     console.error('[DELETE VAGA]', e);
-    res.status(500).json({ erro: 'Erro ao deletar vaga' });
+    res.status(500).json({ erro: 'Erro ao encerrar vaga' });
   }
 });
 
@@ -3455,24 +3459,33 @@ app.post('/api/admin/candidato/:id/deletar', authAdminOnly, denyGlobalPrivateUnt
       'DELETE FROM mensagens_processo WHERE candidatura_id IN (SELECT id FROM candidaturas WHERE candidato_id = $1) RETURNING id',
       [candId]
     );
-    const cands = await pool.query('DELETE FROM candidaturas WHERE candidato_id = $1 RETURNING id', [candId]);
-    const removed = await pool.query('DELETE FROM candidatos WHERE id = $1 RETURNING id', [candId]);
+    // Preserva candidaturas e histórico; remove PII para atender a solicitação LGPD.
+    const anonEmail = `anonimo+${candId}@privacy.invalid`;
+    const anonymized = await pool.query(`
+      UPDATE candidatos SET
+        cpf = NULL, nome = 'Candidato anonimizado', email = $1,
+        email_verificado = false, senha_hash = NULL, celular = NULL,
+        data_nascimento = NULL, sexo = NULL, cep = NULL, estado = NULL,
+        cidade = NULL, bairro = NULL, logradouro = NULL, numero = NULL,
+        complemento = NULL, formacao = NULL, instituicao = NULL, curso = NULL,
+        situacao = NULL, data_conclusao = NULL, primeiro_emprego = false,
+        recebe_comunicacoes = false, anonimizado_em = COALESCE(anonimizado_em, NOW())
+      WHERE id = $2 RETURNING id`, [anonEmail, candId]);
 
-    // Log de auditoria
-    console.log(`[AUDITORIA] Admin ${req.user?.email || '?'} deletou candidato id=${candId} (${cand[0].email})`);
-    await audit(req, 'admin.candidato.deleted', { resource_type: 'candidato', resource_id: candId, user_email: req.user?.email, metadata: { candidato_email: cand[0].email, candidato_nome: cand[0].nome } });
+    await audit(req, 'admin.candidato.anonymized', { resource_type: 'candidato', resource_id: candId, user_email: req.user?.email, metadata: { preservado_historico: true, pii_removida: true } });
 
     res.json({
       ok: true,
-      candidato_deletado: { id: candId, email: cand[0].email, nome: cand[0].nome },
+      candidato_anonimizado: { id: candId },
+      preservado_historico: true,
       removidos: {
-        candidato: removed.rowCount,
-        candidaturas: cands.rowCount,
+        candidato: anonymized.rowCount,
+        candidaturas: 0,
         documentos: docs.rowCount,
         mensagens_chat: msgsC.rowCount,
         arquivos_chat: arquivos.rowCount
       },
-      msg: `Candidato ${cand[0].nome} (${cand[0].email}) removido com sucesso`
+      msg: 'Dados pessoais anonimizados; histórico do processo preservado.'
     });
   } catch (e) {
     return erroInterno(req, res, e, 'api-admin-candidatura-id-deletar');
@@ -5241,18 +5254,17 @@ app.put('/api/admin/empresas/:id', authAdminOnly, async (req, res) => {
   }
 });
 
-// Excluir empresa (e seus vínculos)
+// Desativar empresa — não apagar histórico de processos e candidaturas.
 app.delete('/api/admin/empresas/:id', authAdminOnly, async (req, res) => {
   const { id } = req.params;
   try {
-    await pool.query('DELETE FROM empresa_vaga_acesso WHERE empresa_id = $1', [id]);
-    await pool.query('DELETE FROM empresa_usuarios WHERE empresa_id = $1', [id]);
-    const { rows } = await pool.query('DELETE FROM empresas WHERE id = $1 RETURNING id', [id]);
+    const { rows } = await pool.query(`UPDATE empresas SET ativo = false, desativada_em = COALESCE(desativada_em, NOW()), retencao_ate = COALESCE(retencao_ate, NOW() + INTERVAL '6 months'), retencao_status = 'scheduled' WHERE id = $1 RETURNING id, ativo, desativada_em, retencao_ate, retencao_status`, [id]);
     if (rows.length === 0) return res.status(404).json({ erro: 'Empresa não encontrada' });
-    res.json({ ok: true });
+    await audit(req, 'admin.empresa.deactivated', { resource_type: 'empresa', resource_id: Number(id), metadata: { preservado_historico: true } });
+    res.json({ ok: true, desativada: true, preservado_historico: true, empresa: rows[0] });
   } catch (e) {
-    console.error('[excluir empresa]', e);
-    res.status(500).json({ erro: 'Erro ao excluir' });
+    console.error('[desativar empresa]', e);
+    res.status(500).json({ erro: 'Erro ao desativar' });
   }
 });
 
