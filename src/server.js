@@ -560,6 +560,17 @@ app.get('/api/observabilidade', authAdminOnly, async (req, res) => {
   res.json({ ok: dbOk, iniciado_em: observabilidade.iniciado_em, uptime_segundos: Math.floor(process.uptime()), requisicoes: observabilidade.requisicoes, erros_5xx: observabilidade.erros_5xx });
 });
 
+// Suporte/tickets: escopo da empresa é sempre derivado do token.
+app.post('/api/empresa/tickets', requireRecrutadorOuAdmin, async (req,res) => {
+  const assunto=String(req.body?.assunto||'').trim(), descricao=String(req.body?.descricao||'').trim(), prioridade=String(req.body?.prioridade||'normal');
+  if(!assunto||!descricao||assunto.length>180||descricao.length>10000) return res.status(400).json({erro:'Assunto e descrição são obrigatórios'});
+  if(!['baixa','normal','alta','urgente'].includes(prioridade)) return res.status(400).json({erro:'Prioridade inválida'});
+  try { const q=await pool.query(`INSERT INTO suporte_tickets(empresa_id,criado_por,assunto,descricao,prioridade) VALUES($1,$2,$3,$4,$5) RETURNING id,assunto,descricao,prioridade,status,criado_em`,[req.user.empresa_id,req.user.id,assunto,descricao,prioridade]); await audit(req,'support.ticket_created',{resource_type:'suporte_ticket',resource_id:q.rows[0].id,metadata:{empresa_id:req.user.empresa_id}}); res.status(201).json({ok:true,ticket:q.rows[0]}); } catch(e){console.error('[TICKET CREATE]',e.message);res.status(500).json({erro:'Não foi possível abrir o ticket'});}
+});
+app.get('/api/empresa/tickets', requireEmpresaViewer, async (req,res) => { try { const q=await pool.query(`SELECT id,assunto,descricao,prioridade,status,criado_em,atualizado_em,fechado_em FROM suporte_tickets WHERE empresa_id=$1 ORDER BY criado_em DESC LIMIT 100`,[req.user.empresa_id]); res.json({tickets:q.rows}); } catch(e){res.status(500).json({erro:'Não foi possível listar os tickets'});} });
+app.get('/api/saas/tickets', authGlobalRead, async (req,res) => { try { const q=await pool.query(`SELECT id,empresa_id,assunto,descricao,prioridade,status,criado_em,atualizado_em,fechado_em FROM suporte_tickets ORDER BY criado_em DESC LIMIT 200`); res.json({tickets:q.rows}); } catch(e){res.status(500).json({erro:'Não foi possível listar os tickets'});} });
+app.patch('/api/saas/tickets/:id', authAdminOnly, async (req,res) => { const status=String(req.body?.status||''); if(!['aberto','em_atendimento','resolvido','fechado'].includes(status)) return res.status(400).json({erro:'Status inválido'}); try { const q=await pool.query(`UPDATE suporte_tickets SET status=$1,atualizado_em=NOW(),fechado_em=CASE WHEN $1 IN ('resolvido','fechado') THEN NOW() ELSE NULL END WHERE id=$2 RETURNING id,status,atualizado_em,fechado_em`,[status,Number(req.params.id)]); if(!q.rowCount)return res.status(404).json({erro:'Ticket não encontrado'}); await audit(req,'support.ticket_updated',{resource_type:'suporte_ticket',resource_id:q.rows[0].id,metadata:{status}});res.json({ok:true,ticket:q.rows[0]}); } catch(e){res.status(500).json({erro:'Não foi possível atualizar o ticket'});} });
+
 // ── CI: token admin sem 2FA ─────────────────────────────────────────────────
 // Ativo SOMENTE quando CI_ADMIN_SECRET está definido E NODE_ENV !== 'production'.
 // Se NODE_ENV === 'production', retorna 404 independente de qualquer header.
