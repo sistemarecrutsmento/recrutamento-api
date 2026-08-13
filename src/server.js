@@ -121,14 +121,16 @@ function cloudinaryAuthenticatedUrl(publicId, fileName, mimeType) {
   const ext = String(fileName || '').split('.').pop().toLowerCase();
   // Assinatura curta: mesmo que uma URL seja copiada do navegador, ela expira
   // rapidamente. A autorização principal continua sendo feita pela API/proxy.
-  const options = {
+  // Para assets `authenticated`, cloudinary.url() gera uma URL de delivery
+  // que pode retornar 404 no raw. O SDK recomenda private_download_url(),
+  // que assina uma URL temporária pelo endpoint autenticado de download.
+  const format = /^[a-z0-9]{1,8}$/.test(ext) ? ext : (isImage ? 'jpg' : 'bin');
+  return cloudinary.utils.private_download_url(publicId, format, {
     resource_type: resourceType,
     type: 'authenticated',
-    sign_url: true,
-    secure: true
-  };
-  if (!isImage && /^[a-z0-9]{1,8}$/.test(ext)) options.format = ext;
-  return cloudinary.url(publicId, options);
+    expires_at: Math.floor(Date.now() / 1000) + 300,
+    attachment: false
+  });
 }
 
 function protegerUrlDocumento(row) {
