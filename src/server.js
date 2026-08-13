@@ -84,9 +84,24 @@ const { create2faCode, verify2faCode, resend2faCode } = require('./twoFactor');
 const { getBackupMetadata } = require('./backup');
 const socialAuth = require('./socialAuth');
 
-// Cloudinary: aceita CLOUDINARY_URL no formato cloudinary://key:secret@cloud_name
-if (process.env.CLOUDINARY_URL) cloudinary.config({ url: process.env.CLOUDINARY_URL, secure: true });
-else if (process.env.CLOUDINARY_CLOUD_NAME) {
+// Cloudinary: aceita CLOUDINARY_URL no formato cloudinary://key:secret@cloud_name.
+// Faz o parsing explícito porque algumas versões do SDK não aplicam a URL
+// quando ela é passada dentro de um objeto `{ url }`, deixando o uploader sem api_key.
+if (process.env.CLOUDINARY_URL) {
+  try {
+    const cloudUrl = new URL(process.env.CLOUDINARY_URL);
+    if (cloudUrl.protocol !== 'cloudinary:') throw new Error('protocolo inválido');
+    cloudinary.config({
+      cloud_name: cloudUrl.hostname,
+      api_key: decodeURIComponent(cloudUrl.username),
+      api_secret: decodeURIComponent(cloudUrl.password),
+      secure: true
+    });
+  } catch (e) {
+    console.error('[CLOUDINARY] CLOUDINARY_URL inválida:', e.message);
+    throw e;
+  }
+} else if (process.env.CLOUDINARY_CLOUD_NAME) {
   cloudinary.config({
     cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
     api_key: process.env.CLOUDINARY_API_KEY,
