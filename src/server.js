@@ -540,6 +540,12 @@ app.get('/api/public/empresa/:slug/vagas/:id', async (req, res) => {
 // Endpoints públicos de disponibilidade: não expõem nome do sistema,
 // horário, commit, versão, ambiente ou detalhes de infraestrutura.
 app.get('/api/_version', (req, res) => res.json({ ok: true }));
+const observabilidade = { iniciado_em: new Date().toISOString(), requisicoes: 0, erros_5xx: 0 };
+app.use((req, res, next) => {
+  observabilidade.requisicoes++;
+  res.on('finish', () => { if (res.statusCode >= 500) observabilidade.erros_5xx++; });
+  next();
+});
 app.get('/api/saude', async (req, res) => {
   let dbOk = false;
   try {
@@ -547,6 +553,11 @@ app.get('/api/saude', async (req, res) => {
     dbOk = true;
   } catch (_) {}
   res.status(dbOk ? 200 : 503).json({ ok: dbOk });
+});
+app.get('/api/observabilidade', authAdminOnly, async (req, res) => {
+  let dbOk = false;
+  try { await pool.query('SELECT 1'); dbOk = true; } catch (_) {}
+  res.json({ ok: dbOk, iniciado_em: observabilidade.iniciado_em, uptime_segundos: Math.floor(process.uptime()), requisicoes: observabilidade.requisicoes, erros_5xx: observabilidade.erros_5xx });
 });
 
 // ── CI: token admin sem 2FA ─────────────────────────────────────────────────
