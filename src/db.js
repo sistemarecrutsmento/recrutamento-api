@@ -583,7 +583,14 @@ async function init() {
     } catch (migrationErr) {
       console.error('[MIGRATION 026] Erro não tratado (mas segui):', migrationErr.message);
     }
-    console.log('Tabelas criadas/verificadas + migrations Fase 1-026 aplicadas');
+    try {
+      const { up: migration027 } = require('./migrations/027_lgpd_legal_hold');
+      await migration027();
+      console.log('[MIGRATION 027] legal hold LGPD OK');
+    } catch (migrationErr) {
+      console.error('[MIGRATION 027] Erro não tratado (mas segui):', migrationErr.message);
+    }
+    console.log('Tabelas criadas/verificadas + migrations Fase 1-027 aplicadas');
   } finally {
     client.release();
   }
