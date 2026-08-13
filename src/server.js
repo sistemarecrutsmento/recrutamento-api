@@ -4822,7 +4822,7 @@ app.post('/api/candidatura/:id/desistir', authCandidato, async (req, res) => {
   let { motivo } = req.body || {};
   if (typeof motivo === 'string') motivo = sanitizeText(motivo).slice(0, 1000);
   const { rows: c } = await pool.query(`
-    SELECT c.*, v.titulo, cd.email as cand_email, cd.nome_completo as cand_nome
+    SELECT c.*, v.titulo, cd.email as cand_email, cd.nome as cand_nome
     FROM candidaturas c
     JOIN vagas v ON v.id = c.vaga_id
     JOIN candidatos cd ON cd.id = c.candidato_id
