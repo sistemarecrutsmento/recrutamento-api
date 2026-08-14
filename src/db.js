@@ -1,5 +1,6 @@
 // force-deploy: 2026-07-28T17:53:11Z
 const { Pool } = require('pg');
+const { triagemAmbienteAutorizado } = require('./triagemConfig');
 
 const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
@@ -508,6 +509,13 @@ async function init() {
     } catch (migrationErr) {
       console.error('[MIGRATION 015] Erro não tratado (mas segui):', migrationErr.message);
     }
+
+    // Triagem IA: flags explícitas e allow-list de ambiente.
+    const triagemHabilitada = ['1','true','yes','sim','on'].includes(String(process.env.TRIAGEM_IA_ENABLED || '').toLowerCase());
+    if (triagemHabilitada && triagemAmbienteAutorizado()) {
+      try { const { up: migration021 } = require('./migrations/021_triagem_ia'); await migration021(); console.log('[MIGRATION 021] candidatura_analises_ia OK'); }
+      catch (migrationErr) { console.error('[MIGRATION 021] erro (segui):', migrationErr.message); }
+    } else if (triagemHabilitada) console.warn('[MIGRATION 021] bloqueada: ambiente não autorizado');
 
     // Migrations 016-017 — checkout e webhooks Asaas.
     try {
