@@ -4,7 +4,7 @@ const { construirEntradaTriagem, hashEntrada } = require('./triagemPrompt');
 
 function modeloTriagem() {
   return String(process.env.TRIAGEM_IA_PROVIDER || '').toLowerCase() === 'local'
-    ? 'local-compat-v2'
+    ? 'local-compat-v3'
     : (process.env.GROQ_MODEL || 'llama-3.1-8b-instant');
 }
 
