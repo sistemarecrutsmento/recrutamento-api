@@ -110,7 +110,12 @@ function avaliarRequisito(req, fontes, corpus) {
 }
 function analisarLocal(entrada) {
   const { fontes, texto: corpus } = corpusCandidato(entrada?.candidato || {});
-  const requisitos = requisitosEstruturados(entrada);
+  const requisitosBrutos = requisitosEstruturados(entrada);
+  const grupos = new Map();
+  for (const req of requisitosBrutos) { const chave = `${req.tipo}:${req.categoria}`; grupos.set(chave, (grupos.get(chave) || 0) + 1); }
+  const temObrigatorio = requisitosBrutos.some(r => r.tipo === 'obrigatorio');
+  const baseTotal = requisitosBrutos.reduce((s, r) => s + (r.tipo === 'desejavel' ? 0.10 : (DIMENSION_WEIGHTS[r.categoria] || DIMENSION_WEIGHTS.outros)), 0) || 1;
+  const requisitos = requisitosBrutos.map(req => ({ ...req, peso: ((req.tipo === 'desejavel' ? 0.10 : (DIMENSION_WEIGHTS[req.categoria] || DIMENSION_WEIGHTS.outros)) / baseTotal) / (grupos.get(`${req.tipo}:${req.categoria}`) || 1) * 100 }));
   const avaliados = requisitos.map(req => ({ ...req, ...avaliarRequisito(req, fontes, corpus) }));
   const pesoTotal = avaliados.reduce((s, r) => s + r.peso, 0) || 1;
   const pontos = avaliados.reduce((s, r) => s + r.peso * r.score, 0);
