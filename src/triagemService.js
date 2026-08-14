@@ -8,11 +8,11 @@ const {
   calcularScore
 } = require('./triagemSchema');
 
-const PROMPT_VERSION = 'triagem-v1';
-const SCHEMA_VERSION = 'triagem-schema-v1';
+const PROMPT_VERSION = 'triagem-v2';
+const SCHEMA_VERSION = 'triagem-schema-v2';
 function modeloTriagem() {
   return String(process.env.TRIAGEM_IA_PROVIDER || '').toLowerCase() === 'local'
-    ? 'local-compat-v1'
+    ? 'local-compat-v2'
     : (process.env.GROQ_MODEL || 'llama-3.1-8b-instant');
 }
 
