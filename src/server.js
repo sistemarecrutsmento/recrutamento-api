@@ -10,6 +10,7 @@ const asaas = require('./asaas');
 const cloudinary = require('cloudinary').v2;
 const { analisarCurriculo } = require('./curriculoParser');
 const { validateBase64File } = require('./fileValidation');
+const { registrarRotasTriagem } = require('./triagemRoutes');
 require('dotenv').config();
 
 // =========================================================================
@@ -5582,6 +5583,16 @@ function empresaVagaFilialScopeByVaga(req, alias = 'v') {
     : 'FALSE';
 }
 
+registrarRotasTriagem({
+  app,
+  pool,
+  requireEmpresaViewer,
+  requireRecrutadorOuAdmin,
+  empresaVagaFilialScope,
+  audit
+});
+
+
 // Dashboard da empresa
 app.get('/api/empresa/dashboard', requireEmpresaViewer, async (req, res) => {
   const { empresa_id } = req.user;
@@ -5910,10 +5921,16 @@ app.get('/api/empresa/vagas/:vaga_id/candidatos', requireEmpresaViewer, async (r
     const { rows } = await pool.query(`
       SELECT c.id, c.status, c.etapa_atual, c.atualizada_em, c.criada_em,
         cd.id as candidato_id, cd.nome, cd.email, cd.celular, cd.foto_url,
-        v.titulo as vaga_titulo, v.etapas
+        v.titulo as vaga_titulo, v.etapas,
+        a.id AS analise_ia_id, a.status AS analise_ia_status,
+        a.score AS analise_ia_score, a.nivel_compatibilidade AS analise_ia_nivel,
+        a.resultado_json AS analise_ia_resultado_json,
+        a.versao AS analise_ia_versao, a.criada_em AS analise_ia_criada_em
       FROM candidaturas c
       JOIN candidatos cd ON cd.id = c.candidato_id
       JOIN vagas v ON v.id = c.vaga_id
+      LEFT JOIN candidatura_analises_ia a
+        ON a.candidatura_id = c.id AND a.empresa_id = v.empresa_id AND a.analise_atual = true
       WHERE c.vaga_id = $1
       ORDER BY c.atualizada_em DESC
     `, [vaga_id]);
