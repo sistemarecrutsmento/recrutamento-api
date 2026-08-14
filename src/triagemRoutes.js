@@ -255,12 +255,18 @@ function registrarRotasTriagem({ app, pool, requireEmpresaViewer, requireRecruta
       });
       return res.status(resultado.reutilizada ? 200 : 201).json({ ok: true, analise: resultado.analise, reutilizada: resultado.reutilizada });
     } catch (e) {
-      console.error('[triagem criar]', e.message);
-      if (e.statusCode === 409) return res.status(409).json({ erro: 'Conflito ao criar a análise; tente novamente' });
-      if (e.code === 'TRIAGEM_SCORE_INVALIDO' || e.code === 'TRIAGEM_RESULTADO_INVALIDO') {
-        return res.status(422).json({ erro: 'A análise retornou dados inválidos' });
+      // Diagnóstico seguro: código/status e mensagem curta, nunca token, chave ou payload.
+      console.error('[triagem criar]', JSON.stringify({
+        code: e.code || 'TRIAGEM_UNKNOWN_ERROR',
+        statusCode: e.statusCode || null,
+        message: String(e.message || '').slice(0, 300),
+        candidaturaId
+      }));
+      if (e.statusCode === 409) return res.status(409).json({ erro: 'Conflito ao criar a análise; tente novamente', erro_codigo: 'IA_CONFLICT' });
+      if (e.code === 'TRIAGEM_SCORE_INVALIDO' || e.code === 'TRIAGEM_RESULTADO_INVALIDO' || e.code === 'IA_INVALID_JSON' || e.code === 'IA_INVALID_RESPONSE') {
+        return res.status(422).json({ erro: 'A análise retornou dados inválidos', erro_codigo: e.code });
       }
-      return res.status(500).json({ erro: 'Não foi possível concluir a análise' });
+      return res.status(503).json({ erro: 'A análise por IA está temporariamente indisponível. Tente novamente em instantes.', erro_codigo: e.code || 'IA_UNAVAILABLE' });
     }
   }
 
