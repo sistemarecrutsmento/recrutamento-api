@@ -32,6 +32,20 @@ function montarRequisitos(vaga, tags) {
       peso: pesoPorTag
     });
   });
+  // A vaga pode legitimamente have no texto de requisitos or tags (for example,
+  // a quick vacancy created from the company panel). Still provide one
+  // explicit, neutral criterion so the provider can return a bounded score
+  // from the available title/description/candidate data. Never use this as an
+  // automatic hiring decision; the result remains informational.
+  if (!requisitos.length) {
+    requisitos.push({
+      id: 'req-compatibilidade-geral',
+      descricao: 'Compatibilidade geral com a vaga com base nos dados disponíveis',
+      tipo: 'obrigatorio',
+      categoria: 'outros',
+      peso: 100
+    });
+  }
   return requisitos;
 }
 
@@ -213,7 +227,18 @@ function registrarRotasTriagem({ app, pool, requireEmpresaViewer, requireRecruta
 
       const dado = rows[0];
       const dados = montarDadosTriagem(dado);
-      if (!dados.requisitos.length) return res.status(422).json({ erro: 'A vaga não possui requisitos analisáveis' });
+      // Vagas antigas ou testes podem não ter requisitos/tags cadastrados.
+      // Ainda assim, a análise deve funcionar com um critério neutro e explícito,
+      // sem inventar requisitos específicos da vaga.
+      if (!dados.requisitos.length) {
+        dados.requisitos = [{
+          id: 'req-compatibilidade-geral',
+          descricao: 'Compatibilidade geral com a vaga com base nos dados disponíveis',
+          tipo: 'obrigatorio',
+          categoria: 'outros',
+          peso: 100,
+        }];
+      }
 
       const chave = `${req.user.empresa_id}:${candidaturaId}:${forcarReanalise ? 'force' : 'normal'}`;
       let trabalho = analisesEmAndamento.get(chave);
