@@ -10,13 +10,18 @@ const {
 
 const PROMPT_VERSION = 'triagem-v1';
 const SCHEMA_VERSION = 'triagem-schema-v1';
+function modeloTriagem() {
+  return String(process.env.TRIAGEM_IA_PROVIDER || '').toLowerCase() === 'local'
+    ? 'local-compat-v1'
+    : (process.env.GROQ_MODEL || 'llama-3.1-8b-instant');
+}
 
 async function analisarTriagem({ vaga, candidato, requisitos }) {
   const prompt = construirPromptTriagem({ vaga, candidato, requisitos });
   const resultadoBruto = await completarJSON({
     system: prompt.system,
     user: prompt.user,
-    model: process.env.GROQ_MODEL || 'llama-3.1-8b-instant',
+    model: modeloTriagem(),
     temperature: 0,
     maxTokens: Number(process.env.TRIAGEM_IA_MAX_TOKENS || 5000)
   });
@@ -40,7 +45,7 @@ async function analisarTriagem({ vaga, candidato, requisitos }) {
     resultado: validacao.resultado,
     score,
     hash_entrada: hashEntrada(prompt.entrada),
-    modelo: process.env.GROQ_MODEL || 'llama-3.1-8b-instant',
+    modelo: modeloTriagem(),
     versao_prompt: PROMPT_VERSION,
     versao_schema: SCHEMA_VERSION
   };
