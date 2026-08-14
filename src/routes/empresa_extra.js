@@ -494,6 +494,7 @@ function registrar(app, ctx) {
       const { empresa_id } = req.user;
       const { id } = req.params;
       const { acao, etapa, parecer } = req.body;
+      if (!['avancar', 'reprovar', 'reabrir'].includes(acao)) return res.status(400).json({ erro: 'Ação inválida' });
       const check = await pool.query(`
         SELECT c.*, v.etapas as vaga_etapas FROM candidaturas c
         JOIN vagas v ON v.id = c.vaga_id
@@ -501,11 +502,13 @@ function registrar(app, ctx) {
       `, [id, req.user.id, empresa_id]);
       if (check.rows.length === 0) return res.status(403).json({ erro: 'Candidatura não pertence a esta empresa' });
       const cand = check.rows[0];
-      let novaEtapa = etapa !== undefined ? etapa : cand.etapa_atual;
+      let novaEtapa = etapa !== undefined ? Number(etapa) : Number(cand.etapa_atual || 0);
       let novoStatus = cand.status;
+      let etapasArr = cand.vaga_etapas;
+      if (typeof etapasArr === 'string') { try { etapasArr = JSON.parse(etapasArr); } catch (_) { etapasArr = []; } }
       if (acao === 'avancar') {
-        novaEtapa = cand.etapa_atual + 1;
-        const totalEtapas = Array.isArray(cand.vaga_etapas) ? cand.vaga_etapas.length : 7;
+        novaEtapa = Number(cand.etapa_atual || 0) + 1;
+        const totalEtapas = Array.isArray(etapasArr) && etapasArr.length ? etapasArr.length : 7;
         if (novaEtapa >= totalEtapas) novoStatus = 'contratado';
         else novoStatus = 'em_andamento';
       } else if (acao === 'reprovar') {
@@ -513,9 +516,10 @@ function registrar(app, ctx) {
       } else if (acao === 'reabrir') {
         novoStatus = 'em_andamento';
       }
-      const hist = cand.historico || [];
+      const hist = Array.isArray(cand.historico) ? cand.historico.slice() : [];
       hist.push({ tipo: 'status', por: `empresa:${req.user.email}`, quando: new Date().toISOString(), acao, etapa: novaEtapa, status: novoStatus, parecer: parecer || null });
-      await pool.query(`UPDATE candidaturas SET etapa_atual = $1, status = $2, historico = $3::jsonb, atualizada_em = NOW() WHERE id = $4`, [novaEtapa, novoStatus, JSON.stringify(hist), id]);
+      const updated = await pool.query(`UPDATE candidaturas SET etapa_atual = $1, status = $2, historico = $3::jsonb, atualizada_em = NOW() WHERE id = $4 AND etapa_atual = $5 AND status = $6`, [novaEtapa, novoStatus, JSON.stringify(hist), id, cand.etapa_atual, cand.status]);
+      if (updated.rowCount !== 1) return res.status(409).json({ erro: 'A candidatura foi alterada por outra requisição. Recarregue e tente novamente.' });
       res.json({ ok: true, etapa_atual: novaEtapa, status: novoStatus });
     } catch (e) {
       console.error('[EMPRESA STATUS]', e);
