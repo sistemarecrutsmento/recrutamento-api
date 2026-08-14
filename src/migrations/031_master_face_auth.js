@@ -1,0 +1,9 @@
+'use strict';
+// Master SaaS face auth: encrypted landmarks only; no raw media.
+async function up(){ const {pool}=require('../db'); const c=await pool.connect(); try {
+ await c.query(`CREATE TABLE IF NOT EXISTS master_face_templates (id BIGSERIAL PRIMARY KEY, admin_id INTEGER NOT NULL REFERENCES admins(id) ON DELETE CASCADE, ciphertext TEXT NOT NULL, iv TEXT NOT NULL, tag TEXT NOT NULL, algorithm_version TEXT NOT NULL DEFAULT 'landmarks-v1', consent_version TEXT NOT NULL, consented_at TIMESTAMP NOT NULL, enrolled_at TIMESTAMP NOT NULL DEFAULT NOW(), last_used_at TIMESTAMP, revoked_at TIMESTAMP, UNIQUE(admin_id))`);
+ await c.query(`CREATE TABLE IF NOT EXISTS master_face_challenges (id BIGSERIAL PRIMARY KEY, challenge_hash TEXT NOT NULL UNIQUE, admin_id INTEGER REFERENCES admins(id) ON DELETE CASCADE, purpose TEXT NOT NULL CHECK(purpose IN ('login','enrollment')), command TEXT NOT NULL CHECK(command IN ('blink','turn_left','turn_right','open_mouth','nod')), expires_at TIMESTAMP NOT NULL, used_at TIMESTAMP, request_ip INET, created_at TIMESTAMP NOT NULL DEFAULT NOW())`);
+ await c.query(`ALTER TABLE master_face_challenges ADD COLUMN IF NOT EXISTS command TEXT`); await c.query(`UPDATE master_face_challenges SET command='blink' WHERE command IS NULL`); await c.query(`ALTER TABLE master_face_challenges ALTER COLUMN command SET NOT NULL`);
+ await c.query(`CREATE TABLE IF NOT EXISTS master_face_attempts (id BIGSERIAL PRIMARY KEY, admin_id INTEGER REFERENCES admins(id) ON DELETE SET NULL, outcome TEXT NOT NULL, challenge_id BIGINT REFERENCES master_face_challenges(id) ON DELETE SET NULL, request_ip INET, created_at TIMESTAMP NOT NULL DEFAULT NOW())`);
+ await c.query('CREATE INDEX IF NOT EXISTS idx_master_face_challenges_expiry ON master_face_challenges(expires_at)'); await c.query('CREATE INDEX IF NOT EXISTS idx_master_face_attempts_recent ON master_face_attempts(admin_id,created_at DESC)');
+ } finally { c.release(); } } module.exports={up};
