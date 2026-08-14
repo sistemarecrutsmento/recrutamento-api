@@ -4,59 +4,123 @@
 const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
 const LOCAL_MODEL = 'local-compat-v1';
 
-const STOPWORDS = new Set('a o e de da do das dos em no na nos nas para por com sem que uma um ao aos as os ou se seu sua seus suas vaga candidato candidata experiência experiencias formação curso área nivel nível requisitos requisito obrigatório obrigatorio desejável desejavel geral compatibilidade'.split(' '));
+const STOPWORDS = new Set('a o e de da do das dos em no na nos nas para por com sem que uma um ao aos as os ou se seu sua seus suas vaga candidato candidata experiência experiencias formação curso área nivel nível requisitos requisito obrigatório obrigatorio desejável desejavel geral compatibilidade mínimo minima minimo anos ano com base dados disponíveis disponível'.split(' '));
+const ALIASES = [
+  [/microsoft\s+excel|excel\s+micro(?:soft)?/g, 'excel'],
+  [/microsoft\s+power\s*bi|power\s*bi/g, 'powerbi'],
+  [/recursos\s+humanos|\brh\b/g, 'recursoshumanos'],
+  [/gestao\s+de\s+equipes?|lideranca\s+de\s+equipes?/g, 'liderancaequipe'],
+  [/indicadores|kpis?/g, 'indicadores']
+];
+const DIMENSION_WEIGHTS = {
+  experiencia: 0.25, competencia_tecnica: 0.20, formacao: 0.15,
+  senioridade: 0.10, obrigatorios: 0.20, desejaveis: 0.05, outros: 0.05
+};
 
 function normalizarToken(valor) {
-  return String(valor || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase().replace(/[^a-z0-9+#.]/g, ' ').trim();
+  let s = String(valor || '').normalize('NFD').replace(/[\u0300-\u036f]/g, '').toLowerCase();
+  for (const [re, replacement] of ALIASES) s = s.replace(re, replacement);
+  return s.replace(/[^a-z0-9+#.]/g, ' ').replace(/\s+/g, ' ').trim();
 }
-
-function palavras(valor) {
-  return normalizarToken(valor).split(/\s+/).filter(t => t.length >= 3 && !STOPWORDS.has(t));
+function palavras(valor) { return normalizarToken(valor).split(/\s+/).filter(t => t.length >= 3 && !STOPWORDS.has(t)); }
+function mesesEntre(inicio, fim) {
+  const parse = v => { const m = String(v || '').match(/^(\d{4})(?:-(\d{1,2}))?/); return m ? Number(m[1]) * 12 + Number(m[2] || 1) : null; };
+  const a = parse(inicio); const b = parse(fim) ?? (new Date().getFullYear() * 12 + new Date().getMonth() + 1);
+  return a && b >= a ? b - a + 1 : 0;
 }
-
+function normalizarNivel(v) {
+  const s = normalizarToken(v);
+  if (/estagio|aprendiz|trainee/.test(s)) return 1;
+  if (/auxiliar|assistente/.test(s)) return 2;
+  if (/junior|j?nior/.test(s)) return 3;
+  if (/pleno/.test(s)) return 4;
+  if (/senior|especialista/.test(s)) return 5;
+  if (/lider|supervisor/.test(s)) return 6;
+  if (/coordenador/.test(s)) return 7;
+  if (/gerente|diretor/.test(s)) return 8;
+  return 0;
+}
+function detectarCategoria(texto) {
+  const s = normalizarToken(texto);
+  if (/formacao|graduacao|superior|tecnico|bacharel|licenci|pos|mba/.test(s)) return 'formacao';
+  if (/lider|equipe|gestao|supervis|coorden|gerenc/.test(s)) return 'lideranca';
+  if (/senior|junior|pleno|especialista|nivel/.test(s)) return 'senioridade';
+  if (/ano|mes|experiencia|atuacao|vivencia/.test(s)) return 'tempo_experiencia';
+  if (/idioma|ingles|espanhol|portugues|frances/.test(s)) return 'idioma';
+  if (/certific|certificacao/.test(s)) return 'certificacao';
+  if (/cidade|estado|presencial|remoto|localizacao/.test(s)) return 'localizacao';
+  if (/excel|powerbi|sql|javascript|python|java|software|ferramenta|tecnic/.test(s)) return 'competencia_tecnica';
+  if (/responsabil|experiencia|atuacao|cargo|funcao/.test(s)) return 'experiencia';
+  return 'outros';
+}
+function dividirRequisito(descricao) {
+  const s = String(descricao || '').trim();
+  const partes = s.split(/\s*(?:;|\.|\n|\s+e\s+|,|\s+tambem\s+)\s*/i).map(x => x.trim()).filter(x => x.length >= 3);
+  return partes.length > 1 ? partes : [s];
+}
 function corpusCandidato(candidato) {
-  const fontes = [
-    ['formacao', JSON.stringify(candidato?.formacao || [])],
-    ['experiencia', JSON.stringify(candidato?.experiencias || [])],
-    ['competencias', JSON.stringify(candidato?.competencias || [])],
-    ['curriculo', candidato?.curriculo_texto],
-    ['perfil', candidato?.perfil],
-    ['resposta_candidatura', JSON.stringify(candidato?.respostas || [])]
-  ];
-  return { texto: normalizarToken(fontes.map(([, texto]) => texto || '').join(' ')), fontes };
+  const fontes = [];
+  const add = (fonte, texto, extra = {}) => { if (texto) fontes.push({ fonte, texto: String(texto), ...extra }); };
+  for (const f of candidato?.formacao || []) add('formacao', Object.values(f).join(' '), { item: f });
+  for (const e of candidato?.experiencias || []) add('experiencia_profissional', Object.values(e).join(' '), { item: e, meses: mesesEntre(e.inicio, e.fim) });
+  for (const c of candidato?.competencias || []) add('competencias', c);
+  for (const i of candidato?.idiomas || []) add('idioma', i);
+  add('perfil', candidato?.perfil); add('curriculo', candidato?.curriculo_texto);
+  for (const r of candidato?.respostas || []) add('resposta_candidatura', `${r.pergunta} ${r.resposta}`);
+  return { fontes, texto: normalizarToken(fontes.map(x => x.texto).join(' ')) };
 }
-
-function analisarLocal(entrada) {
-  const vaga = entrada?.vaga || {};
-  const candidato = entrada?.candidato || {};
-  const requisitos = Array.isArray(entrada?.requisitos) ? entrada.requisitos : [];
-  const { texto: corpus, fontes } = corpusCandidato(candidato);
-  const resultado = requisitos.map((req, indice) => {
-    const descricao = String(req?.descricao || '').trim() || `Requisito ${indice + 1}`;
-    const termos = palavras(descricao);
-    if (!termos.length) {
-      const possuiDados = corpus.length > 20;
-      return {
-        id: req.id || `req-${String(indice + 1).padStart(3, '0')}`,
-        descricao, tipo: req.tipo === 'desejavel' ? 'desejavel' : 'obrigatorio', categoria: req.categoria || 'outros', peso: Number(req.peso) > 0 ? Number(req.peso) : 1,
-        status: possuiDados ? 'parcialmente_atendido' : 'nao_identificado', evidencias: possuiDados ? [{ fonte: 'dados_disponiveis', descricao: 'Há dados profissionais disponíveis para avaliação.' }] : [],
-        justificativa: possuiDados ? 'Avaliação geral baseada nos dados disponíveis; não foram identificados termos específicos.' : 'Não há dados suficientes para identificar evidências.', confianca: 'baixa'
-      };
+function requisitosEstruturados(entrada) {
+  const out = []; let n = 0;
+  for (const original of (entrada?.requisitos || [])) {
+    const partes = dividirRequisito(original.descricao);
+    const pesoBase = Number(original.peso) > 0 ? Number(original.peso) / partes.length : 1;
+    for (const descricao of partes) {
+      const s = normalizarToken(descricao);
+      const tipo = /diferencial|desejavel|preferencial|considerado um diferencial/.test(s) ? 'desejavel' : (original.tipo || 'obrigatorio');
+      const min = Number((s.match(/(?:minimo|minima|pelo menos)\s*(\d+)\s*ano/) || [])[1] || 0);
+      out.push({ id: `${original.id || 'req'}-${++n}`, descricao, categoria: detectarCategoria(descricao), tipo, peso: pesoBase, minimo_anos: min, interpretacao_confianca: partes.length > 1 ? 'media' : 'baixa' });
     }
-    const encontrados = termos.filter(t => corpus.includes(t));
-    const proporcao = encontrados.length / termos.length;
-    const status = proporcao >= 0.7 ? 'atendido' : proporcao > 0 ? 'parcialmente_atendido' : 'nao_identificado';
-    let fonte = 'dados_disponiveis';
-    for (const [nome, texto] of fontes) { if (encontrados.some(t => normalizarToken(texto).includes(t))) { fonte = nome; break; } }
-    return {
-      id: req.id || `req-${String(indice + 1).padStart(3, '0')}`,
-      descricao, tipo: req.tipo === 'desejavel' ? 'desejavel' : 'obrigatorio', categoria: req.categoria || 'outros', peso: Number(req.peso) > 0 ? Number(req.peso) : 1,
-      status, evidencias: encontrados.length ? [{ fonte, descricao: `Evidência encontrada para: ${encontrados.join(', ')}.` }] : [],
-      justificativa: encontrados.length ? `${encontrados.length} de ${termos.length} termos relevantes encontrados nos dados informados.` : 'Não foi encontrada evidência nas informações disponíveis; isso não significa que a competência não exista.',
-      confianca: encontrados.length ? 'media' : 'baixa'
-    };
-  });
-  return { requisitos: resultado, pontos_atencao: resultado.filter(r => r.status !== 'atendido').map(r => ({ descricao: `Revisar evidências de: ${r.descricao}`, fonte: 'dados_disponiveis' })), resumo: `Análise local baseada em correspondência de evidências entre a vaga ${vaga.titulo ? `“${vaga.titulo}”` : ''} e os dados informados do candidato.`, avisos: ['Análise determinística local; a decisão permanece com a equipe.'] };
+  }
+  return out;
+}
+function avaliarRequisito(req, fontes, corpus) {
+  const termos = palavras(req.descricao).filter(t => !/^\d+$/.test(t));
+  const encontradas = termos.filter(t => corpus.includes(t));
+  const evidencias = fontes.filter(f => { const c = normalizarToken(f.texto); return encontradas.some(t => c.includes(t)); });
+  const experiencias = evidencias.filter(e => e.fonte === 'experiencia_profissional');
+  const melhor = experiencias.sort((a, b) => (b.meses || 0) - (a.meses || 0))[0] || evidencias[0];
+  let forca = 0;
+  if (encontradas.length) forca = 1;
+  if (evidencias.some(e => e.fonte === 'competencias')) forca = Math.max(forca, 2);
+  if (evidencias.some(e => e.fonte === 'perfil')) forca = Math.max(forca, 2);
+  if (experiencias.length) forca = Math.max(forca, 3);
+  if (experiencias.some(e => e.item?.descricao && palavras(e.item.descricao).length >= 5)) forca = Math.max(forca, 4);
+  if (experiencias.some(e => (e.meses || 0) >= 12 && /result|responsabil|lider|gestao|indicador|desenvolv|reduz|aument/.test(normalizarToken(e.item?.descricao)))) forca = 5;
+  let score = forca === 0 ? 0 : 20 + (forca * 16);
+  if (termos.length) score *= Math.min(1, Math.max(0.35, encontradas.length / termos.length));
+  if (req.minimo_anos > 0) {
+    const meses = experiencias.reduce((m, e) => m + (e.meses || 0), 0);
+    score = Math.min(score, Math.round(Math.min(1, meses / (req.minimo_anos * 12)) * 100));
+  }
+  score = Math.max(0, Math.min(100, Math.round(score)));
+  const status = forca === 0 ? 'nao_informado' : score >= 75 ? 'atendido' : score >= 35 ? 'parcialmente_atendido' : 'nao_atendido';
+  const fonte = melhor?.fonte || 'dados_disponiveis';
+  const evid = melhor ? [{ fonte, tipo: fonte, descricao: `Evidência encontrada em ${fonte.replaceAll('_', ' ')}${melhor.item?.cargo ? ` — ${melhor.item.cargo}` : ''}${melhor.item?.empresa ? ` — ${melhor.item.empresa}` : ''}${melhor.item?.descricao ? `: ${String(melhor.item.descricao).slice(0, 300)}` : '.'}`, forca }] : [];
+  return { score, status, evidencias: evid, justificativa: forca ? `Evidência classificada em ${forca}/5; ${encontradas.length} termo(s) relevante(s) identificado(s).` : 'Dados insuficientes para avaliar este requisito.', confianca_score: Math.round(Math.min(100, (forca * 18) + (req.interpretacao_confianca === 'media' ? 30 : 20))), confianca: forca >= 4 ? 'alta' : forca >= 2 ? 'media' : 'baixa' };
+}
+function analisarLocal(entrada) {
+  const { fontes, texto: corpus } = corpusCandidato(entrada?.candidato || {});
+  const requisitos = requisitosEstruturados(entrada);
+  const avaliados = requisitos.map(req => ({ ...req, ...avaliarRequisito(req, fontes, corpus) }));
+  const pesoTotal = avaliados.reduce((s, r) => s + r.peso, 0) || 1;
+  const pontos = avaliados.reduce((s, r) => s + r.peso * r.score, 0);
+  const obrigatoriosNaoAtendidos = avaliados.filter(r => r.tipo === 'obrigatorio' && r.status === 'nao_atendido').length;
+  const penalidade = obrigatoriosNaoAtendidos ? Math.min(20, obrigatoriosNaoAtendidos * 8) : 0;
+  const score = Math.max(0, Math.min(100, Math.round(pontos / pesoTotal - penalidade)));
+  const confianca = Math.round(avaliados.reduce((s, r) => s + r.confianca_score * r.peso, 0) / pesoTotal) || 0;
+  const dimensoes = {}; for (const r of avaliados) { dimensoes[r.categoria] = (dimensoes[r.categoria] || { pontos: 0, peso: 0 }); dimensoes[r.categoria].pontos += r.score * r.peso; dimensoes[r.categoria].peso += r.peso; }
+  for (const d of Object.values(dimensoes)) d.score = Math.round(d.pontos / d.peso);
+  return { requisitos: avaliados, dimensoes, score_compatibilidade: score, confianca_score: confianca, pontos_atencao: avaliados.filter(r => r.status !== 'atendido').map(r => ({ descricao: `Revisar: ${r.descricao}`, fonte: 'dados_disponiveis' })), resumo: 'Índice de aderência estimada entre os requisitos da vaga e as evidências profissionais disponíveis. Não representa probabilidade de contratação.', avisos: ['Análise determinística local, explicável e de apoio à decisão humana.'], obrigatorios_nao_atendidos: obrigatoriosNaoAtendidos };
 }
 
 function extrairEntradaDoPrompt(user) {
@@ -169,4 +233,4 @@ async function completarJSON({
   }
 }
 
-module.exports = { completarJSON, GROQ_URL };
+module.exports = { completarJSON, GROQ_URL, analisarLocal, requisitosEstruturados };
