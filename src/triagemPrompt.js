@@ -91,7 +91,7 @@ function construirPromptTriagem(contexto) {
     user: [
       'Analise cada requisito individualmente.',
       'Indique fonte e descrição objetiva para cada evidência.',
-      'Use os estados: atendido, parcialmente_atendido, nao_identificado, nao_atendido.',
+      'Use os estados: atendido, parcialmente_atendido, nao_atendido, nao_informado. Ausência de informação deve ser nao_informado, não nao_atendido.',
       'DADOS_FORNECIDOS:',
       JSON.stringify(entrada),
       'Retorne apenas o objeto JSON da análise.'
