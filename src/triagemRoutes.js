@@ -170,6 +170,9 @@ async function registrarNovaAnalise({ pool, req, candidaturaId, dado, dados, for
 }
 
 function registrarRotasTriagem({ app, pool, requireEmpresaViewer, requireRecrutadorOuAdmin, empresaVagaFilialScope, audit, analisar = analisarTriagem }) {
+  // Prevent duplicate provider calls when list/detail requests race for the same candidature.
+  // The durable cache remains the source of truth; this only coalesces in-flight work.
+  const analisesEmAndamento = new Map();
   async function processarAnalise(req, res, forcarReanalise = false) {
     const candidaturaId = numeroId(req.params.id);
     if (!candidaturaId) return res.status(400).json({ erro: 'ID de candidatura inválido' });
@@ -212,9 +215,14 @@ function registrarRotasTriagem({ app, pool, requireEmpresaViewer, requireRecruta
       const dados = montarDadosTriagem(dado);
       if (!dados.requisitos.length) return res.status(422).json({ erro: 'A vaga não possui requisitos analisáveis' });
 
-      const resultado = await registrarNovaAnalise({
-        pool, req, candidaturaId, dado, dados, forcarReanalise, analisar
-      });
+      const chave = `${req.user.empresa_id}:${candidaturaId}:${forcarReanalise ? 'force' : 'normal'}`;
+      let trabalho = analisesEmAndamento.get(chave);
+      if (!trabalho) {
+        trabalho = registrarNovaAnalise({ pool, req, candidaturaId, dado, dados, forcarReanalise, analisar });
+        analisesEmAndamento.set(chave, trabalho);
+        trabalho.finally(() => analisesEmAndamento.delete(chave)).catch(() => {});
+      }
+      const resultado = await trabalho;
       await audit(req, `empresa.candidatura.analise_ia_${forcarReanalise ? 'reanalisada' : 'created'}`, {
         resource_type: 'candidatura',
         resource_id: candidaturaId,
