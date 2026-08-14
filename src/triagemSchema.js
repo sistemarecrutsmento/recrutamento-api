@@ -2,6 +2,7 @@ const STATUS_VALIDOS = new Set([
   'atendido',
   'parcialmente_atendido',
   'nao_identificado',
+  'nao_informado',
   'nao_atendido'
 ]);
 
@@ -32,7 +33,15 @@ function normalizarEvidencia(evidencia) {
   const fonte = texto(evidencia.fonte);
   const descricao = texto(evidencia.descricao);
   if (!FONTES_VALIDAS.has(fonte) || !descricao) return null;
-  return { fonte, descricao };
+  return {
+    fonte,
+    descricao,
+    tipo: texto(evidencia.tipo) || undefined,
+    cargo: texto(evidencia.cargo) || undefined,
+    empresa: texto(evidencia.empresa) || undefined,
+    periodo: texto(evidencia.periodo) || undefined,
+    forca: Number.isFinite(Number(evidencia.forca)) ? Math.max(0, Math.min(5, Number(evidencia.forca))) : undefined
+  };
 }
 
 function normalizarRequisito(requisito, indice) {
@@ -48,6 +57,7 @@ function normalizarRequisito(requisito, indice) {
   if (!status || !STATUS_VALIDOS.has(status)) return null;
   if (!TIPOS_VALIDOS.has(tipo)) return null;
 
+  const score = Number(requisito.score);
   return {
     id,
     descricao: texto(requisito.descricao),
@@ -55,11 +65,15 @@ function normalizarRequisito(requisito, indice) {
     categoria: texto(requisito.categoria) || 'outros',
     peso: Number.isFinite(pesoNumerico) && pesoNumerico > 0 ? pesoNumerico : 1,
     status,
+    score: Number.isFinite(score) ? Math.max(0, Math.min(100, score)) : undefined,
     evidencias,
     justificativa: texto(requisito.justificativa),
     confianca: CONFIANCAS_VALIDAS.has(requisito.confianca)
       ? requisito.confianca
-      : 'baixa'
+      : 'baixa',
+    confianca_score: Number.isFinite(Number(requisito.confianca_score))
+      ? Math.max(0, Math.min(100, Number(requisito.confianca_score)))
+      : undefined
   };
 }
 
@@ -71,6 +85,9 @@ function normalizarAnalise(resultado) {
 
   return {
     requisitos,
+    score_compatibilidade: Number.isFinite(Number(resultado.score_compatibilidade)) ? Math.max(0, Math.min(100, Number(resultado.score_compatibilidade))) : undefined,
+    confianca_score: Number.isFinite(Number(resultado.confianca_score)) ? Math.max(0, Math.min(100, Number(resultado.confianca_score))) : undefined,
+    dimensoes: resultado.dimensoes && typeof resultado.dimensoes === 'object' ? resultado.dimensoes : {},
     pontos_atencao: Array.isArray(resultado.pontos_atencao)
       ? resultado.pontos_atencao
           .filter(item => item && typeof item === 'object')
@@ -132,8 +149,12 @@ function calcularScore(requisitos) {
     if (requisito.tipo === 'obrigatorio' && requisito.status === 'nao_atendido') {
       obrigatoriosNaoAtendidos += 1;
     }
-    if (requisito.status === 'atendido') pontos += peso;
-    if (requisito.status === 'parcialmente_atendido') pontos += peso * 0.5;
+    if (Number.isFinite(Number(requisito.score))) {
+      pontos += peso * (Number(requisito.score) / 100);
+    } else {
+      if (requisito.status === 'atendido') pontos += peso;
+      if (requisito.status === 'parcialmente_atendido') pontos += peso * 0.5;
+    }
   }
 
   if (!Number.isFinite(pesoTotal) || pesoTotal <= 0 || !Number.isFinite(pontos)) {
