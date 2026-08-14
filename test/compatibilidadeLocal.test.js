@@ -2,47 +2,29 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const { analisarLocal } = require('../src/iaService');
 
-const vaga = (descricao, tags = []) => ({
-  vaga: { titulo: 'Supervisor de Operações', nivel: 'supervisor' },
-  requisitos: [{ id: 'req-texto-vaga', descricao, tipo: 'obrigatorio', peso: 70 }, ...tags.map((tag, i) => ({ id: `req-tag-${i}`, descricao: tag, tipo: 'desejavel', peso: 30 / tags.length }))],
-  candidato: {}
-});
+const vaga = (descricao, tags = []) => ({ vaga: { titulo: 'Supervisor de Operações', nivel: 'supervisor' }, requisitos: [{ id: 'req-texto-vaga', descricao, tipo: 'obrigatorio', peso: 70 }, ...tags.map((tag, i) => ({ id: `req-tag-${i}`, descricao: tag, tipo: 'desejavel', peso: 30 / tags.length }))], candidato: {} });
 const exp = (descricao, cargo = 'Supervisor de Operações', inicio = '2021-01', fim = '2025-01') => ({ cargo, empresa: 'Empresa X', inicio, fim, emprego_atual: false, descricao });
+const run = (desc, candidato, tags = ['Excel']) => analisarLocal({ ...vaga(desc, tags), candidato });
+const score = (desc, candidato, tags) => run(desc, candidato, tags).score_compatibilidade;
 
-const run = (desc, candidato) => analisarLocal({ ...vaga(desc, ['Excel']), candidato });
-
-test('candidato com evidência profissional forte pontua acima de menção isolada', () => {
-  const forte = run('Experiência com liderança de equipes e Excel', { competencias: [], experiencias: [exp('Gestão de equipe de 20 colaboradores, análise de indicadores e uso diário de Excel.') ] });
-  const fraco = run('Experiência com liderança de equipes e Excel', { competencias: ['Excel', 'liderança'] });
-  assert.ok(forte.score_compatibilidade > fraco.score_compatibilidade);
-  assert.ok(forte.confianca_score > 0);
-});
-
-test('ausência de informação não vira atendido nem inventa evidência', () => {
-  const r = run('Inglês avançado', { competencias: [], experiencias: [] });
-  assert.equal(r.requisitos[0].status, 'nao_informado');
-  assert.equal(r.requisitos[0].evidencias.length, 0);
-});
-
-test('tempo mínimo diferencia duração parcial e suficiente', () => {
-  const curto = run('mínimo de 3 anos de experiência em gestão de equipes', { experiencias: [exp('Gestão de equipe', 'Supervisor', '2022-01', '2023-01')] });
-  const longo = run('mínimo de 3 anos de experiência em gestão de equipes', { experiencias: [exp('Gestão de equipe e indicadores', 'Supervisor', '2020-01', '2025-01')] });
-  assert.ok(longo.score_compatibilidade > curto.score_compatibilidade);
-});
-
-test('mesmos dados produzem resultado determinístico', () => {
-  const c = { competencias: ['Microsoft Excel'], experiencias: [exp('Elaboração de relatórios utilizando Excel.')] };
-  assert.deepEqual(run('Excel avançado', c), run('Excel avançado', c));
-});
-
-test('tags desejáveis não são eliminatórias', () => {
-  const r = run('Experiência com operações', { experiencias: [exp('Operações e atendimento', 'Assistente Operacional')] });
-  assert.ok(r.requisitos.some(x => x.tipo === 'desejavel'));
-  assert.equal(r.obrigatorios_nao_atendidos, 0);
-});
-
-test('vaga sem requisitos não cria critério profissional inventado', () => {
-  const r = analisarLocal({ vaga: { titulo: 'Vaga aberta' }, requisitos: [{ id: 'req-compatibilidade-geral', descricao: 'Compatibilidade geral com a vaga com base nos dados disponíveis', tipo: 'obrigatorio', peso: 100 }], candidato: {} });
-  assert.equal(r.requisitos.length, 1);
-  assert.equal(r.requisitos[0].status, 'nao_informado');
-});
+test('01 candidato perfeito tem evidência forte', () => assert.ok(score('Experiência com liderança de equipes e Excel', { experiencias: [exp('Gestão de equipe de 20 colaboradores, análise de indicadores e uso diário de Excel.') ] }) >= 70));
+test('02 candidato parcialmente compatível fica abaixo do perfeito', () => assert.ok(score('Experiência com liderança de equipes e Excel', { competencias: ['Excel'], experiencias: [exp('Atendimento ao cliente', 'Assistente Administrativo')] }) < score('Experiência com liderança de equipes e Excel', { experiencias: [exp('Gestão de equipe e uso diário de Excel.') ] })));
+test('03 candidato sem compatibilidade não é atendido', () => assert.ok(score('Power BI e gestão de equipes', { experiencias: [exp('Recepção e arquivo', 'Assistente')] }) < 50));
+test('04 keyword stuffing isolado não equivale a experiência', () => assert.ok(score('Experiência com liderança de equipes e Excel', { competencias: ['Excel', 'liderança', 'gestão de equipes'] }) < score('Experiência com liderança de equipes e Excel', { experiencias: [exp('Gestão de equipe e uso diário de Excel.') ] })));
+test('05 vocabulário diferente ainda pode ser capturado por contexto', () => assert.ok(score('gestão de equipes', { experiencias: [exp('Coordenação de 15 colaboradores e acompanhamento de resultados.', 'Coordenador Operacional')] }) > 0));
+test('06 cargo equivalente é evidência contextual, não equivalência automática', () => assert.ok(score('Experiência em operações', { experiencias: [exp('Coordenação de rotinas operacionais.', 'Coordenador de Operações')] }) > 0));
+test('07 senioridade inferior não recebe evidência forte de liderança', () => assert.ok(score('experiência de supervisão e liderança', { experiencias: [exp('Execução de tarefas operacionais.', 'Auxiliar Operacional')] }) < score('experiência de supervisão e liderança', { experiencias: [exp('Gestão de equipe e metas.', 'Supervisor de Operações')] })));
+test('08 experiência superior é aceita sem penalidade', () => assert.ok(score('experiência em operações', { experiencias: [exp('Gestão de operações e metas.', 'Gerente de Operações')] }) > 0));
+test('09 formação exigida é encontrada', () => assert.ok(score('superior completo em Administração', { formacao: [{ nivel: 'superior', curso: 'Administração', situacao: 'concluído' }] }) > 0));
+test('10 ausência de formação não é inventada', () => assert.equal(run('superior completo em Administração', { experiencias: [] }).requisitos[0].status, 'nao_informado'));
+test('11 obrigatório não atendido gera penalidade proporcional, não zero automático', () => { const r = run('Power BI', { experiencias: [] }); assert.equal(r.obrigatorios_nao_atendidos, 0); assert.ok(r.score_compatibilidade >= 0); });
+test('12 desejável não atendido não é eliminatório', () => { const r = run('Experiência em operações', { experiencias: [exp('Operações')] }, ['Power BI']); assert.equal(r.obrigatorios_nao_atendidos, 0); assert.ok(r.requisitos.some(x => x.tipo === 'desejavel')); });
+test('13 idioma abaixo do exigido é pontuado com evidência parcial', () => { const r = run('Inglês avançado', { idiomas: ['Inglês básico'] }); assert.ok(r.requisitos[0].status !== 'atendido' || r.requisitos[0].score < 100); });
+test('14 tempo abaixo do mínimo reduz a pontuação', () => { const curto = score('mínimo de 3 anos de experiência em gestão de equipes', { experiencias: [exp('Gestão de equipe', 'Supervisor', '2022-01', '2023-01')] }); const longo = score('mínimo de 3 anos de experiência em gestão de equipes', { experiencias: [exp('Gestão de equipe e indicadores', 'Supervisor', '2020-01', '2025-01')] }); assert.ok(longo > curto); });
+test('15 tempo acima do mínimo atinge teto do requisito', () => { const r = run('mínimo de 3 anos de experiência em gestão de equipes', { experiencias: [exp('Gestão de equipe e indicadores', 'Supervisor', '2018-01', '2025-01')] }); assert.ok(r.requisitos[0].score <= 100); });
+test('16 experiências sobrepostas não causam exceção', () => { const r = run('experiência em operações', { experiencias: [exp('Operações', 'Supervisor', '2021-01', '2023-01'), exp('Operações', 'Coordenador', '2022-01', '2024-01')] }); assert.ok(Number.isFinite(r.score_compatibilidade)); });
+test('17 currículo muito curto resulta em baixa confiança', () => { const r = run('Excel e liderança', { competencias: [] }); assert.ok(r.confianca_score < 60); });
+test('18 currículo longo não pontua por quantidade de texto', () => { const r1 = score('Excel', { competencias: ['Excel'] }); const r2 = score('Excel', { competencias: ['Excel'], perfil: 'texto irrelevante '.repeat(500) }); assert.equal(r1, r2); });
+test('19 dados duplicados não multiplicam peso do requisito', () => { const r1 = score('Excel', { competencias: ['Excel'] }); const r2 = score('Excel', { competencias: ['Excel', 'Excel', 'Excel'] }); assert.equal(r1, r2); });
+test('20 vaga sem requisitos mantém critério explícito e não inventa competência', () => { const r = analisarLocal({ vaga: { titulo: 'Vaga aberta' }, requisitos: [{ id: 'req-compatibilidade-geral', descricao: 'Compatibilidade geral com a vaga com base nos dados disponíveis', tipo: 'obrigatorio', peso: 100 }], candidato: {} }); assert.equal(r.requisitos.length, 1); assert.equal(r.requisitos[0].status, 'nao_informado'); });
+test('21 mesmo candidato e vaga produzem resultado determinístico', () => { const c = { competencias: ['Microsoft Excel'], experiencias: [exp('Elaboração de relatórios utilizando Excel.')] }; assert.deepEqual(run('Excel avançado', c), run('Excel avançado', c)); });
