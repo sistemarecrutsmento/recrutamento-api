@@ -2,6 +2,12 @@ const { analisarTriagem, PROMPT_VERSION, SCHEMA_VERSION } = require('./triagemSe
 const { obterConfigTriagem, triagemDisponivel } = require('./triagemConfig');
 const { construirEntradaTriagem, hashEntrada } = require('./triagemPrompt');
 
+function modeloTriagem() {
+  return String(process.env.TRIAGEM_IA_PROVIDER || '').toLowerCase() === 'local'
+    ? 'local-compat-v1'
+    : (process.env.GROQ_MODEL || 'llama-3.1-8b-instant');
+}
+
 function numeroId(valor) {
   const id = Number(valor);
   return Number.isInteger(id) && id > 0 ? id : null;
@@ -105,7 +111,7 @@ async function buscarAnaliseCache(db, { candidaturaId, hash, modelo, empresaId, 
 }
 
 async function registrarNovaAnalise({ pool, req, candidaturaId, dado, dados, forcarReanalise, analisar = analisarTriagem }) {
-  const modelo = process.env.GROQ_MODEL || 'llama-3.1-8b-instant';
+  const modelo = modeloTriagem();
   if (!forcarReanalise) {
     const cache = await buscarAnaliseCache(pool, {
       candidaturaId,
