@@ -611,6 +611,7 @@ async function init() {
     } catch (migrationErr) {
       console.error('[MIGRATION 030] Erro não tratado (mas segui):', migrationErr.message);
     }
+    try { const { up: migration031 } = require('./migrations/031_master_face_auth'); await migration031(); console.log('[MIGRATION 031] Master face auth OK'); } catch (migrationErr) { console.error('[MIGRATION 031] Erro não tratado (mas segui):', migrationErr.message); }
     console.log('Tabelas criadas/verificadas + migrations Fase 1-030 aplicadas');
   } finally {
     client.release();
