@@ -83,31 +83,68 @@ function requisitosEstruturados(entrada) {
   }
   return out;
 }
+function criticidadeRequisito(req) {
+  const s = normalizarToken(req.descricao);
+  if (/obrigator|indispensavel|legal|registro|licenca|cnh|habilitacao|diploma/.test(s)) return 'critico';
+  if (req.tipo === 'obrigatorio' && (/minimo|minima|lider|supervis|coorden|gerenc|senior|avancado/.test(s))) return 'importante';
+  return req.tipo === 'desejavel' ? 'padrao' : 'importante';
+}
+function sinaisConceituais(req, texto) {
+  const s = normalizarToken(`${req.descricao} ${texto}`);
+  const grupos = [
+    [/liderancaequipe|lider|supervis|coorden|gestao|equipe|colaborador|distribuicao|desempenho/, 'lideranca'],
+    [/indicadores|kpis?|relatorios|dashboards|metas|resultados/, 'indicadores'],
+    [/operacoes|processos|rotinas|unidade|produtividade/, 'operacoes'],
+    [/atendimento|cliente|relacionamento|vendas/, 'atendimento'],
+    [/excel|powerbi|sql|javascript|python|java/, 'tecnologia']
+  ];
+  const pedido = grupos.filter(([re]) => re.test(normalizarToken(req.descricao))).map(([, n]) => n);
+  const corpus = grupos.filter(([re]) => re.test(s)).map(([, n]) => n);
+  return { pedido, corpus, transferiveis: pedido.filter(x => corpus.includes(x)) };
+}
+function mesesUnicos(experiencias) {
+  const intervals = experiencias.map(e => {
+    const parse = v => { const m = String(v || '').match(/^(\d{4})(?:-(\d{1,2}))?/); return m ? Number(m[1]) * 12 + Number(m[2] || 1) : null; };
+    const a = parse(e.inicio); const b = parse(e.fim) ?? (new Date().getFullYear() * 12 + new Date().getMonth() + 1);
+    return a && b >= a ? [a, b] : null;
+  }).filter(Boolean).sort((x, y) => x[0] - y[0]);
+  let total = 0, current = null;
+  for (const i of intervals) { if (!current) current = i; else if (i[0] <= current[1] + 1) current[1] = Math.max(current[1], i[1]); else { total += current[1] - current[0] + 1; current = i; } }
+  return total + (current ? current[1] - current[0] + 1 : 0);
+}
 function avaliarRequisito(req, fontes, corpus) {
   const termos = palavras(req.descricao).filter(t => !/^\d+$/.test(t));
+  const sinais = sinaisConceituais(req, corpus);
   const encontradas = termos.filter(t => corpus.includes(t));
-  const evidencias = fontes.filter(f => { const c = normalizarToken(f.texto); return encontradas.some(t => c.includes(t)); });
+  const evidencias = fontes.filter(f => { const c = normalizarToken(f.texto); return encontradas.some(t => c.includes(t)) || sinais.transferiveis.length > 0 && f.fonte === 'experiencia_profissional' && sinaisConceituais(req, c).transferiveis.length > 0; });
   const experiencias = evidencias.filter(e => e.fonte === 'experiencia_profissional');
-  const melhor = experiencias.sort((a, b) => (b.meses || 0) - (a.meses || 0))[0] || evidencias[0];
+  const melhor = [...experiencias].sort((a, b) => (b.meses || 0) - (a.meses || 0))[0] || evidencias[0];
+  const experienciaDireta = experiencias.some(e => termos.some(t => normalizarToken(`${e.item?.cargo || ''} ${e.item?.descricao || ''}`).includes(t)));
+  const transferivel = !experienciaDireta && experiencias.length > 0 && sinais.transferiveis.length > 0;
   let forca = 0;
-  if (encontradas.length) forca = 1;
+  if (encontradas.length || transferivel) forca = 1;
   if (evidencias.some(e => e.fonte === 'competencias')) forca = Math.max(forca, 2);
   if (evidencias.some(e => e.fonte === 'perfil')) forca = Math.max(forca, 2);
-  if (experiencias.length) forca = Math.max(forca, 3);
+  if (experiencias.length) forca = Math.max(forca, transferivel ? 3 : 4);
   if (experiencias.some(e => e.item?.descricao && palavras(e.item.descricao).length >= 5)) forca = Math.max(forca, 4);
-  if (experiencias.some(e => (e.meses || 0) >= 12 && /result|responsabil|lider|gestao|indicador|desenvolv|reduz|aument/.test(normalizarToken(e.item?.descricao)))) forca = 5;
-  let score = forca === 0 ? 0 : 20 + (forca * 16);
-  if (termos.length) score *= Math.min(1, Math.max(0.35, encontradas.length / termos.length));
+  if (experiencias.some(e => (e.meses || 0) >= 12 && /result|responsabil|lider|gestao|indicador|desenvolv|reduz|aument|dashboard/.test(normalizarToken(e.item?.descricao)))) forca = 5;
+  const proporcao = termos.length ? Math.min(1, Math.max(0.35, encontradas.length / termos.length)) : (transferivel ? 0.7 : 1);
+  let score = forca === 0 ? 0 : (20 + forca * 16) * proporcao;
+  if (transferivel) score *= 0.82;
   if (req.minimo_anos > 0) {
-    const meses = experiencias.reduce((m, e) => m + (e.meses || 0), 0);
-    score = Math.min(score, Math.round(Math.min(1, meses / (req.minimo_anos * 12)) * 100));
+    const meses = mesesUnicos(experiencias.map(e => e.item || {}));
+    score = Math.min(score, Math.min(1, meses / (req.minimo_anos * 12)) * 100);
   }
+  const nivelExigido = normalizarNivel(req.descricao); const nivelCandidato = Math.max(0, ...experiencias.map(e => normalizarNivel(e.item?.cargo)));
+  if (nivelExigido && nivelCandidato) score *= Math.min(1, Math.max(0.5, nivelCandidato / nivelExigido));
   score = Math.max(0, Math.min(100, Math.round(score)));
   const status = forca === 0 ? 'nao_informado' : score >= 75 ? 'atendido' : score >= 35 ? 'parcialmente_atendido' : 'nao_atendido';
   const fonte = melhor?.fonte || 'dados_disponiveis';
-  const evid = melhor ? [{ fonte, tipo: fonte, descricao: `Evidência encontrada em ${fonte.replaceAll('_', ' ')}${melhor.item?.cargo ? ` — ${melhor.item.cargo}` : ''}${melhor.item?.empresa ? ` — ${melhor.item.empresa}` : ''}${melhor.item?.descricao ? `: ${String(melhor.item.descricao).slice(0, 300)}` : '.'}`, forca }] : [];
-  return { score, status, evidencias: evid, justificativa: forca ? `Evidência classificada em ${forca}/5; ${encontradas.length} termo(s) relevante(s) identificado(s).` : 'Dados insuficientes para avaliar este requisito.', confianca_score: Math.round(Math.min(100, (forca * 18) + (req.interpretacao_confianca === 'media' ? 30 : 20))), confianca: forca >= 4 ? 'alta' : forca >= 2 ? 'media' : 'baixa' };
+  const evid = melhor ? [{ fonte, tipo: fonte, cargo: melhor.item?.cargo, empresa: melhor.item?.empresa, periodo: `${melhor.item?.inicio || '?'} a ${melhor.item?.fim || (melhor.item?.emprego_atual ? 'atual' : '?')}`, descricao: `Experiência ${experienciaDireta ? 'direta' : transferivel ? 'transferível' : 'relacionada'}${melhor.item?.cargo ? ` como ${melhor.item.cargo}` : ''}${melhor.item?.empresa ? ` na empresa ${melhor.item.empresa}` : ''}${melhor.item?.descricao ? `: ${String(melhor.item.descricao).slice(0, 300)}` : '.'}`, forca }] : [];
+  const criticidade = criticidadeRequisito(req);
+  return { score, status, criticidade, experiencia_tipo: experienciaDireta ? 'experiencia_direta' : transferivel ? 'experiencia_transferivel' : experiencias.length ? 'experiencia_relacionada' : undefined, evidencias: evid, justificativa: forca ? `Evidência ${experienciaDireta ? 'direta' : transferivel ? 'transferível' : 'declarada'} classificada em ${forca}/5.` : 'Dados insuficientes para avaliar este requisito.', confianca_score: Math.round(Math.min(100, forca * 18 + (req.interpretacao_confianca === 'media' ? 30 : 20) - (transferivel ? 12 : 0))), confianca: forca >= 4 ? 'alta' : forca >= 2 ? 'media' : 'baixa' };
 }
+
 function analisarLocal(entrada) {
   const { fontes, texto: corpus } = corpusCandidato(entrada?.candidato || {});
   const requisitosBrutos = requisitosEstruturados(entrada);
@@ -119,13 +156,16 @@ function analisarLocal(entrada) {
   const avaliados = requisitos.map(req => ({ ...req, ...avaliarRequisito(req, fontes, corpus) }));
   const pesoTotal = avaliados.reduce((s, r) => s + r.peso, 0) || 1;
   const pontos = avaliados.reduce((s, r) => s + r.peso * r.score, 0);
-  const obrigatoriosNaoAtendidos = avaliados.filter(r => r.tipo === 'obrigatorio' && r.status === 'nao_atendido').length;
-  const penalidade = obrigatoriosNaoAtendidos ? Math.min(20, obrigatoriosNaoAtendidos * 8) : 0;
-  const score = Math.max(0, Math.min(100, Math.round(pontos / pesoTotal - penalidade)));
+  const obrigatoriosNaoAtendidos = avaliados.filter(r => r.tipo === 'obrigatorio' && r.status === 'nao_atendido');
+  const penalidade = obrigatoriosNaoAtendidos.reduce((s, r) => s + (r.criticidade === 'critico' ? 25 : r.criticidade === 'importante' ? 10 : 5), 0);
+  const score = Math.max(0, Math.min(100, Math.round(pontos / pesoTotal - Math.min(50, penalidade))));
   const confianca = Math.round(avaliados.reduce((s, r) => s + r.confianca_score * r.peso, 0) / pesoTotal) || 0;
   const dimensoes = {}; for (const r of avaliados) { dimensoes[r.categoria] = (dimensoes[r.categoria] || { pontos: 0, peso: 0 }); dimensoes[r.categoria].pontos += r.score * r.peso; dimensoes[r.categoria].peso += r.peso; }
   for (const d of Object.values(dimensoes)) d.score = Math.round(d.pontos / d.peso);
-  return { requisitos: avaliados, dimensoes, score_compatibilidade: score, confianca_score: confianca, pontos_atencao: avaliados.filter(r => r.status !== 'atendido').map(r => ({ descricao: `Revisar: ${r.descricao}`, fonte: 'dados_disponiveis' })), resumo: 'Índice de aderência estimada entre os requisitos da vaga e as evidências profissionais disponíveis. Não representa probabilidade de contratação.', avisos: ['Análise determinística local, explicável e de apoio à decisão humana.'], obrigatorios_nao_atendidos: obrigatoriosNaoAtendidos };
+  const experiencias = entrada?.candidato?.experiencias || [];
+  const chaves = new Set(); const conflitos = [];
+  for (const e of experiencias) { const k = `${normalizarToken(e.cargo)}|${normalizarToken(e.empresa)}`; if (chaves.has(k) && k !== '|') conflitos.push(`Experiência duplicada ou potencialmente conflitante: ${e.cargo || 'cargo'} — ${e.empresa || 'empresa'}.`); chaves.add(k); }
+  return { requisitos: avaliados, dimensoes, conflitos, score_compatibilidade: score, confianca_score: confianca, pontos_atencao: avaliados.filter(r => r.status !== 'atendido').map(r => ({ descricao: `Revisar: ${r.descricao}`, fonte: 'dados_disponiveis' })), resumo: 'Índice de aderência estimada entre os requisitos da vaga e as evidências profissionais disponíveis. Não representa probabilidade de contratação.', avisos: ['Análise determinística local, explicável e de apoio à decisão humana.'], obrigatorios_nao_atendidos: obrigatoriosNaoAtendidos.length, penalidade_obrigatorios: Math.min(50, penalidade) };
 }
 
 function extrairEntradaDoPrompt(user) {
