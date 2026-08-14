@@ -172,6 +172,7 @@ app.set('trust proxy', 1);
 const ALLOWED_ORIGINS = [
   'https://vagasio.com.br',
   'https://www.vagasio.com.br',
+  'https://vagasio-master-face-preview.onrender.com',
   'https://sistemarecrutsmento.github.io',  // GitHub Pages (frontend)
   'https://sistemarecrutsmento.github.io/vagas',           // GitHub Pages (candidato)
   'https://sistemarecrutsmento.github.io/vagas/admin',     // GitHub Pages (admin)
@@ -2052,7 +2053,7 @@ function encryptFaceTemplate(value){ const iv=crypto.randomBytes(12), c=crypto.c
 function decryptFaceTemplate(row){ const d=crypto.createDecipheriv('aes-256-gcm',FACE_TEMPLATE_KEY,Buffer.from(row.iv,'base64')); d.setAuthTag(Buffer.from(row.tag,'base64')); return JSON.parse(Buffer.concat([d.update(Buffer.from(row.ciphertext,'base64')),d.final()]).toString()); }
 function validFaceDescriptor(v){ return Array.isArray(v) && v.length>=450 && v.length<=1600 && v.every(x=>Number.isFinite(Number(x)) && Math.abs(Number(x))<=2); }
 function faceDistance(a,b){ let s=0,n=Math.min(a.length,b.length); for(let i=0;i<n;i++){const d=Number(a[i])-Number(b[i]);s+=d*d;} return Math.sqrt(s/n); }
-async function faceChallenge(req,purpose,adminId){ const raw=crypto.randomBytes(32).toString('hex'), hash=crypto.createHash('sha256').update(raw).digest('hex'); const command=FACE_COMMANDS[crypto.randomInt(FACE_COMMANDS.length)]; const q=await pool.query("INSERT INTO master_face_challenges(challenge_hash,admin_id,purpose,expires_at,request_ip) VALUES($1,$2,$3,NOW()+INTERVAL '5 minutes',$4) RETURNING id",[hash,adminId||null,purpose,faceIp(req)]); return {challenge:raw,challenge_id:q.rows[0].id,command}; }
+async function faceChallenge(req,purpose,adminId){ const raw=crypto.randomBytes(32).toString('hex'), hash=crypto.createHash('sha256').update(raw).digest('hex'); const command=FACE_COMMANDS[crypto.randomInt(FACE_COMMANDS.length)]; const q=await pool.query("INSERT INTO master_face_challenges(challenge_hash,admin_id,purpose,expires_at,request_ip,command) VALUES($1,$2,$3,NOW()+INTERVAL '5 minutes',$4,$5) RETURNING id",[hash,adminId||null,purpose,faceIp(req),command]); return {challenge:raw,challenge_id:q.rows[0].id,command}; }
 async function faceLocked(adminId,req){ const q=await pool.query("SELECT COUNT(*)::int n FROM master_face_attempts WHERE admin_id=$1 AND outcome='failed' AND created_at>NOW()-INTERVAL '15 minutes'",[adminId]); return q.rows[0].n>=5; }
 async function useFaceChallenge(raw,purpose){ const h=crypto.createHash('sha256').update(String(raw||'')).digest('hex'); const q=await pool.query("UPDATE master_face_challenges SET used_at=NOW() WHERE challenge_hash=$1 AND purpose=$2 AND used_at IS NULL AND expires_at>NOW() RETURNING id,admin_id",[h,purpose]); return q.rows[0]||null; }
 app.get('/api/admin/face/options', faceOriginGuard, faceRate, async (req,res)=>{ try { faceLog('options:start',{origin:req.get('origin')||null}); const adminId=await masterAdminId(); faceLog('template/db admin resolved',{adminId:!!adminId}); const x=await faceChallenge(req,'login',adminId); faceLog('challenge created',{purpose:'login',command:x.command}); res.set('Cache-Control','no-store').json({ok:true,...x,expires_in:300}); } catch(e){ faceLog('options:error',{message:e.message}); console.error('[FACE OPTIONS]',e.message); res.status(500).json({erro:'Não foi possível iniciar a validação facial'}); }});
