@@ -63,6 +63,9 @@ function normalizarRequisito(requisito, indice) {
     descricao: texto(requisito.descricao),
     tipo,
     categoria: texto(requisito.categoria) || 'outros',
+    tipo_requisito: texto(requisito.tipo_requisito) || undefined,
+    criticidade: ['critico', 'importante', 'padrao'].includes(texto(requisito.criticidade)) ? texto(requisito.criticidade) : undefined,
+    experiencia_tipo: texto(requisito.experiencia_tipo) || undefined,
     peso: Number.isFinite(pesoNumerico) && pesoNumerico > 0 ? pesoNumerico : 1,
     status,
     score: Number.isFinite(score) ? Math.max(0, Math.min(100, score)) : undefined,
@@ -88,6 +91,7 @@ function normalizarAnalise(resultado) {
     score_compatibilidade: Number.isFinite(Number(resultado.score_compatibilidade)) ? Math.max(0, Math.min(100, Number(resultado.score_compatibilidade))) : undefined,
     confianca_score: Number.isFinite(Number(resultado.confianca_score)) ? Math.max(0, Math.min(100, Number(resultado.confianca_score))) : undefined,
     dimensoes: resultado.dimensoes && typeof resultado.dimensoes === 'object' ? resultado.dimensoes : {},
+    conflitos: Array.isArray(resultado.conflitos) ? resultado.conflitos.map(texto).filter(Boolean) : [],
     pontos_atencao: Array.isArray(resultado.pontos_atencao)
       ? resultado.pontos_atencao
           .filter(item => item && typeof item === 'object')
