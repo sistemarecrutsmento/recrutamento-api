@@ -608,6 +608,9 @@ async function init() {
       const { up: migration030 } = require('./migrations/030_performance_fase8');
       await migration030();
       console.log('[MIGRATION 030] índices de performance OK');
+      const { up: migration032 } = require('./migrations/032_master_face_auth');
+      await migration032();
+      console.log('[MIGRATION 032] master face auth OK');
     } catch (migrationErr) {
       console.error('[MIGRATION 030] Erro não tratado (mas segui):', migrationErr.message);
     }
