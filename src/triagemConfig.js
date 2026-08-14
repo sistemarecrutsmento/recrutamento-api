@@ -13,7 +13,14 @@ function ambientesPermitidos() {
 
 function triagemAmbienteAutorizado({ ambiente = process.env.NODE_ENV } = {}) {
   const ambienteNormalizado = String(ambiente || '').trim().toLowerCase();
-  if (!ambienteNormalizado || ambienteNormalizado === 'production') return false;
+  if (!ambienteNormalizado) return false;
+  // Production requires an explicit non-preview release flag as well as an
+  // allow-list entry. This prevents an accidental enablement from exposing
+  // AI triage in the live tenant environment.
+  if (ambienteNormalizado === 'production') {
+    return !booleanEnv('TRIAGEM_IA_PREVIEW_ONLY', true)
+      && ambientesPermitidos().includes('production');
+  }
   return ambientesPermitidos().includes(ambienteNormalizado);
 }
 
