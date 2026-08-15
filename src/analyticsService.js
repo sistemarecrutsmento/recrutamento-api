@@ -74,7 +74,7 @@ function fromReq(req, extra = {}) {
     user_id: user.id || user.candidato_id || null,
     empresa_id: user.empresa_id || extra.empresa_id || null,
     sessao_id: req.headers['x-sessao-id'] || null,
-    ip: req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket?.remoteAddress || null,
+    ip: req.ip || req.socket?.remoteAddress || null,
     user_agent: req.headers['user-agent'] || null,
     ...extra
   };
