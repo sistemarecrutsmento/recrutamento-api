@@ -77,7 +77,7 @@ function requisitosEstruturados(entrada) {
     for (const descricao of partes) {
       const s = normalizarToken(descricao);
       const tipo = /diferencial|desejavel|preferencial|considerado um diferencial/.test(s) ? 'desejavel' : (original.tipo || 'obrigatorio');
-      const min = Number((s.match(/(?:minimo|minima|pelo menos)\s*(\d+)\s*ano/) || [])[1] || 0);
+      const min = Number((s.match(/(?:minimo|minima|pelo menos)\s*(?:de\s*)?(\d+)\s*anos?\b/) || [])[1] || 0);
       out.push({ id: `${original.id || 'req'}-${++n}`, descricao, categoria: detectarCategoria(descricao), tipo, peso: pesoBase, minimo_anos: min, interpretacao_confianca: partes.length > 1 ? 'media' : 'baixa' });
     }
   }
