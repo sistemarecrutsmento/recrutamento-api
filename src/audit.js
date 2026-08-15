@@ -54,7 +54,7 @@ async function audit(req, action, opts = {}) {
       action,
       opts.resource_type || null,
       opts.resource_id || null,
-      req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || null,
+      req.ip || req.socket.remoteAddress || null,
       (req.headers['user-agent'] || '').substring(0, 500),
       opts.result || 'success',
       JSON.stringify(sanitizarMetadata(opts.metadata))
