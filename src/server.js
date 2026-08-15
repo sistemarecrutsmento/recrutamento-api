@@ -48,11 +48,6 @@ const ADMIN_NOTIF_EMAIL = process.env.ADMIN_NOTIF_EMAIL || process.env.ADMIN_EMA
 const { authMiddleware, authCandidato, authAdmin, authGlobalRead, authEmpresa, authAdminOnly, denyGlobalPrivateUntilSupport, authCandidatoOrEmpresaOrAdmin, authCandidatoOrAdminStrict, requireAdminEmpresa, requireAdminOuRecrutadorEquipe, requireRecrutadorOuAdmin, requireFinanceiroEmpresa, requireEmpresaViewer, JWT_VERIFY_OPTIONS } = require('./auth');
 const { sanitizeText, sanitizeFilename, escapeContentDispositionFilename } = require('./sanitize');
 
-// Escapa valores dinâmicos antes de inseri-los nos e-mails HTML.
-function escapeEmailHtml(value) {
-  return String(value || '').replace(/[&<>"']/g, c => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c]));
-}
-
 // =========================================================================
 // WHITELISTS DE COLUNAS (defesa contra vazamento de dados sensíveis)
 // =========================================================================
@@ -248,7 +243,7 @@ const RATE_LIMIT_MAX = 5;
 const RATE_LIMIT_WINDOW_MS = 15 * 60 * 1000;
 
 function rateLimitLogin(req, res, next) {
-  const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
   const email = (req.body?.email || '').toLowerCase().trim() || '_noemail';
   const key = `${ip}|${email}`;
   const now = Date.now();
@@ -268,7 +263,7 @@ function rateLimitLogin(req, res, next) {
 }
 
 function rateLimitRegisterFail(req) {
-  const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
   const email = (req.body?.email || '').toLowerCase().trim() || '_noemail';
   const key = `${ip}|${email}`;
   const now = Date.now();
@@ -282,7 +277,7 @@ function rateLimitRegisterFail(req) {
 }
 
 function rateLimitClear(req) {
-  const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
   const email = (req.body?.email || '').toLowerCase().trim() || '_noemail';
   loginRateMap.delete(`${ip}|${email}`);
 }
@@ -303,14 +298,15 @@ const IP_RATE_LIMITS = {
   'chat-download': { max: 120, windowMs: 60 * 60 * 1000 }, // 120 downloads/hora por IP (mitiga scraping)
   'api-read': { max: 600, windowMs: 60 * 60 * 1000 },   // 600 leituras/hora por IP
   'api-write': { max: 120, windowMs: 60 * 60 * 1000 },  // 120 escritas/hora por IP
-  contato: { max: 5, windowMs: 60 * 60 * 1000 }         // 5 contatos/hora por IP
+  contato: { max: 5, windowMs: 60 * 60 * 1000 },
+  face: { max: 12, windowMs: 15 * 60 * 1000 }         // 5 contatos/hora por IP
 };
 
 function rateLimitByIp(routeName) {
   return (req, res, next) => {
     const cfg = IP_RATE_LIMITS[routeName];
     if (!cfg) return next();
-    const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+    const ip = req.ip || req.socket.remoteAddress || 'unknown';
     const key = `${routeName}|${ip}`;
     const now = Date.now();
     const rec = ipRateMap.get(key);
@@ -331,7 +327,7 @@ function rateLimitByIp(routeName) {
 function ipRateRegister(routeName, req) {
   const cfg = IP_RATE_LIMITS[routeName];
   if (!cfg) return;
-  const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || 'unknown';
+  const ip = req.ip || req.socket.remoteAddress || 'unknown';
   const key = `${routeName}|${ip}`;
   const now = Date.now();
   const rec = ipRateMap.get(key) || { count: 0, firstAt: now, blockedUntil: null };
@@ -370,13 +366,10 @@ function authDebug(req, res, next) {
   if (!DEBUG_API_ENABLED) {
     return res.status(404).json({ erro: 'Not found' });
   }
-  // Se DEBUG_API_KEY estiver setada, exige o header. Senão só o flag basta.
-  if (DEBUG_API_KEY) {
-    const k = req.headers['x-debug-key'];
-    if (k !== DEBUG_API_KEY) {
-      return res.status(403).json({ erro: 'debug key inválida' });
-    }
-  }
+  // Debug de produção exige uma chave dedicada; flag sem chave nunca habilita rotas.
+  if (!DEBUG_API_KEY) return res.status(404).json({ erro: 'Not found' });
+  const k = req.headers['x-debug-key'];
+  if (k !== DEBUG_API_KEY) return res.status(403).json({ erro: 'debug key inválida' });
   // A chave de debug é defesa adicional, não substitui autenticação.
   return authAdminOnly(req, res, next);
 }
@@ -783,23 +776,12 @@ if (DEBUG) {
     }
   });
 
-  // ====== Bcrypt: teste isolado ======
-  app.get('/api/_debug/bcrypt', authDebug, async (req, res) => {
-    try {
-      const hash = await bcrypt.hash('089339', 10);
-      const ok = await bcrypt.compare('089339', hash);
-      const ok2 = await bcrypt.compare('errado', hash);
-      res.json({ ok, ok2, hashInicio: hash.substring(0, 7), node: process.version });
-    } catch (e) {
-      return erroInterno(req, res, e, 'api-_debug-bcrypt');
-    }
-  });
-
   // ====== Resetar senha do admin (CRÍTICO) — exige authAdmin ======
   app.post('/api/_debug/reset-admin', authDebug, authAdmin, async (req, res) => {
     try {
       const email = (req.body.email || process.env.EMAIL_FROM || '').toLowerCase();
-      const senha = req.body.senha || process.env.ADMIN_SENHA || '089339';
+      const senha = req.body.senha || process.env.ADMIN_SENHA || '';
+    if (!senha) return res.status(400).json({ erro: 'Senha não configurada' });
       if (!email) return res.status(400).json({ erro: 'email obrigatório' });
       const hash = await bcrypt.hash(senha, 10);
       const { rows } = await pool.query(
@@ -2043,6 +2025,126 @@ app.post('/api/auth/social/apple/callback', async (req, res) => {
 });
 app.post('/api/auth/social/exchange', rateLimitLogin, socialAuth.exchange);
 
+// ============= MASTER SAAS — WEBAUTHN/PASSKEY =============
+// Passkeys are deliberately scoped to the global SaaS admin namespace only.
+const { generateRegistrationOptions, verifyRegistrationResponse, generateAuthenticationOptions, verifyAuthenticationResponse } = require('@simplewebauthn/server');
+const PASSKEY_RP_ID = process.env.WEBAUTHN_RP_ID || 'vagasio.com.br';
+const PASSKEY_ORIGIN = process.env.WEBAUTHN_ORIGIN || 'https://vagasio.com.br';
+if (PASSKEY_RP_ID !== 'vagasio.com.br' || PASSKEY_ORIGIN !== 'https://vagasio.com.br') {
+  console.error('[WEBAUTHN] configuração rejeitada: RP/origin devem ser vagasio.com.br');
+}
+const passkeyRate = rateLimitByIp('admin-passkey');
+function b64u(buf) { return Buffer.from(buf).toString('base64').replace(/\\+/g, '-').replace(/\\//g, '_').replace(/=+$/g, ''); }
+function unb64u(v) { return Buffer.from(String(v).replace(/-/g, '+').replace(/_/g, '/'), 'base64'); }
+function passkeyOriginGuard(req,res,next) { const origin=req.get('origin'); if (origin && origin !== PASSKEY_ORIGIN) return res.status(403).json({erro:'Origem não autorizada'}); next(); }
+async function savePasskeyChallenge(challenge, adminId, purpose, req) {
+  await pool.query('DELETE FROM admin_passkey_challenges WHERE expires_at < NOW() OR used_at IS NOT NULL');
+  await pool.query('INSERT INTO admin_passkey_challenges(challenge, admin_id, purpose, expires_at, request_ip) VALUES($1,$2,$3,NOW()+INTERVAL \'5 minutes\',$4)', [challenge, adminId || null, purpose, req.ip || null]);
+}
+async function consumePasskeyChallenge(challenge, purpose) {
+  const q = await pool.query(`UPDATE admin_passkey_challenges SET used_at=NOW() WHERE challenge=$1 AND purpose=$2 AND used_at IS NULL AND expires_at>NOW() RETURNING admin_id`, [challenge, purpose]);
+  return q.rows[0] || null;
+}
+
+app.get('/api/admin/passkeys/registration-options', passkeyOriginGuard, authAdminOnly, passkeyRate, async (req, res) => {
+  try {
+    const admin = await pool.query('SELECT id,nome,email FROM admins WHERE id=$1 AND role=\'admin\'', [req.user.id]);
+    if (!admin.rowCount) return res.status(403).json({ erro: 'Apenas administradores globais podem cadastrar passkeys' });
+    const existing = await pool.query('SELECT credential_id FROM admin_passkeys WHERE admin_id=$1 AND revoked_at IS NULL', [req.user.id]);
+    const options = await generateRegistrationOptions({
+      rpName: 'VagasIO Master SaaS', rpID: PASSKEY_RP_ID,
+      userName: admin.rows[0].email, userDisplayName: admin.rows[0].nome || admin.rows[0].email,
+      userID: String(admin.rows[0].id), attestationType: 'none',
+      excludeCredentials: existing.rows.map(x => ({ id: x.credential_id })),
+      authenticatorSelection: { residentKey: 'preferred', userVerification: 'required' }
+    });
+    await savePasskeyChallenge(options.challenge, req.user.id, 'registration', req);
+    res.set('Cache-Control', 'no-store').json(options);
+  } catch (e) { console.error('[PASSKEY REG OPTIONS]', e.message); res.status(500).json({ erro: 'Não foi possível iniciar o cadastro' }); }
+});
+
+app.post('/api/admin/passkeys/registration-verify', passkeyOriginGuard, authAdminOnly, passkeyRate, async (req, res) => {
+  try {
+    const response = req.body?.response;
+    if (!response || !response.id || !response.response) return res.status(400).json({ erro: 'Credencial inválida' });
+    const challenge = req.body.challenge;
+    const consumed = await consumePasskeyChallenge(challenge, 'registration');
+    if (!consumed || Number(consumed.admin_id) !== Number(req.user.id)) return res.status(400).json({ erro: 'Desafio expirado ou inválido' });
+    const result = await verifyRegistrationResponse({ response, expectedChallenge: challenge, expectedOrigin: PASSKEY_ORIGIN, expectedRPID: PASSKEY_RP_ID });
+    if (!result.verified || !result.registrationInfo) return res.status(400).json({ erro: 'A biometria não foi validada' });
+    const info = result.registrationInfo;
+    const credentialID = b64u(info.credentialID), credentialPublicKey = Buffer.from(info.credentialPublicKey);
+    await pool.query(`INSERT INTO admin_passkeys(admin_id,credential_id,public_key,counter,transports,device_name) VALUES($1,$2,$3,$4,$5,$6)`, [req.user.id, credentialID, credentialPublicKey, info.counter || 0, JSON.stringify(response.response.transports || []), String(req.body.device_name || 'Passkey').slice(0,80)]);
+    await audit(req, 'security.passkey_registered', { resource_type:'admin_passkey', user_email:req.user.email, metadata:{ admin_id:req.user.id } });
+    res.status(201).json({ ok:true });
+  } catch (e) { console.error('[PASSKEY REG VERIFY]', e.message); res.status(400).json({ erro: 'Não foi possível validar esta passkey' }); }
+});
+
+app.get('/api/admin/passkeys', passkeyOriginGuard, authAdminOnly, async (req,res) => {
+  const q = await pool.query('SELECT id,device_name,created_at,last_used_at FROM admin_passkeys WHERE admin_id=$1 AND revoked_at IS NULL ORDER BY created_at DESC',[req.user.id]);
+  res.json({ passkeys:q.rows });
+});
+app.delete('/api/admin/passkeys/:id', passkeyOriginGuard, authAdminOnly, async (req,res) => {
+  const q = await pool.query('UPDATE admin_passkeys SET revoked_at=NOW() WHERE id=$1 AND admin_id=$2 AND revoked_at IS NULL RETURNING id',[req.params.id,req.user.id]);
+  if (!q.rowCount) return res.status(404).json({ erro:'Passkey não encontrada' });
+  await audit(req,'security.passkey_revoked',{resource_type:'admin_passkey',resource_id:q.rows[0].id});
+  res.json({ok:true});
+});
+
+app.post('/api/admin/passkeys/authentication-options', passkeyOriginGuard, passkeyRate, async (req,res) => {
+  try {
+    const email = String(req.body?.email || '').trim().toLowerCase();
+    const admin = email ? await pool.query('SELECT id FROM admins WHERE email=$1 AND role=\'admin\'', [email]) : { rowCount:0, rows:[] };
+    const creds = admin.rowCount ? await pool.query('SELECT credential_id FROM admin_passkeys WHERE admin_id=$1 AND revoked_at IS NULL',[admin.rows[0].id]) : {rows:[]};
+    const options = await generateAuthenticationOptions({ rpID:PASSKEY_RP_ID, userVerification:'required', allowCredentials:creds.rows.map(x=>({id:x.credential_id})) });
+    await savePasskeyChallenge(options.challenge, admin.rowCount ? admin.rows[0].id : null, 'authentication', req);
+    res.set('Cache-Control','no-store').json(options);
+  } catch (e) { console.error('[PASSKEY AUTH OPTIONS]',e.message); res.status(500).json({erro:'Não foi possível iniciar o login biométrico'}); }
+});
+app.post('/api/admin/passkeys/authentication-verify', passkeyOriginGuard, passkeyRate, async (req,res) => {
+  try {
+    const response = req.body?.response, challenge = req.body?.challenge;
+    if (!response || !challenge) return res.status(400).json({erro:'Resposta inválida'});
+    const bound = await consumePasskeyChallenge(challenge,'authentication');
+    if (!bound?.admin_id) return res.status(401).json({erro:'Desafio expirado ou inválido'});
+    const cred = await pool.query(`SELECT p.*,a.id admin_id,a.nome,a.email,a.role FROM admin_passkeys p JOIN admins a ON a.id=p.admin_id WHERE p.credential_id=$1 AND p.admin_id=$2 AND p.revoked_at IS NULL AND a.role='admin'`,[response.id,bound.admin_id]);
+    if (!cred.rowCount) return res.status(401).json({erro:'Passkey não reconhecida'});
+    const p=cred.rows[0];
+    const result=await verifyAuthenticationResponse({response,expectedChallenge:challenge,expectedOrigin:PASSKEY_ORIGIN,expectedRPID:PASSKEY_RP_ID,authenticator:{credentialID:unb64u(p.credential_id),credentialPublicKey:p.public_key,counter:Number(p.counter)}});
+    if (!result.verified) throw new Error('assertion inválida');
+    const counterUpdate = await pool.query('UPDATE admin_passkeys SET counter=$1,last_used_at=NOW() WHERE id=$2 AND counter=$3 AND revoked_at IS NULL',[result.authenticationInfo.newCounter,p.id,p.counter]);
+    if (!counterUpdate.rowCount) throw new Error('contador de credencial alterado concorrentemente');
+    const token=criarAccessToken({id:p.admin_id,email:p.email,nome:p.nome,tipo:'admin',role:p.role||'admin'}), refresh=criarRefreshToken();
+    await persistirRefresh('admin',p.admin_id,p.email,refresh,req,{user_role:p.role||'admin'});
+    await audit(req,'login.passkey_success',{resource_type:'admin',resource_id:p.admin_id,user_email:p.email});
+    res.json({ok:true,token,refreshToken:refresh,usuario:{id:p.admin_id,nome:p.nome,email:p.email,role:p.role||'admin'}});
+  } catch(e) { await audit(req,'login.passkey_failed',{resource_type:'admin',metadata:{motivo:'assertion_invalida'}}); res.status(401).json({erro:'Não foi possível validar a passkey'}); }
+});
+
+// ============= MASTER SAAS — FACIAL MVP (landmarks + active liveness) =============
+// This is an MVP, not a high-assurance biometric security product. Raw media is never sent to or stored by this API.
+const FACE_TEMPLATE_KEY = crypto.createHash('sha256').update(String(process.env.FACE_TEMPLATE_SECRET || process.env.JWT_SECRET || '')).digest();
+const FACE_COMMANDS = ['blink','turn_left','turn_right','open_mouth','nod'];
+const FACE_DEBUG = process.env.FACE_DEBUG_LOGS === 'true'; // staging only; remove after validation
+function faceLog(event, data={}){ if(FACE_DEBUG) console.log('[FACE-STAGING]', event, data); }
+function faceIp(req){ return req.ip || req.socket.remoteAddress || ''; }
+function faceOriginGuard(req,res,next){ const origin=req.get('origin'); if(origin && origin!==PASSKEY_ORIGIN) return res.status(403).json({erro:'Origem não autorizada'}); next(); }
+const faceRate=(req,res,next)=>rateLimitByIp('face')(req,res,()=>{ipRateRegister('face',req);next();});
+async function masterAdminId(){ if(process.env.MASTER_ADMIN_ID && /^\d+$/.test(process.env.MASTER_ADMIN_ID)) return Number(process.env.MASTER_ADMIN_ID); const q=await pool.query("SELECT id FROM admins WHERE role='admin' ORDER BY id ASC LIMIT 1"); return q.rows[0]?.id || null; }
+function encryptFaceTemplate(value){ const iv=crypto.randomBytes(12), c=crypto.createCipheriv('aes-256-gcm',FACE_TEMPLATE_KEY,iv); const out=Buffer.concat([c.update(Buffer.from(JSON.stringify(value))),c.final()]); return {ciphertext:out.toString('base64'),iv:iv.toString('base64'),tag:c.getAuthTag().toString('base64')}; }
+function decryptFaceTemplate(row){ const d=crypto.createDecipheriv('aes-256-gcm',FACE_TEMPLATE_KEY,Buffer.from(row.iv,'base64')); d.setAuthTag(Buffer.from(row.tag,'base64')); return JSON.parse(Buffer.concat([d.update(Buffer.from(row.ciphertext,'base64')),d.final()]).toString()); }
+function validFaceDescriptor(v){ return Array.isArray(v) && v.length>=450 && v.length<=1600 && v.every(x=>Number.isFinite(Number(x)) && Math.abs(Number(x))<=2); }
+function faceDistance(a,b){ let s=0,n=Math.min(a.length,b.length); for(let i=0;i<n;i++){const d=Number(a[i])-Number(b[i]);s+=d*d;} return Math.sqrt(s/n); }
+async function faceChallenge(req,purpose,adminId){ const raw=crypto.randomBytes(32).toString('hex'), hash=crypto.createHash('sha256').update(raw).digest('hex'); const command=FACE_COMMANDS[crypto.randomInt(FACE_COMMANDS.length)]; const q=await pool.query("INSERT INTO master_face_challenges(challenge_hash,admin_id,purpose,expires_at,request_ip) VALUES($1,$2,$3,NOW()+INTERVAL '5 minutes',$4) RETURNING id",[hash,adminId||null,purpose,faceIp(req)]); return {challenge:raw,challenge_id:q.rows[0].id,command}; }
+async function faceLocked(adminId,req){ const q=await pool.query("SELECT COUNT(*)::int n FROM master_face_attempts WHERE admin_id=$1 AND outcome='failed' AND created_at>NOW()-INTERVAL '15 minutes'",[adminId]); return q.rows[0].n>=5; }
+async function useFaceChallenge(raw,purpose){ const h=crypto.createHash('sha256').update(String(raw||'')).digest('hex'); const q=await pool.query("UPDATE master_face_challenges SET used_at=NOW() WHERE challenge_hash=$1 AND purpose=$2 AND used_at IS NULL AND expires_at>NOW() RETURNING id,admin_id",[h,purpose]); return q.rows[0]||null; }
+app.post('/api/admin/face/options', faceOriginGuard, faceRate, async (req,res)=>{ try { faceLog('options:start',{origin:req.get('origin')||null}); const adminId=await masterAdminId(); faceLog('template/db admin resolved',{adminId:!!adminId}); const x=await faceChallenge(req,'login',adminId); faceLog('challenge created',{purpose:'login',command:x.command}); res.set('Cache-Control','no-store').json({ok:true,...x,expires_in:300}); } catch(e){ faceLog('options:error',{message:e.message}); console.error('[FACE OPTIONS]',e.message); res.status(500).json({erro:'Não foi possível iniciar a validação facial'}); }});
+app.get('/api/admin/face/status', faceOriginGuard, authAdminOnly, async (req,res)=>{ const id=await masterAdminId(); if(Number(req.user.id)!==Number(id)) return res.status(403).json({erro:'Acesso não autorizado'}); const q=await pool.query('SELECT enrolled_at,last_used_at,revoked_at FROM master_face_templates WHERE admin_id=$1',[id]); res.set('Cache-Control','no-store').json({enrolled:!!q.rows[0]&&!q.rows[0].revoked_at,enrolled_at:q.rows[0]?.enrolled_at||null}); });
+app.post('/api/admin/face/enrollment-options', faceOriginGuard, authAdminOnly, faceRate, async (req,res)=>{ try { faceLog('enrollment-options:start',{userId:req.user?.id}); const id=await masterAdminId(); if(Number(req.user.id)!==Number(id)||!req.user.fresh_2fa_at||Date.now()-Number(req.user.fresh_2fa_at)>10*60*1000) return res.status(403).json({erro:'Cadastro facial exige uma sessão recente de senha + 2FA'}); const x=await faceChallenge(req,'enrollment',id); faceLog('challenge created',{purpose:'enrollment',command:x.command}); res.set('Cache-Control','no-store').json({ok:true,...x,consent_version:'face-mvp-v1'}); } catch(e){faceLog('enrollment-options:error',{message:e.message});res.status(500).json({erro:'Não foi possível iniciar o cadastro facial'});} });
+app.post('/api/admin/face/enroll', faceOriginGuard, authAdminOnly, faceRate, async (req,res)=>{ try { faceLog('enroll:start',{userId:req.user?.id,descriptorLength:req.body?.descriptor?.length||0,commandCompleted:req.body?.commandCompleted===true}); const id=await masterAdminId(); if(Number(req.user.id)!==Number(id)||!req.body?.consent||req.body?.commandCompleted!==true||!validFaceDescriptor(req.body.descriptor)) return res.status(400).json({erro:'Consentimento e captura facial válida são obrigatórios'}); const c=await useFaceChallenge(req.body.challenge,'enrollment'); if(!c||Number(c.admin_id)!==Number(id)) return res.status(400).json({erro:'Desafio expirado ou inválido'}); const enc=encryptFaceTemplate(req.body.descriptor.map(Number)); await pool.query(`INSERT INTO master_face_templates(admin_id,ciphertext,iv,tag,consent_version,consented_at,revoked_at) VALUES($1,$2,$3,$4,$5,NOW(),NULL) ON CONFLICT(admin_id) DO UPDATE SET ciphertext=EXCLUDED.ciphertext,iv=EXCLUDED.iv,tag=EXCLUDED.tag,consent_version=EXCLUDED.consent_version,consented_at=NOW(),enrolled_at=NOW(),revoked_at=NULL,last_used_at=NULL`,[id,enc.ciphertext,enc.iv,enc.tag,String(req.body.consent_version||'face-mvp-v1')]); faceLog('template/db persisted',{adminId:id}); await audit(req,'security.face_enrolled',{resource_type:'master_admin_face',resource_id:id,metadata:{consent_version:'face-mvp-v1',raw_media_stored:false}}); res.status(201).json({ok:true}); } catch(e){faceLog('enroll:error',{message:e.message});console.error('[FACE ENROLL]',e.message);res.status(500).json({erro:'Não foi possível concluir o cadastro facial'});} });
+app.delete('/api/admin/face/template', faceOriginGuard, authAdminOnly, async (req,res)=>{ try { const id=await masterAdminId(); if(Number(req.user.id)!==Number(id)||!req.user.fresh_2fa_at||Date.now()-Number(req.user.fresh_2fa_at)>10*60*1000) return res.status(403).json({erro:'Exclusão exige uma sessão recente de senha + 2FA'}); await pool.query('UPDATE master_face_templates SET revoked_at=NOW(),ciphertext=\'\',iv=\'\',tag=\'\' WHERE admin_id=$1',[id]); await audit(req,'security.face_deleted',{resource_type:'master_admin_face',resource_id:id}); res.json({ok:true}); } catch(e){res.status(500).json({erro:'Não foi possível remover o cadastro facial'});} });
+app.post('/api/admin/face/verify', faceOriginGuard, faceRate, async (req,res)=>{ let c=null; try { faceLog('verify:start',{descriptorLength:req.body?.descriptor?.length||0,livenessPassed:req.body?.liveness_passed===true,commandCompleted:req.body?.commandCompleted===true}); const id=await masterAdminId(); if(await faceLocked(id,req)) return res.status(423).json({erro:'Validação facial temporariamente bloqueada; use senha + 2FA'}); c=await useFaceChallenge(req.body?.challenge,'login'); if(!c||Number(c.admin_id)!==Number(id)||req.body?.commandCompleted!==true||req.body?.liveness_passed!==true||!validFaceDescriptor(req.body.descriptor)) throw new Error('invalid'); const q=await pool.query('SELECT * FROM master_face_templates WHERE admin_id=$1 AND revoked_at IS NULL',[id]); if(!q.rowCount||faceDistance(decryptFaceTemplate(q.rows[0]),req.body.descriptor.map(Number))>0.16) throw new Error('mismatch'); faceLog('template/db match ok',{adminId:id}); await pool.query('INSERT INTO master_face_attempts(admin_id,outcome,challenge_id,request_ip) VALUES($1,\'success\',$2,$3)',[id,c.id,faceIp(req)]); await pool.query('UPDATE master_face_templates SET last_used_at=NOW() WHERE admin_id=$1',[id]); const a=await pool.query("SELECT id,nome,email,role FROM admins WHERE id=$1",[id]); const token=criarAccessToken({id,email:a.rows[0].email,nome:a.rows[0].nome,tipo:'admin',role:a.rows[0].role||'admin'}),refresh=criarRefreshToken(); await persistirRefresh('admin',id,a.rows[0].email,refresh,req,{user_role:'admin'}); await audit(req,'login.face_success',{resource_type:'admin',resource_id:id}); res.set('Cache-Control','no-store').json({ok:true,token,refreshToken:refresh,usuario:{id,nome:a.rows[0].nome,email:a.rows[0].email,role:'admin'}}); } catch(e){ faceLog('verify:error',{message:e.message}); if(c) await pool.query("INSERT INTO master_face_attempts(admin_id,outcome,challenge_id,request_ip) VALUES($1,'failed',$2,$3)",[c.admin_id,c.id,faceIp(req)]).catch(()=>{}); await audit(req,'login.face_failed',{resource_type:'admin',metadata:{motivo:'validacao_invalida'}}); res.status(401).json({erro:'Validação facial não concluída; use senha + 2FA'}); } });
+
 // ============= ADMIN/RECRUTADOR =============
 app.post('/api/admin/login', rateLimitLogin, async (req, res) => {
   try {
@@ -2079,7 +2181,7 @@ app.post('/api/admin/login', rateLimitLogin, async (req, res) => {
     rateLimitClear(req);
 
     // ✅ Senha OK → dispara 2FA (NÃO emite JWT)
-    const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || '';
+    const ip = req.ip || req.socket.remoteAddress || '';
     const { codigo_id } = await create2faCode(rows[0].id, 'admin', ip);
 
     // Envia código por e-mail (NUNCA logar o código)
@@ -2217,7 +2319,7 @@ app.post('/api/admin/2fa/verificar', rateLimitByIp('twofa'), async (req, res) =>
     const admin = result.admin;
     // FIX Etapa 2: access (30m) + refresh (7d, hash no DB)
     const accessToken = criarAccessToken({
-      id: admin.id, email: admin.email, nome: admin.nome, tipo: 'admin', role: admin.role || 'admin'
+      id: admin.id, email: admin.email, nome: admin.nome, tipo: 'admin', role: admin.role || 'admin', fresh_2fa_at: Date.now()
     });
     const refresh = criarRefreshToken();
     await persistirRefresh('admin', admin.id, admin.email, refresh, req, { user_role: admin.role || 'admin' });
@@ -2241,7 +2343,7 @@ app.post('/api/admin/2fa/reenviar', rateLimitByIp('twofa'), async (req, res) => 
   try {
     const { codigo_id } = req.body;
     if (!codigo_id) return res.status(400).json({ erro: 'codigo_id obrigatório' });
-    const ip = req.headers['x-forwarded-for']?.split(',')[0]?.trim() || req.socket.remoteAddress || '';
+    const ip = req.ip || req.socket.remoteAddress || '';
     const result = await resend2faCode(codigo_id, ip);
     if (!result.ok) {
       await audit(req, 'login.2fa_resend_failed', { resource_type: 'admin', metadata: { motivo: result.motivo } });
@@ -6325,10 +6427,16 @@ app.get('/api/empresa/vagas/:vaga_id/candidatos', requireEmpresaViewer, async (r
     const { rows } = await pool.query(`
       SELECT c.id, c.status, c.etapa_atual, c.atualizada_em, c.criada_em,
         cd.id as candidato_id, cd.nome, cd.email, cd.celular, cd.foto_url,
-        v.titulo as vaga_titulo, v.etapas
+        v.titulo as vaga_titulo, v.etapas,
+        a.id AS analise_ia_id, a.status AS analise_ia_status,
+        a.score AS analise_ia_score, a.nivel_compatibilidade AS analise_ia_nivel,
+        a.resultado_json AS analise_ia_resultado_json,
+        a.versao AS analise_ia_versao, a.criada_em AS analise_ia_criada_em
       FROM candidaturas c
       JOIN candidatos cd ON cd.id = c.candidato_id
       JOIN vagas v ON v.id = c.vaga_id
+      LEFT JOIN candidatura_analises_ia a
+        ON a.candidatura_id = c.id AND a.empresa_id = v.empresa_id AND a.analise_atual = true
       WHERE c.vaga_id = $1
       ORDER BY c.atualizada_em DESC
     `, [vaga_id]);
