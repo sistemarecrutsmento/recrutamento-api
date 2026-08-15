@@ -5,7 +5,8 @@
   "main": "src/server.js",
   "scripts": {
     "start": "node src/server.js",
-    "dev": "nodemon src/server.js"
+    "dev": "nodemon src/server.js",
+    "test": "node --test test/*.test.js"
   },
   "engines": {
     "node": "18.20.4"
@@ -21,7 +22,8 @@
     "axios": "^1.7.4",
     "cloudinary": "^2.5.1",
     "googleapis": "^100.0.0",
-    "pdf-parse": "^1.1.1"
+    "pdf-parse": "^1.1.1",
+    "@simplewebauthn/server": "^9.0.3"
   },
   "build_ts": "2026-07-28T18:34:18Z"
 }
