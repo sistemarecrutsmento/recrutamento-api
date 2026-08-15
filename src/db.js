@@ -527,10 +527,10 @@ async function init() {
       console.log('[MIGRATION 018] OK');
     } catch (migrationErr) { console.error('[MIGRATION 018] Erro não tratado (mas segui):', migrationErr.message); }
     try {
-      const { up: migration019 } = require('./migrations/020_video_rooms');
-      await migration019();
-      console.log('[MIGRATION 019] video_rooms OK');
-    } catch (migrationErr) { console.error('[MIGRATION 019] Erro não tratado (mas segui):', migrationErr.message); }
+      const { up: migration020 } = require('./migrations/020_video_rooms');
+      await migration020();
+      console.log('[MIGRATION 020] video_rooms OK');
+    } catch (migrationErr) { console.error('[MIGRATION 020] Erro não tratado (mas segui):', migrationErr.message); }
 
     // Triagem IA fica desligada por padrão. A tabela só é criada no ambiente
     // explicitamente habilitado para evitar qualquer impacto em produção.
@@ -611,7 +611,28 @@ async function init() {
     } catch (migrationErr) {
       console.error('[MIGRATION 030] Erro não tratado (mas segui):', migrationErr.message);
     }
-    console.log('Tabelas criadas/verificadas + migrations Fase 1-030 aplicadas');
+    try {
+      const { up: migration031 } = require('./migrations/031_admin_passkeys');
+      await migration031();
+      console.log('[MIGRATION 031] admin passkeys OK');
+    } catch (migrationErr) {
+      console.error('[MIGRATION 031] Erro não tratado (mas segui):', migrationErr.message);
+    }
+    try {
+      const { up: migration032 } = require('./migrations/032_master_face_auth');
+      await migration032();
+      console.log('[MIGRATION 032] master face auth OK');
+    } catch (migrationErr) {
+      console.error('[MIGRATION 032] Erro não tratado (mas segui):', migrationErr.message);
+    }
+    try {
+      const { up: migration033 } = require('./migrations/033_push_subscriptions');
+      await migration033();
+      console.log('[MIGRATION 033] push_subscriptions OK');
+    } catch (migrationErr) {
+      console.error('[MIGRATION 033] Erro não tratado (mas segui):', migrationErr.message);
+    }
+    console.log('Tabelas criadas/verificadas + migrations Fase 1-033 aplicadas');
   } finally {
     client.release();
   }
