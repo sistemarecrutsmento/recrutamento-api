@@ -41,7 +41,7 @@ function hashRefresh(token) {
 async function persistirRefresh(user_type, user_id, user_email, token, req, opts = {}) {
   const tokenHash = hashRefresh(token);
   const expiraEm = new Date(Date.now() + REFRESH_TTL_MS);
-  const ip = (req && (req.ip || req.headers['x-forwarded-for'])) || null;
+  const ip = (req && req.ip) || null;
   const ua = (req && req.headers['user-agent']) || null;
   // user_role e user_empresa_id são OPÇÕES (default null)
   // Se não vierem, ficam null e a migração preenche quando aplicável.
@@ -54,19 +54,24 @@ async function persistirRefresh(user_type, user_id, user_email, token, req, opts
   );
 }
 
-// Valida + retorna o registro. Marca revogado se inválido.
+// Consome o refresh token de forma atômica.
+// O UPDATE condicional garante que apenas uma requisição concorrente consiga
+// consumir o mesmo token. A geração do novo par acontece somente depois deste
+// retorno bem-sucedido.
 async function consumirRefresh(token) {
   const tokenHash = hashRefresh(token);
   const { rows } = await pool.query(
-    `SELECT id, user_type, user_id, user_email, expira_em, revogado_em, user_role, user_empresa_id
-     FROM refresh_tokens WHERE token_hash = $1`,
+    `UPDATE refresh_tokens
+     SET revogado_em = NOW(), revogado_motivo = 'rotacionado'
+     WHERE token_hash = $1
+       AND revogado_em IS NULL
+       AND expira_em > NOW()
+     RETURNING id, user_type, user_id, user_email, expira_em,
+               revogado_em, user_role, user_empresa_id`,
     [tokenHash]
   );
-  if (rows.length === 0) return { valido: false, motivo: 'inexistente' };
-  const t = rows[0];
-  if (t.revogado_em) return { valido: false, motivo: 'revogado' };
-  if (new Date(t.expira_em) < new Date()) return { valido: false, motivo: 'expirado' };
-  return { valido: true, token: t };
+  if (rows.length === 0) return { valido: false, motivo: 'inexistente_ou_indisponivel' };
+  return { valido: true, token: rows[0] };
 }
 
 async function revogarRefresh(token, motivo = 'logout') {
