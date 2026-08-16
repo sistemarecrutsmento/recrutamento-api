@@ -510,13 +510,6 @@ async function init() {
       console.error('[MIGRATION 015] Erro não tratado (mas segui):', migrationErr.message);
     }
 
-    // Triagem IA: flags explícitas e allow-list de ambiente.
-    const triagemHabilitada = ['1','true','yes','sim','on'].includes(String(process.env.TRIAGEM_IA_ENABLED || '').toLowerCase());
-    if (triagemHabilitada && triagemAmbienteAutorizado()) {
-      try { const { up: migration021 } = require('./migrations/021_triagem_ia'); await migration021(); console.log('[MIGRATION 021] candidatura_analises_ia OK'); }
-      catch (migrationErr) { console.error('[MIGRATION 021] erro (segui):', migrationErr.message); }
-    } else if (triagemHabilitada) console.warn('[MIGRATION 021] bloqueada: ambiente não autorizado');
-
     // Migrations 016-017 — checkout e webhooks Asaas.
     try {
       const { up: migration016 } = require('./migrations/016_checkout_asaas');
@@ -534,11 +527,119 @@ async function init() {
       console.log('[MIGRATION 018] OK');
     } catch (migrationErr) { console.error('[MIGRATION 018] Erro não tratado (mas segui):', migrationErr.message); }
     try {
-      const { up: migration019 } = require('./migrations/020_video_rooms');
-      await migration019();
-      console.log('[MIGRATION 019] video_rooms OK');
-    } catch (migrationErr) { console.error('[MIGRATION 019] Erro não tratado (mas segui):', migrationErr.message); }
-    console.log('Tabelas criadas/verificadas + migrations Fase 1-019 aplicadas');
+      const { up: migration020 } = require('./migrations/020_video_rooms');
+      await migration020();
+      console.log('[MIGRATION 020] video_rooms OK');
+    } catch (migrationErr) { console.error('[MIGRATION 020] Erro não tratado (mas segui):', migrationErr.message); }
+
+    // Triagem IA fica desligada por padrão. A tabela só é criada no ambiente
+    // explicitamente habilitado para evitar qualquer impacto em produção.
+    const triagemHabilitada = ['1', 'true', 'yes', 'sim', 'on']
+      .includes(String(process.env.TRIAGEM_IA_ENABLED || '').toLowerCase());
+    const triagemAmbientePermitido = triagemAmbienteAutorizado();
+    if (triagemHabilitada && triagemAmbientePermitido) {
+      try {
+        const { up: migration021 } = require('./migrations/021_triagem_ia');
+        await migration021();
+        console.log('[MIGRATION 021] candidatura_analises_ia OK');
+      } catch (migrationErr) {
+        console.error('[MIGRATION 021] Erro não tratado (mas segui):', migrationErr.message);
+      }
+    } else if (triagemHabilitada) {
+      console.warn('[MIGRATION 021] bloqueada: ambiente não autorizado para Triagem IA');
+    }
+    try {
+      const { up: migration022 } = require('./migrations/022_integridade_candidaturas');
+      await migration022();
+      console.log('[MIGRATION 022] unicidade de candidaturas OK');
+    } catch (migrationErr) {
+      console.error('[MIGRATION 022] Erro não tratado (mas segui):', migrationErr.message);
+    }
+    try {
+      const { up: migration023 } = require('./migrations/023_modo_suporte');
+      await migration023();
+      console.log('[MIGRATION 023] modo de suporte OK');
+    } catch (migrationErr) {
+      console.error('[MIGRATION 023] Erro não tratado (mas segui):', migrationErr.message);
+    }
+    try {
+      const { up: migration024 } = require('./migrations/024_lgpd_retencao');
+      await migration024();
+      console.log('[MIGRATION 024] retenção LGPD OK');
+    } catch (migrationErr) {
+      console.error('[MIGRATION 024] Erro não tratado (mas segui):', migrationErr.message);
+    }
+    try {
+      const { up: migration025 } = require('./migrations/025_candidato_convites');
+      await migration025();
+      console.log('[MIGRATION 025] convites do Banco de Talentos OK');
+    } catch (migrationErr) {
+      console.error('[MIGRATION 025] Erro não tratado (mas segui):', migrationErr.message);
+    }
+    try {
+      const { up: migration026 } = require('./migrations/026_entrevistadores');
+      await migration026();
+      console.log('[MIGRATION 026] entrevistadores de entrevista OK');
+    } catch (migrationErr) {
+      console.error('[MIGRATION 026] Erro não tratado (mas segui):', migrationErr.message);
+    }
+    try {
+      const { up: migration027 } = require('./migrations/027_lgpd_legal_hold');
+      await migration027();
+      console.log('[MIGRATION 027] legal hold LGPD OK');
+    } catch (migrationErr) {
+      console.error('[MIGRATION 027] Erro não tratado (mas segui):', migrationErr.message);
+    }
+    try {
+      const { up: migration028 } = require('./migrations/028_suporte_tickets');
+      await migration028();
+      console.log('[MIGRATION 028] suporte/tickets OK');
+    } catch (migrationErr) {
+      console.error('[MIGRATION 028] Erro não tratado (mas segui):', migrationErr.message);
+    }
+    try {
+      const { up: migration029 } = require('./migrations/029_lgpd_retention_reviews');
+      await migration029();
+      console.log('[MIGRATION 029] LGPD retention reviews OK');
+    } catch (migrationErr) {
+      console.error('[MIGRATION 029] Erro não tratado (mas segui):', migrationErr.message);
+    }
+    try {
+      const { up: migration030 } = require('./migrations/030_performance_fase8');
+      await migration030();
+      console.log('[MIGRATION 030] índices de performance OK');
+    } catch (migrationErr) {
+      console.error('[MIGRATION 030] Erro não tratado (mas segui):', migrationErr.message);
+    }
+    try {
+      const { up: migration031 } = require('./migrations/031_admin_passkeys');
+      await migration031();
+      console.log('[MIGRATION 031] admin passkeys OK');
+    } catch (migrationErr) {
+      console.error('[MIGRATION 031] Erro não tratado (mas segui):', migrationErr.message);
+    }
+    try {
+      const { up: migration032 } = require('./migrations/032_master_face_auth');
+      await migration032();
+      console.log('[MIGRATION 032] master face auth OK');
+    } catch (migrationErr) {
+      console.error('[MIGRATION 032] Erro não tratado (mas segui):', migrationErr.message);
+    }
+    try {
+      const { up: migration034 } = require('./migrations/034_video_room_reschedule');
+      await migration034();
+      console.log('[MIGRATION 034] troca de sala em remarcação OK');
+    } catch (migrationErr) {
+      console.error('[MIGRATION 034] Erro não tratado (mas segui):', migrationErr.message);
+    }
+    try {
+      const { up: migration033 } = require('./migrations/033_push_subscriptions');
+      await migration033();
+      console.log('[MIGRATION 033] push_subscriptions OK');
+    } catch (migrationErr) {
+      console.error('[MIGRATION 033] Erro não tratado (mas segui):', migrationErr.message);
+    }
+    console.log('Tabelas criadas/verificadas + migrations Fase 1-033 aplicadas');
   } finally {
     client.release();
   }
@@ -579,6 +680,6 @@ async function inserirNotificacao(client, user_type, user_id, tipo, titulo, mens
     return { ok: true, id: r.rows[0]?.id };
   } catch (e) {
     console.error('[notificacao] Falha ao inserir:', e.message);
-    return { ok: false, erro: e.message };
+    return { ok: false, erro: 'Falha ao registrar notificação' };
   }
 }
