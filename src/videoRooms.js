@@ -26,14 +26,21 @@ function gate(req, res) {
 }
 function hash(v) { return crypto.createHash('sha256').update(v).digest('hex'); }
 async function access(req, id) {
-  const p = await pool.query(`SELECT ca.id candidatura_id, ca.candidato_id, ca.vaga_id, e.id entrevista_id,
-      COALESCE(v.empresa_id, eu.empresa_id) empresa_id
+  const p = await pool.query(`SELECT ca.id candidatura_id, ca.candidato_id, ca.vaga_id, e.id entrevista_id, e.status entrevista_status, e.data_hora entrevista_data_hora,
+      ca.status candidatura_status, v.status vaga_status, COALESCE(v.empresa_id, eu.empresa_id) empresa_id
     FROM entrevistas e JOIN candidaturas ca ON ca.id=e.candidatura_id
     JOIN vagas v ON v.id=ca.vaga_id
     LEFT JOIN empresa_usuarios eu ON eu.empresa_id=v.empresa_id AND eu.id=$2
     WHERE e.id=$1`, [id, req.user.id]);
   if (!p.rowCount) return null;
-  const r=p.rows[0], isCand=req.user.tipo==='candidato' && Number(r.candidato_id)===Number(req.user.id);
+  const r=p.rows[0];
+  // A room is bound to the currently scheduled interview; cancelled/stale
+  // records must not be resurrected by a cached URL.
+  if (r.entrevista_status !== 'agendada' || ['cancelado','rejeitado','reprovado','contratado'].includes(String(r.candidatura_status)) || ['fechada','encerrada','cancelada'].includes(String(r.vaga_status))) {
+    console.warn('[VIDEO ACCESS DENIED]', JSON.stringify({ interviewId:id, reason:'stale-or-cancelled', interviewStatus:r.entrevista_status, candidatureStatus:r.candidatura_status, vagaStatus:r.vaga_status }));
+    return null;
+  }
+  const isCand=req.user.tipo==='candidato' && Number(r.candidato_id)===Number(req.user.id);
   const isRecruiter=['empresa','recrutador'].includes(req.user.tipo) && Number(req.user.empresa_id)===Number(r.empresa_id);
   const isAdmin=req.user.tipo==='admin';
   return (isCand||isRecruiter||isAdmin) ? {...r, participant_role:isCand?'candidate':'recruiter'} : null;
@@ -43,7 +50,7 @@ async function getOrCreate(req, interviewId) {
   if (!enabled() || !/^wss:\/\//i.test(signalUrl())) return null;
   const a=await access(req, interviewId); if(!a) return null;
   const ttl=Math.min(Math.max(Number(process.env.VAGASIO_VIDEO_ROOM_TTL_SECONDS||7200),900),86400);
-  const existing=await pool.query(`SELECT room_id,candidatura_id,entrevista_id,expires_at,status FROM video_rooms WHERE entrevista_id=$1 AND status='active' LIMIT 1`,[a.entrevista_id]);
+  const existing=await pool.query(`SELECT room_id,candidatura_id,entrevista_id,expires_at,status FROM video_rooms WHERE entrevista_id=$1 AND status='active' AND expires_at>NOW() LIMIT 1`,[a.entrevista_id]);
   if (existing.rowCount) return {...existing.rows[0], participant_role:a.participant_role};
   const q=await pool.query(`INSERT INTO video_rooms(room_id,candidatura_id,entrevista_id,empresa_id,expires_at)
     VALUES($1,$2,$3,$4,NOW()+($5 * INTERVAL '1 second'))
@@ -54,7 +61,7 @@ async function issue(req, room) {
   const q=await pool.query(`SELECT r.*, ca.candidato_id FROM video_rooms r JOIN candidaturas ca ON ca.id=r.candidatura_id WHERE r.room_id=$1`,[room]);
   if(!q.rowCount) return null;
   const r=q.rows[0], isCand=req.user.tipo==='candidato'&&Number(req.user.id)===Number(r.candidato_id), isRec=['empresa','recrutador'].includes(req.user.tipo)&&Number(req.user.empresa_id)===Number(r.empresa_id);
-  if((!isCand&&!isRec)||r.status!=='active'||new Date(r.expires_at)<=new Date()) return null;
+  if((!isCand&&!isRec)||r.status!=='active'||new Date(r.expires_at)<=new Date()) { console.warn('[VIDEO TOKEN DENIED]', JSON.stringify({ roomId:room, userType:req.user?.tipo, reason:'ownership-or-expired' })); return null; }
   const participant_role=isCand?'candidate':'recruiter';
   // Never fall back to the general API secret: this key is shared only with preview signaling.
   const secret=process.env.VAGASIO_VIDEO_JWT_SECRET || process.env.VAGASIO_VIDEO_PREVIEW_JWT_SECRET;
