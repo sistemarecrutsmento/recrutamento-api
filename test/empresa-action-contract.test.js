@@ -18,9 +18,23 @@ test('empresa action clients use canonical protected endpoint and payload', () =
 
 test('canonical server contract remains stage and optimistic-concurrency protected', () => {
   assert.match(server, /app\.post\('\/api\/empresa\/candidatura\/:id\/acao', requireRecrutadorOuAdmin/);
-  assert.match(server, /ehEtapaEmpresa/);
+  assert.doesNotMatch(server, /só pode agir na etapa de entrevista com a empresa\/gestor/);
+  assert.match(server, /requireRecrutadorOuAdmin/);
   assert.match(server, /WHERE id = \$4 AND etapa_atual = \$5 AND status = \$6/);
+  assert.match(server, /empresaVagaFilialScope/);
   assert.match(server, /comentario \|\| motivo/);
+});
+
+test('role matrix keeps viewers read-only and company operators unrestricted by stage', () => {
+  const auth = fs.readFileSync(path.join(__dirname, '../src/auth.js'), 'utf8');
+  assert.match(auth, /function requireRecrutadorOuAdmin/);
+  assert.match(auth, /EMPRESA_ROLES\.ADMIN/);
+  assert.match(auth, /EMPRESA_ROLES\.RECRUTADOR/);
+  assert.match(auth, /function requireEmpresaViewer/);
+  assert.match(html, /viewer-readonly/);
+  assert.match(html, /__empresaRole === 'viewer'/);
+  // Global admin/recruiter tokens are not accepted by the tenant action middleware.
+  assert.match(auth, /req\.user\.tipo !== 'empresa'/);
 });
 
 test('legacy status route cannot execute an unsafe second implementation', () => {

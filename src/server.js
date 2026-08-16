@@ -6840,29 +6840,18 @@ app.post('/api/empresa/candidatura/:id/acao', requireRecrutadorOuAdmin, async (r
     if (acc.rows.length === 0) return res.status(403).json({ erro: 'Sem acesso a esta candidatura' });
     const cand = acc.rows[0];
 
-    // REGRA: a empresa só pode comentar/avançar/reprovar quando a etapa ATUAL da vaga
-    // tiver nome contendo "gestor" ou "empresa" (case-insensitive).
-    // etapa_atual é 0-indexed e aponta a etapa em que o candidato está.
-    // Ex: etapa_atual=3 → etapas[3] = "Entrevista Gestor" → empresa PODE agir.
+    // A autorização de tenant/filial já foi aplicada acima por empresaVagaFilialScope.
+    // Ações operacionais são permitidas ao administrador da empresa e ao recrutador
+    // em qualquer etapa do fluxo; usuários viewer (incluindo filial) não passam pelo
+    // middleware requireRecrutadorOuAdmin. Não confundir escopo de vaga com restrição
+    // de etapa: a antiga trava de "entrevista empresa/gestor" era indevidamente global.
     let etapasArr = cand.etapas;
     if (typeof etapasArr === 'string') { try { etapasArr = JSON.parse(etapasArr); } catch (_) { etapasArr = []; } }
-    const etapaIdx = cand.etapa_atual;
-    const etapaObj = Array.isArray(etapasArr) ? etapasArr[etapaIdx] : null;
-    const etapaNomeAtual = etapaObj == null
-      ? ''
-      : (typeof etapaObj === 'string' ? etapaObj : (etapaObj.nome || etapaObj.titulo || ''));
-    const ehEtapaEmpresa = /gestor|empresa/i.test(etapaNomeAtual || '');
     if (['contratado', 'rejeitado', 'reprovado', 'cancelado'].includes(cand.status) && acao !== 'reabrir') {
       return res.status(409).json({ erro: 'Candidatura encerrada; reabra antes de agir' });
     }
     if (acao === 'avancar' && Array.isArray(etapasArr) && cand.etapa_atual + 1 >= etapasArr.length) {
       return res.status(409).json({ erro: 'A empresa não pode concluir a contratação; essa ação exige o fluxo administrativo final' });
-    }
-
-    if (['avancar', 'reprovar', 'comentar'].includes(acao) && !ehEtapaEmpresa) {
-      return res.status(403).json({
-        erro: `A empresa só pode agir na etapa de entrevista com a empresa/gestor (etapa atual: "${etapaNomeAtual || '—'}").`
-      });
     }
 
     // Adiciona entrada no histórico
