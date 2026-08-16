@@ -632,6 +632,17 @@ async function init() {
     } catch (migrationErr) {
       console.error('[MIGRATION 034] Erro não tratado (mas segui):', migrationErr.message);
     }
+    // Migration 035 — currículo PDF importado persistido por candidato
+    try {
+      const { up: migration035 } = require('./migrations/035_curriculo_candidato');
+      const client35 = await pool.connect();
+      try {
+        await migration035(client35);
+        console.log('[MIGRATION 035] currículo persistido OK');
+      } finally { client35.release(); }
+    } catch (migrationErr) {
+      console.error('[MIGRATION 035] Erro não tratado (mas segui):', migrationErr.message);
+    }
     try {
       const { up: migration033 } = require('./migrations/033_push_subscriptions');
       await migration033();
