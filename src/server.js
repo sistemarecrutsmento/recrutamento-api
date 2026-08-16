@@ -193,6 +193,8 @@ app.use(cors({
 // antes do parser global. O limite binário real continua sendo validado por
 // validateBase64File() em cada rota.
 app.use('/api/candidato/analisar-curriculo', express.json({ limit: '10mb' }));
+// O complemento do cadastro também pode carregar o PDF original (até 7 MB + overhead base64).
+app.use('/api/candidato/cadastrar', express.json({ limit: '10mb' }));
 app.use('/api/candidato/foto', express.json({ limit: '8mb' }));
 app.use('/api/candidatura/:id/documentos', express.json({ limit: '50mb' }));
 app.use('/api/chat/:candidatura_id/upload', express.json({ limit: '9mb' }));
@@ -1139,6 +1141,34 @@ app.post('/api/candidato/analisar-curriculo', rateLimitByIp('upload'), async (re
   }
 });
 
+// Persiste o PDF original importado no fluxo de cadastro. A tabela é 1:1 por candidato
+// e não é exposta no perfil público; só o candidato autenticado/admin autorizado poderá
+// receber uma rota de download futura. O snapshot parseado permite auditoria/reprocessamento.
+async function persistirCurriculoCandidato(candidatoId, arquivo) {
+  if (!arquivo || !arquivo.base64) return;
+  const validacao = validateBase64File(arquivo.base64, 'application/pdf', 7 * 1024 * 1024, arquivo.nome);
+  if (!validacao.ok) {
+    const err = new Error('Currículo PDF inválido ou maior que 7 MB.');
+    err.statusCode = 400;
+    throw err;
+  }
+  const nome = sanitizeFilename(arquivo.nome || 'curriculo.pdf') || 'curriculo.pdf';
+  await pool.query(`
+    INSERT INTO curriculos_candidato
+      (candidato_id, arquivo_nome, mime_type, tamanho_bytes, base64_data, dados_importados, diagnostico, atualizado_em)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+    ON CONFLICT (candidato_id) DO UPDATE SET
+      arquivo_nome=EXCLUDED.arquivo_nome, mime_type=EXCLUDED.mime_type,
+      tamanho_bytes=EXCLUDED.tamanho_bytes, base64_data=EXCLUDED.base64_data,
+      dados_importados=EXCLUDED.dados_importados, diagnostico=EXCLUDED.diagnostico,
+      atualizado_em=NOW()
+  `, [
+    candidatoId, nome, 'application/pdf', validacao.buffer.length, arquivo.base64,
+    arquivo.dados_importados ? JSON.stringify(arquivo.dados_importados) : null,
+    arquivo.diagnostico ? JSON.stringify(arquivo.diagnostico) : null
+  ]);
+}
+
 // ============= CANDIDATO - CADASTRO COM SENHA (NOVO) =============
 // Cria conta nova com email+senha (sem código de verificação).
 // Recebe dados básicos; o resto do perfil (endereço, formação, etc.) pode ser completado depois em /api/candidato/cadastrar.
@@ -1350,6 +1380,12 @@ app.post('/api/candidato/cadastrar', authCandidato, async (req, res) => {
       candidatoId = upd.rows[0].id;
     }
 
+    // O anexo só é persistido depois de a conta existir, mas na mesma conclusão do wizard.
+    // Se falhar, a resposta é erro e o candidato pode repetir o complemento sem recriar a conta.
+    if (candidatoId && d.curriculo_arquivo) {
+      await persistirCurriculoCandidato(candidatoId, d.curriculo_arquivo);
+    }
+
     // experiencias - apaga e recria
     if (candidatoId) {
       await pool.query('DELETE FROM experiencias WHERE candidato_id = $1', [candidatoId]);
@@ -1366,8 +1402,8 @@ app.post('/api/candidato/cadastrar', authCandidato, async (req, res) => {
 
     res.json({ ok: true, candidato: result.rows[0] });
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ erro: 'Erro ao salvar cadastro' });
+    console.error('[CANDIDATO CADASTRO]', e.message);
+    res.status(e.statusCode || 500).json({ erro: e.statusCode ? e.message : 'Erro ao salvar cadastro' });
   }
 });
 
