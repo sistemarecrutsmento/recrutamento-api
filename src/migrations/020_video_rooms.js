@@ -15,6 +15,10 @@ async function up() {
       UNIQUE(candidatura_id, entrevista_id)
     );
     CREATE INDEX IF NOT EXISTS idx_video_rooms_tenant ON video_rooms(empresa_id, candidatura_id);
+    -- A entrevista pode ser remarcada: apenas uma sala ativa por entrevista,
+    -- preservando o histórico de links encerrados.
+    ALTER TABLE video_rooms DROP CONSTRAINT IF EXISTS video_rooms_candidatura_id_entrevista_id_key;
+    CREATE UNIQUE INDEX IF NOT EXISTS uq_video_rooms_active_interview ON video_rooms(entrevista_id) WHERE status='active';
     CREATE TABLE IF NOT EXISTS video_participant_tokens (
       id BIGSERIAL PRIMARY KEY,
       room_id TEXT NOT NULL REFERENCES video_rooms(room_id) ON DELETE CASCADE,
