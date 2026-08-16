@@ -6824,7 +6824,7 @@ app.post('/api/empresa/candidatura/:id/acao', requireRecrutadorOuAdmin, async (r
   const { acao, motivo, comentario } = req.body; // acao: 'avancar' | 'reprovar' | 'comentar'
     // 'comentario' tem prioridade sobre 'motivo' (frontend manda ambos pra garantir)
     const parecer = (comentario || motivo || '').trim();
-  if (!['avancar', 'reprovar', 'comentar'].includes(acao)) {
+  if (!['avancar', 'reprovar', 'comentar', 'reabrir'].includes(acao)) {
     return res.status(400).json({ erro: 'Ação inválida' });
   }
   try {
@@ -6852,7 +6852,7 @@ app.post('/api/empresa/candidatura/:id/acao', requireRecrutadorOuAdmin, async (r
       ? ''
       : (typeof etapaObj === 'string' ? etapaObj : (etapaObj.nome || etapaObj.titulo || ''));
     const ehEtapaEmpresa = /gestor|empresa/i.test(etapaNomeAtual || '');
-    if (['contratado', 'rejeitado', 'reprovado', 'cancelado'].includes(cand.status)) {
+    if (['contratado', 'rejeitado', 'reprovado', 'cancelado'].includes(cand.status) && acao !== 'reabrir') {
       return res.status(409).json({ erro: 'Candidatura encerrada; reabra antes de agir' });
     }
     if (acao === 'avancar' && Array.isArray(etapasArr) && cand.etapa_atual + 1 >= etapasArr.length) {
@@ -6878,6 +6878,9 @@ app.post('/api/empresa/candidatura/:id/acao', requireRecrutadorOuAdmin, async (r
     } else if (acao === 'reprovar') {
       novoStatus = 'rejeitado';
       hist.push({ tipo: 'reprovar', por: `empresa:${empresa_nome}`, quando: agora, motivo: parecer || '' });
+    } else if (acao === 'reabrir') {
+      novoStatus = 'em_andamento';
+      hist.push({ tipo: 'reabrir', por: `empresa:${empresa_nome}`, quando: agora, motivo: parecer || '' });
     } else if (acao === 'comentar') {
       hist.push({ tipo: 'comentario', por: `empresa:${empresa_nome}`, quando: agora, texto: parecer });
     }
