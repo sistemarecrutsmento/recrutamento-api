@@ -1,4 +1,5 @@
 const pdfParse = require('pdf-parse');
+const { completarJSON } = require('./iaService');
 
 const EMPTY = () => ({
   dados_pessoais: { nome: '', email: '', celular: '', cpf: '', data_nascimento: '', sexo: '' },
@@ -108,12 +109,18 @@ function compatibilidadeVagasIO(r) {
 }
 
 async function interpretarComGroq(texto) {
-  if (!process.env.GROQ_API_KEY) return null;
-  const prompt = `Extraia este currículo para o JSON pedido. Não invente nada. Campos ausentes ficam vazios. Cada emprego é um item independente. sobre_voce contém somente resumo/perfil/objetivo; nunca experiências, formação ou competências. Use datas YYYY-MM ou YYYY; não invente mês. Retorne apenas JSON válido no schema: {"dados_pessoais":{"nome":"","email":"","celular":"","cpf":"","data_nascimento":"","sexo":""},"endereco":{"cep":"","estado":"","cidade":"","bairro":"","logradouro":"","numero":"","complemento":""},"perfil":{"sobre_voce":""},"formacao":[{"nivel":"","curso":"","instituicao":"","situacao":"","data_conclusao":""}],"experiencias":[{"empresa":"","cargo":"","inicio":"","fim":"","emprego_atual":false,"descricao":""}],"competencias":[],"idiomas":[]}\n\nCURRÍCULO:\n${texto.slice(0, 45000)}`;
-  const resp = await fetch('https://api.groq.com/openai/v1/chat/completions', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${process.env.GROQ_API_KEY}` }, body: JSON.stringify({ model: process.env.GROQ_MODEL || 'llama-3.1-8b-instant', temperature: 0, max_tokens: 4000, response_format: { type: 'json_object' }, messages: [{ role: 'system', content: 'Você é um extrator de dados. Retorne somente JSON e nunca invente.' }, { role: 'user', content: prompt }] }) });
-  if (!resp.ok) throw new Error(`Groq ${resp.status}`); const j = await resp.json(); const c = j?.choices?.[0]?.message?.content; return c ? JSON.parse(String(c).replace(/^```json\s*|\s*```$/g, '').trim()) : null;
-}
+  const prompt = `Extraia este currículo para o JSON pedido. Não invente nada. Campos ausentes ficam vazios. Cada emprego é um item independente. sobre_voce contém somente resumo/perfil/objetivo; nunca experiências, formação ou competências. Use datas YYYY-MM ou YYYY; não invente mês. Retorne apenas JSON válido no schema: {"dados_pessoais":{"nome":"","email":"","celular":"","cpf":"","data_nascimento":"","sexo":""},"endereco":{"cep":"","estado":"","cidade":"","bairro":"","logradouro":"","numero":"","complemento":""},"perfil":{"sobre_voce":""},"formacao":[{"nivel":"","curso":"","instituicao":"","situacao":"","data_conclusao":""}],"experiencias":[{"empresa":"","cargo":"","inicio":"","fim":"","emprego_atual":false,"descricao":""}],"competencias":[],"idiomas":[]}
 
+CURRÍCULO:
+${texto.slice(0, 45000)}`;
+  return completarJSON({
+    system: 'Você é um extrator de dados. Retorne somente JSON e nunca invente.',
+    user: prompt,
+    model: process.env.GROQ_MODEL || 'llama-3.1-8b-instant',
+    temperature: 0,
+    maxTokens: 4000
+  });
+}
 function resumoDiagnostico(nome, valor) {
   const r = { etapa: nome, tipo: typeof valor };
   if (typeof valor === 'string') { r.caracteres = valor.length; r.linhas = valor ? valor.split('\n').length : 0; }
@@ -131,7 +138,15 @@ async function analisarCurriculo(buffer) {
   const parsed = await pdfParse(buffer); const bruto = String(parsed.text || ''); const texto = normalizarTexto(bruto);
   if (texto.replace(/\s/g, '').length < 80) { const err = new Error('Este PDF não contém texto legível. Tente um PDF exportado com texto ou preencha manualmente.'); err.code = 'PDF_SEM_TEXTO'; throw err; }
   const det = extrairDeterministico(texto); let iaBruta = null; let ia = null; let iaErro = '';
-  try { iaBruta = await interpretarComGroq(texto); ia = sanearIA(iaBruta); } catch (e) { iaErro = e.message; console.warn('[CURRICULO IA FALLBACK]', e.message); ia = sanearIA(null); }
+  try {
+    if (String(process.env.TRIAGEM_IA_PROVIDER || '').toLowerCase() === 'local') {
+      iaErro = 'Extração externa desativada; utilizado parser determinístico local.';
+      ia = sanearIA(null);
+    } else {
+      iaBruta = await interpretarComGroq(texto);
+      ia = sanearIA(iaBruta);
+    }
+  } catch (e) { iaErro = e.message; console.warn('[CURRICULO IA FALLBACK]', e.message); ia = sanearIA(null); }
   const r = fundir(ia, det); const final = compatibilidadeVagasIO(r);
   const diagnostico = [resumoDiagnostico('A_texto_bruto', bruto), resumoDiagnostico('B_texto_normalizado', texto), resumoDiagnostico('C_parser_deterministico', det), resumoDiagnostico('D_ia_bruta', iaBruta || {}), resumoDiagnostico('E_ia_validada', ia), resumoDiagnostico('F_fusao', r), resumoDiagnostico('G_resposta_frontend', final), { etapa: 'ia_status', executada: !!iaBruta, erro: iaErro || null, caracteres_enviados_ia: Math.min(texto.length, 45000) }];
   return { dados: final, estrutura: r, texto_caracteres: texto.length, diagnostico };
