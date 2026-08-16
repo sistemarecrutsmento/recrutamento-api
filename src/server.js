@@ -193,6 +193,8 @@ app.use(cors({
 // antes do parser global. O limite binário real continua sendo validado por
 // validateBase64File() em cada rota.
 app.use('/api/candidato/analisar-curriculo', express.json({ limit: '10mb' }));
+// O complemento do cadastro também pode carregar o PDF original (até 7 MB + overhead base64).
+app.use('/api/candidato/cadastrar', express.json({ limit: '10mb' }));
 app.use('/api/candidato/foto', express.json({ limit: '8mb' }));
 app.use('/api/candidatura/:id/documentos', express.json({ limit: '50mb' }));
 app.use('/api/chat/:candidatura_id/upload', express.json({ limit: '9mb' }));
@@ -1139,6 +1141,34 @@ app.post('/api/candidato/analisar-curriculo', rateLimitByIp('upload'), async (re
   }
 });
 
+// Persiste o PDF original importado no fluxo de cadastro. A tabela é 1:1 por candidato
+// e não é exposta no perfil público; só o candidato autenticado/admin autorizado poderá
+// receber uma rota de download futura. O snapshot parseado permite auditoria/reprocessamento.
+async function persistirCurriculoCandidato(candidatoId, arquivo) {
+  if (!arquivo || !arquivo.base64) return;
+  const validacao = validateBase64File(arquivo.base64, 'application/pdf', 7 * 1024 * 1024, arquivo.nome);
+  if (!validacao.ok) {
+    const err = new Error('Currículo PDF inválido ou maior que 7 MB.');
+    err.statusCode = 400;
+    throw err;
+  }
+  const nome = sanitizeFilename(arquivo.nome || 'curriculo.pdf') || 'curriculo.pdf';
+  await pool.query(`
+    INSERT INTO curriculos_candidato
+      (candidato_id, arquivo_nome, mime_type, tamanho_bytes, base64_data, dados_importados, diagnostico, atualizado_em)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,NOW())
+    ON CONFLICT (candidato_id) DO UPDATE SET
+      arquivo_nome=EXCLUDED.arquivo_nome, mime_type=EXCLUDED.mime_type,
+      tamanho_bytes=EXCLUDED.tamanho_bytes, base64_data=EXCLUDED.base64_data,
+      dados_importados=EXCLUDED.dados_importados, diagnostico=EXCLUDED.diagnostico,
+      atualizado_em=NOW()
+  `, [
+    candidatoId, nome, 'application/pdf', validacao.buffer.length, arquivo.base64,
+    arquivo.dados_importados ? JSON.stringify(arquivo.dados_importados) : null,
+    arquivo.diagnostico ? JSON.stringify(arquivo.diagnostico) : null
+  ]);
+}
+
 // ============= CANDIDATO - CADASTRO COM SENHA (NOVO) =============
 // Cria conta nova com email+senha (sem código de verificação).
 // Recebe dados básicos; o resto do perfil (endereço, formação, etc.) pode ser completado depois em /api/candidato/cadastrar.
@@ -1350,6 +1380,12 @@ app.post('/api/candidato/cadastrar', authCandidato, async (req, res) => {
       candidatoId = upd.rows[0].id;
     }
 
+    // O anexo só é persistido depois de a conta existir, mas na mesma conclusão do wizard.
+    // Se falhar, a resposta é erro e o candidato pode repetir o complemento sem recriar a conta.
+    if (candidatoId && d.curriculo_arquivo) {
+      await persistirCurriculoCandidato(candidatoId, d.curriculo_arquivo);
+    }
+
     // experiencias - apaga e recria
     if (candidatoId) {
       await pool.query('DELETE FROM experiencias WHERE candidato_id = $1', [candidatoId]);
@@ -1366,8 +1402,8 @@ app.post('/api/candidato/cadastrar', authCandidato, async (req, res) => {
 
     res.json({ ok: true, candidato: result.rows[0] });
   } catch (e) {
-    console.error(e);
-    res.status(500).json({ erro: 'Erro ao salvar cadastro' });
+    console.error('[CANDIDATO CADASTRO]', e.message);
+    res.status(e.statusCode || 500).json({ erro: e.statusCode ? e.message : 'Erro ao salvar cadastro' });
   }
 });
 
@@ -4175,10 +4211,11 @@ app.get('/api/admin/entrevistas', authAdminOnly, denyGlobalPrivateUntilSupport, 
     }
     const r = await pool.query(`
       SELECT e.id, e.candidatura_id, e.etapa, e.data_hora, e.duracao_minutos, e.local,
-             NULL AS link_reuniao, e.observacoes, e.status, e.criado_em,
+             NULL AS link_reuniao, vr.room_id AS video_room_id, e.observacoes, e.status, e.criado_em,
              v.titulo as vaga_titulo, v.id as vaga_id,
              c.nome as candidato_nome, c.email as candidato_email, c.celular as candidato_telefone
       FROM entrevistas e
+      LEFT JOIN video_rooms vr ON vr.entrevista_id=e.id AND vr.status='active'
       JOIN candidaturas cd ON cd.id = e.candidatura_id
       JOIN candidatos c ON c.id = cd.candidato_id
       JOIN vagas v ON v.id = cd.vaga_id
@@ -4196,6 +4233,19 @@ app.get('/api/admin/entrevistas', authAdminOnly, denyGlobalPrivateUntilSupport, 
 app.put('/api/admin/entrevista/:id', authAdminOnly, denyGlobalPrivateUntilSupport, async (req, res) => {
   try {
     const { status, data_hora, link_reuniao, observacoes, duracao_minutos, local } = req.body;
+    const entrevistaId = parseInt(req.params.id, 10);
+    if (!Number.isInteger(entrevistaId) || entrevistaId <= 0) return res.status(400).json({ erro: 'ID de entrevista inválido' });
+    // Uma remarcação online troca a sala: o link antigo nunca deve apontar para
+    // a nova data. A sala nova é criada somente depois que a entrevista foi
+    // atualizada, mantendo o vínculo entrevista -> link persistente.
+    let salaAnterior = null;
+    if (data_hora) {
+      const old = await pool.query(`SELECT e.id, e.local, vr.room_id
+        FROM entrevistas e LEFT JOIN video_rooms vr ON vr.entrevista_id=e.id AND vr.status='active'
+        WHERE e.id=$1`, [entrevistaId]);
+      if (!old.rowCount) return res.status(404).json({ erro: 'Entrevista não encontrada' });
+      salaAnterior = old.rows[0].room_id && /online|video/i.test(String(old.rows[0].local || '')) ? old.rows[0].room_id : null;
+    }
     const updates = [];
     const values = [];
     let i = 1;
@@ -4207,11 +4257,22 @@ app.put('/api/admin/entrevista/:id', authAdminOnly, denyGlobalPrivateUntilSuppor
     if (local !== undefined) { updates.push(`local = $${i++}`); values.push(local); }
     if (updates.length === 0) return res.status(400).json({ erro: 'Nada para atualizar' });
     updates.push(`atualizado_em = NOW()`);
-    values.push(req.params.id);
+    values.push(entrevistaId);
     const r = await pool.query(`UPDATE entrevistas SET ${updates.join(', ')} WHERE id = $${i}
       RETURNING id, candidatura_id, etapa, data_hora, duracao_minutos, local, link_reuniao, google_event_id, observacoes, status, criado_em, criado_por`, values);
     if (r.rows.length === 0) return res.status(404).json({ erro: 'Entrevista não encontrada' });
-    res.json({ ok: true, entrevista: r.rows[0] });
+    let video = null;
+    if (data_hora && salaAnterior) {
+      await pool.query(`UPDATE video_rooms SET status='ended', ended_at=NOW() WHERE room_id=$1 AND status='active'`, [salaAnterior]);
+      const previousUser = req.user;
+      try {
+        req.user = { ...previousUser, tipo: 'admin' };
+        const novaSala = await videoRooms.getOrCreate(req, entrevistaId);
+        if (!novaSala) return res.status(503).json({ erro: 'Não foi possível criar o novo link da videochamada', codigo: 'VAGASIO_ROOM_UNAVAILABLE' });
+        video = { provider: 'vagasio', room_id: novaSala.room_id, roomId: novaSala.room_id, replaced_room_id: salaAnterior };
+      } finally { req.user = previousUser; }
+    }
+    res.json({ ok: true, entrevista: r.rows[0], video });
   } catch (e) {
     console.error('[ENTREVISTA ATUALIZAR ERRO]', e);
     return erroInterno(req, res, e, 'api-admin-entrevista-:id');
@@ -6763,7 +6824,7 @@ app.post('/api/empresa/candidatura/:id/acao', requireRecrutadorOuAdmin, async (r
   const { acao, motivo, comentario } = req.body; // acao: 'avancar' | 'reprovar' | 'comentar'
     // 'comentario' tem prioridade sobre 'motivo' (frontend manda ambos pra garantir)
     const parecer = (comentario || motivo || '').trim();
-  if (!['avancar', 'reprovar', 'comentar'].includes(acao)) {
+  if (!['avancar', 'reprovar', 'comentar', 'reabrir'].includes(acao)) {
     return res.status(400).json({ erro: 'Ação inválida' });
   }
   try {
@@ -6779,29 +6840,18 @@ app.post('/api/empresa/candidatura/:id/acao', requireRecrutadorOuAdmin, async (r
     if (acc.rows.length === 0) return res.status(403).json({ erro: 'Sem acesso a esta candidatura' });
     const cand = acc.rows[0];
 
-    // REGRA: a empresa só pode comentar/avançar/reprovar quando a etapa ATUAL da vaga
-    // tiver nome contendo "gestor" ou "empresa" (case-insensitive).
-    // etapa_atual é 0-indexed e aponta a etapa em que o candidato está.
-    // Ex: etapa_atual=3 → etapas[3] = "Entrevista Gestor" → empresa PODE agir.
+    // A autorização de tenant/filial já foi aplicada acima por empresaVagaFilialScope.
+    // Ações operacionais são permitidas ao administrador da empresa e ao recrutador
+    // em qualquer etapa do fluxo; usuários viewer (incluindo filial) não passam pelo
+    // middleware requireRecrutadorOuAdmin. Não confundir escopo de vaga com restrição
+    // de etapa: a antiga trava de "entrevista empresa/gestor" era indevidamente global.
     let etapasArr = cand.etapas;
     if (typeof etapasArr === 'string') { try { etapasArr = JSON.parse(etapasArr); } catch (_) { etapasArr = []; } }
-    const etapaIdx = cand.etapa_atual;
-    const etapaObj = Array.isArray(etapasArr) ? etapasArr[etapaIdx] : null;
-    const etapaNomeAtual = etapaObj == null
-      ? ''
-      : (typeof etapaObj === 'string' ? etapaObj : (etapaObj.nome || etapaObj.titulo || ''));
-    const ehEtapaEmpresa = /gestor|empresa/i.test(etapaNomeAtual || '');
-    if (['contratado', 'rejeitado', 'reprovado', 'cancelado'].includes(cand.status)) {
+    if (['contratado', 'rejeitado', 'reprovado', 'cancelado'].includes(cand.status) && acao !== 'reabrir') {
       return res.status(409).json({ erro: 'Candidatura encerrada; reabra antes de agir' });
     }
     if (acao === 'avancar' && Array.isArray(etapasArr) && cand.etapa_atual + 1 >= etapasArr.length) {
       return res.status(409).json({ erro: 'A empresa não pode concluir a contratação; essa ação exige o fluxo administrativo final' });
-    }
-
-    if (['avancar', 'reprovar', 'comentar'].includes(acao) && !ehEtapaEmpresa) {
-      return res.status(403).json({
-        erro: `A empresa só pode agir na etapa de entrevista com a empresa/gestor (etapa atual: "${etapaNomeAtual || '—'}").`
-      });
     }
 
     // Adiciona entrada no histórico
@@ -6817,6 +6867,9 @@ app.post('/api/empresa/candidatura/:id/acao', requireRecrutadorOuAdmin, async (r
     } else if (acao === 'reprovar') {
       novoStatus = 'rejeitado';
       hist.push({ tipo: 'reprovar', por: `empresa:${empresa_nome}`, quando: agora, motivo: parecer || '' });
+    } else if (acao === 'reabrir') {
+      novoStatus = 'em_andamento';
+      hist.push({ tipo: 'reabrir', por: `empresa:${empresa_nome}`, quando: agora, motivo: parecer || '' });
     } else if (acao === 'comentar') {
       hist.push({ tipo: 'comentario', por: `empresa:${empresa_nome}`, quando: agora, texto: parecer });
     }
